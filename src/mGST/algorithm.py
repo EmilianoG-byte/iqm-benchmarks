@@ -246,8 +246,9 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     B_new = update_B_geodesic(B, Delta, a)
     return B_new
 
+from mGST.low_level_jit import dK_jax
 
-def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA"):
+def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False):
     """Do Riemannian gradient descent optimization step on gates
 
     Parameters
@@ -288,9 +289,13 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA"):
     pdim = int(np.sqrt(r))
     n = rK * pdim
     Delta = np.zeros((d, n, pdim)).astype(np.complex128)
-    X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
-
-    dK_ = dK(X, K, E, rho, J, y, d, r, rK)
+    
+    if not use_jax:
+        X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
+        dK_ = dK(X, K, E, rho, J, y, d, r, rK)
+    else:
+        dK_ = dK_jax( K, E, rho, J, y, d, r)
+    
     for k in np.where(~fixed_gates)[0]:
         # derivative
         Fy = dK_[k].reshape(n, pdim)

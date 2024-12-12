@@ -140,6 +140,78 @@ def objf(X, E, rho, J, y):
             objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
     return objf_ / m / n_povm
 
+import jax
+import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
+# @jax.jit
+def cost_function_jax(K, d, r, E, rho, J, y):
+    """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
+
+    This function computes the objective function value based on input matrices X, POVM elements E,
+    density matrix rho, and target values y.
+
+    Parameters
+    ----------
+    K : numpy.ndarray
+        Kraus tensor (see dimensions)
+    d: 
+    r: 
+    E : numpy.ndarray
+        A 2D array representing the POVM elements, of shape (n_povm, r).
+    rho : numpy.ndarray
+        A 1D array representing the density matrix.
+    J : numpy.ndarray
+        A 2D array representing the indices for which the objective function will be evaluated.
+    y : numpy.ndarray
+        A 2D array of shape (n_povm, len(J)) containing the target values.
+
+    Returns
+    -------
+    float
+        The objective function value for the given set of matrices, POVM elements,
+        and target values, normalized by m and n_povm.
+    """
+    X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
+    m = len(J)
+    n_povm = y.shape[0]
+    objf_ = 0
+    for i in prange(m):  # pylint: disable=not-an-iterable
+        j = J[i][J[i] >= 0]
+        C = contract_jax(X, j)
+        for o in range(n_povm):
+            objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
+    return objf_ / m / n_povm
+
+@jax.jit
+def contract_jax(X, j_vec):
+    """Contract a sequence of matrices in the given order using JAX.
+
+    This function computes the product of a sequence of matrices specified by
+    the indices in `j_vec`. The result is the contracted product of the matrices
+    in the given order.
+
+    Parameters
+    ----------
+    X : numpy.ndarray
+        A 3D array containing the input matrices, of shape (n_matrices, n_rows, n_columns).
+    j_vec : numpy.ndarray
+        A 1D array of indices specifying the order in which to contract the matrices in X.
+
+    Returns
+    -------
+    numpy.ndarray
+        The contracted product of the matrices specified by the indices in `j_vec`.
+    """
+    res = jnp.eye(X[0].shape[0], dtype=jnp.complex128)
+    for j in j_vec:
+        res = jnp.where(j >= 0, res.dot(X[j]), res)
+    return res
+
+def dK_jax(K, E, rho, J, y, d, r):
+    "Calculate the Euclidean derivative wrt the Gate tensor K using JAX"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax, argnums=0)(K, d, r, E, rho, J, y)
 
 @njit(cache=True)
 def MVE_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm):
