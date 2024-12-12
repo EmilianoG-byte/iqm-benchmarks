@@ -76,7 +76,7 @@ def local_basis(x, b, length):
     return r
 
 
-@njit(cache=True)
+# @njit(cache=True)
 def contract(X, j_vec):
     """Contract a sequence of matrices in the given order.
 
@@ -104,7 +104,7 @@ def contract(X, j_vec):
     return res
 
 
-@njit(cache=True, fastmath=True)
+# @njit(cache=True, fastmath=True)
 def objf(X, E, rho, J, y):
     """Calculate the objective function value for matrices, POVM elements, and target values.
 
@@ -312,7 +312,7 @@ def Mp_norm_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm, p):
     return dist ** (1 / p) / m / n_povm, max_dist ** (1 / p)
 
 
-@njit(cache=True)
+# @njit(cache=True)
 def dK(X, K, E, rho, J, y, d, r, rK):
     """Compute the derivative of the Kraus operator K with respect to its parameters.
 
