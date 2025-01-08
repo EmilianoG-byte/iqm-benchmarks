@@ -248,7 +248,7 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
 
 from mGST.low_level_jit import dK_jax
 
-def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False):
+def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False, conjugate:bool=False):
     """Do Riemannian gradient descent optimization step on gates
 
     Parameters
@@ -295,6 +295,9 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False):
         dK_ = dK(X, K, E, rho, J, y, d, r, rK)
     else:
         dK_ = dK_jax( K, E, rho, J, y, d, r)
+        
+    if conjugate:
+        dK_ = dK_.conj()
     
     for k in np.where(~fixed_gates)[0]:
         # derivative

@@ -177,7 +177,8 @@ def cost_function_jax(K, d, r, E, rho, J, y):
     n_povm = y.shape[0]
     objf_ = 0
     for i in prange(m):  # pylint: disable=not-an-iterable
-        j = J[i][J[i] >= 0]
+        j = J[i][J[i] >= 0] # This is being done here because of the padding with -1
+        # J[i]
         C = contract_jax(X, j)
         for o in range(n_povm):
             objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
