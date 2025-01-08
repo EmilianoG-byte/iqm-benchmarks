@@ -9,15 +9,16 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, cast
 import warnings
 
 import numpy as np
-from qiskit import QuantumCircuit, transpile
-from qiskit.quantum_info import random_clifford, random_pauli
-from qiskit_aer import Aer
+from qiskit import transpile
+from qiskit.quantum_info import Clifford, random_clifford, random_pauli
+from qiskit_aer import Aer, AerSimulator
 from scipy.spatial.distance import hamming
 import xarray as xr
 
 from iqm.benchmarks import BenchmarkAnalysisResult, BenchmarkRunResult
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
 from iqm.benchmarks.benchmark_definition import Benchmark, add_counts_to_dataset
+from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.randomized_benchmarking.randomized_benchmarking_common import (
     exponential_rb,
@@ -34,6 +35,7 @@ from iqm.benchmarks.utils import (
     timeit,
     xrvariable_to_counts,
 )
+from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from iqm.qiskit_iqm.iqm_backend import IQMBackendBase
 
 
@@ -260,9 +262,13 @@ def generate_pauli_dressed_mrb_circuits(
     pauli_dressed_circuits_untranspiled: List[QuantumCircuit] = []
     pauli_dressed_circuits_transpiled: List[QuantumCircuit] = []
 
+    sim_method = "stabilizer"
+    simulator = AerSimulator(method=sim_method)
+
     for _ in range(pauli_samples_per_circ):
         # Initialize the quantum circuit object
         circ = QuantumCircuit(num_qubits)
+        circ_untransp = QuantumCircuit(num_qubits)
         # Sample all the random Paulis
         paulis = [random_pauli(num_qubits) for _ in range(depth + 1)]
 
@@ -280,6 +286,7 @@ def generate_pauli_dressed_mrb_circuits(
             )
             circ.barrier()
             circ.compose(cycle_layers[k], inplace=True)
+            circ_untransp.compose(cycle_layers[k], inplace=True)
             circ.barrier()
 
         # Apply middle Pauli
@@ -305,9 +312,6 @@ def generate_pauli_dressed_mrb_circuits(
         for i in range(num_qubits):
             circ.compose(clifford_layer[i].to_instruction().inverse(), qubits=[i], inplace=True)
 
-        # Add measurements
-        circ.measure_all()
-
         # Transpile to backend - no optimize SQG should be used!
         if isinstance(backend_arg, str):
             retrieved_backend = get_iqm_backend(backend_arg)
@@ -315,6 +319,13 @@ def generate_pauli_dressed_mrb_circuits(
             assert isinstance(backend_arg, IQMBackendBase)
             retrieved_backend = backend_arg
 
+        circ_untransp = circ.copy()
+        # Add measurements to untranspiled - after!
+        circ_untranspiled = transpile(Clifford(circ_untransp).to_circuit(), simulator)
+        circ_untranspiled.measure_all()
+
+        # Add measurements to transpiled - before!
+        circ.measure_all()
         circ_transpiled = transpile(
             circ,
             backend=retrieved_backend,
@@ -323,7 +334,7 @@ def generate_pauli_dressed_mrb_circuits(
             routing_method=routing_method,
         )
 
-        pauli_dressed_circuits_untranspiled.append(circ)
+        pauli_dressed_circuits_untranspiled.append(circ_untranspiled)
         pauli_dressed_circuits_transpiled.append(circ_transpiled)
 
     # Store the circuit
@@ -416,14 +427,14 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
     observations = {}
     dataset = run.dataset.copy(deep=True)
 
-    shots = dataset.attrs["shots"]
+    # shots = dataset.attrs["shots"]
     num_circuit_samples = dataset.attrs["num_circuit_samples"]
     num_pauli_samples = dataset.attrs["num_pauli_samples"]
 
     density_2q_gates = dataset.attrs["density_2q_gates"]
     two_qubit_gate_ensemble = dataset.attrs["two_qubit_gate_ensemble"]
 
-    max_gates_per_batch = dataset.attrs["max_gates_per_batch"]
+    # max_gates_per_batch = dataset.attrs["max_gates_per_batch"]
 
     # Analyze the results for each qubit layout of the experiment dataset
     qubits_array = dataset.attrs["qubits_array"]
@@ -443,8 +454,9 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
     else:
         assigned_mrb_depths = {str(qubits_array[i]): [2 * m for m in depths_array[i]] for i in range(len(depths_array))}
 
-    transpiled_circuits = dataset.attrs["transpiled_circuits"]
-    simulator = Aer.get_backend("qasm_simulator")
+    mrb_sim_circuits = run.circuits["untranspiled_circuits"]
+    sim_method = "stabilizer"
+    simulator = AerSimulator(method=sim_method)  # Aer.get_backend("stabilizer")
 
     all_noisy_counts: Dict[str, Dict[int, List[Dict[str, int]]]] = {}
     all_noiseless_counts: Dict[str, Dict[int, List[Dict[str, int]]]] = {}
@@ -463,22 +475,12 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
             all_noisy_counts[str(qubits)][depth] = xrvariable_to_counts(
                 dataset, identifier, num_circuit_samples * num_pauli_samples
             )
-
             qcvv_logger.info(f"Depth {depth}")
-            # Execute the quantum circuits on the simulated, ideal backend
-            # pylint: disable=unbalanced-tuple-unpacking
-            all_noiseless_jobs, _ = submit_execute(
-                {tuple(qubits): transpiled_circuits[str(qubits)][str(depth)]},
-                simulator,
-                shots,
-                calset_id=None,
-                max_gates_per_batch=max_gates_per_batch,
-            )
 
-            # Retrieve counts
-            all_noiseless_counts[str(qubits)][depth], time_retrieve_noiseless[str(qubits)][depth] = retrieve_all_counts(
-                all_noiseless_jobs
-            )
+            mrb_circs = mrb_sim_circuits[f"{str(qubits)}_depth_{str(depth)}"].circuits
+
+            qcvv_logger.info("Getting simulation counts")
+            all_noiseless_counts[str(qubits)][depth] = simulator.run(mrb_circs).result().get_counts()
 
             # Compute polarizations for the current depth
             polarizations[depth] = compute_polarizations(
@@ -610,23 +612,6 @@ class MirrorRandomizedBenchmarking(Benchmark):
                 dataset.attrs[key] = value
         # Defined outside configuration - if any
 
-    @timeit
-    def add_all_circuits_to_dataset(self, dataset: xr.Dataset):
-        """Adds all generated circuits during execution to the dataset variable
-        Args:
-            dataset (xr.Dataset):  The xarray dataset
-        """
-        qcvv_logger.info(f"Adding all circuits to the dataset")
-        for key, circuit in zip(
-            ["transpiled_circuits", "untranspiled_circuits"], [self.transpiled_circuits, self.untranspiled_circuits]
-        ):
-            dictionary = {}
-            for outer_key, outer_value in circuit.items():
-                dictionary[str(outer_key)] = {
-                    str(inner_key): inner_values for inner_key, inner_values in outer_value.items()
-                }
-            dataset.attrs[key] = dictionary
-
     def submit_single_mrb_job(
         self,
         backend_arg: IQMBackendBase,
@@ -674,8 +659,8 @@ class MirrorRandomizedBenchmarking(Benchmark):
         time_circuit_generation: Dict[str, float] = {}
 
         # Initialize the variable to contain the circuits for each layout
-        self.untranspiled_circuits: Dict[str, Dict[int | str, List[QuantumCircuit]]] = {}
-        self.transpiled_circuits: Dict[str, Dict[int | str, List[QuantumCircuit]]] = {}
+        self.untranspiled_circuits = BenchmarkCircuit("untranspiled_circuits")
+        self.transpiled_circuits = BenchmarkCircuit("transpiled_circuits")
 
         # The depths should be assigned to each set of qubits!
         # The real final MRB depths are twice the originally specified, must be taken into account here!
@@ -699,8 +684,6 @@ class MirrorRandomizedBenchmarking(Benchmark):
         qubit_idx: Dict[str, Any] = {}
         for qubits_idx, qubits in enumerate(self.qubits_array):
             qubit_idx[str(qubits)] = qubits_idx
-            self.untranspiled_circuits[str(qubits)] = {}
-            self.transpiled_circuits[str(qubits)] = {}
 
             qcvv_logger.info(
                 f"Executing MRB on qubits {qubits}."
@@ -712,7 +695,7 @@ class MirrorRandomizedBenchmarking(Benchmark):
             mrb_untranspiled_circuits_lists: Dict[int, List[QuantumCircuit]] = {}
             time_circuit_generation[str(qubits)] = 0
             for depth in assigned_mrb_depths[str(qubits)]:
-                qcvv_logger.info(f"Depth {depth}")
+                qcvv_logger.info(f"Depth {depth} - Generating all circuits")
                 mrb_circuits[depth], elapsed_time = generate_fixed_depth_mrb_circuits(
                     qubits,
                     self.num_circuit_samples,
@@ -739,12 +722,12 @@ class MirrorRandomizedBenchmarking(Benchmark):
                 all_mrb_jobs.append(self.submit_single_mrb_job(backend, qubits, depth, sorted_transpiled_qc_list))
                 qcvv_logger.info(f"Job for layout {qubits} & depth {depth} submitted successfully!")
 
-            self.untranspiled_circuits[str(qubits)] = {
-                str(d): mrb_untranspiled_circuits_lists[d] for d in assigned_mrb_depths[str(qubits)]
-            }
-            self.transpiled_circuits[str(qubits)] = {
-                str(d): mrb_transpiled_circuits_lists[d] for d in assigned_mrb_depths[str(qubits)]
-            }
+                self.untranspiled_circuits.circuit_groups.append(
+                    CircuitGroup(name=f"{str(qubits)}_depth_{depth}", circuits=mrb_untranspiled_circuits_lists[depth])
+                )
+                self.transpiled_circuits.circuit_groups.append(
+                    CircuitGroup(name=f"{str(qubits)}_depth_{depth}", circuits=mrb_transpiled_circuits_lists[depth])
+                )
 
             dataset.attrs[qubits_idx] = {"qubits": qubits}
 
@@ -774,7 +757,7 @@ class MirrorRandomizedBenchmarking(Benchmark):
             qcvv_logger.info(f"Adding counts of qubits {qubits} and depth {depth} run to the dataset")
             dataset, _ = add_counts_to_dataset(execution_results, f"qubits_{str(qubits)}_depth_{str(depth)}", dataset)
 
-        self.add_all_circuits_to_dataset(dataset)
+        self.circuits = Circuits([self.transpiled_circuits, self.untranspiled_circuits])
 
         qcvv_logger.info(f"MRB experiment execution concluded !")
 

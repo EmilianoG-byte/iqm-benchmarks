@@ -19,14 +19,18 @@ GHZ state benchmark
 from io import BytesIO
 from itertools import chain
 import json
-from time import strftime, time
-from typing import Dict, List, Optional, Tuple, Type, cast
+from time import strftime
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, cast
 
+from matplotlib.figure import Figure
+import matplotlib.pyplot as plt
+import networkx
 from networkx import Graph, all_pairs_shortest_path, is_connected, minimum_spanning_tree
 import numpy as np
 import pycurl
-from qiskit import QuantumCircuit, transpile
+from qiskit import QuantumRegister, transpile
 from qiskit.quantum_info import random_clifford
+from qiskit.transpiler import CouplingMap
 from qiskit_aer import Aer
 from scipy.spatial.distance import hamming
 import xarray as xr
@@ -40,15 +44,19 @@ from iqm.benchmarks.benchmark_definition import (
     BenchmarkRunResult,
     add_counts_to_dataset,
 )
+from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.readout_mitigation import apply_readout_error_mitigation
 from iqm.benchmarks.utils import (
     perform_backend_transpilation,
     reduce_to_active_qubits,
+    retrieve_all_counts,
     set_coupling_map,
+    submit_execute,
     timeit,
     xrvariable_to_counts,
 )
+from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from iqm.qiskit_iqm.iqm_backend import IQMBackendBase
 
 
@@ -68,16 +76,17 @@ def append_rms(
     Returns:
         List[QuantumCircuit] of the original circuit with 1Q Clifford gates appended to it
     """
-    rm_circuits = []
+    rm_circuits: list[QuantumCircuit] = []
     for _ in range(num_rms):
         rm_circ = circuit.copy()
         # It shouldn't matter if measurement bits get scrambled
         rm_circ.remove_final_measurements()
 
         active_qubits = set()
-        for instruction in rm_circ.data:
+        data = rm_circ.data
+        for instruction in data:
             for qubit in instruction[1]:
-                active_qubits.add(qubit.index)
+                active_qubits.add(rm_circ.find_bit(qubit)[0])
 
         for q in active_qubits:
             if backend is not None:
@@ -87,17 +96,14 @@ def append_rms(
             rm_circ.compose(rand_clifford, qubits=[q], inplace=True)
 
         rm_circ.measure_active()
-        # if backend is not None and backend.name != "IQMNdonisBackend" and optimize_sqg:
-        #     rm_circuits.append(optimize_single_qubit_gates(rm_circ))
-        # else:
         rm_circuits.append(transpile(rm_circ, basis_gates=backend.operation_names))
 
     return rm_circuits
 
 
 def fidelity_ghz_randomized_measurements(
-    dataset: xr.Dataset, qubit_layout, ideal_probabilities: List[Dict[str, int]], num_qubits: int
-) -> Dict[str, float]:
+    dataset: xr.Dataset, qubit_layout, ideal_probabilities: List[Dict[str, int]], num_qubits: int, circuits: Circuits
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Estimates GHZ state fidelity through cross-correlations of RMs.
     Implementation of Eq. (34) in https://arxiv.org/abs/1812.02624
@@ -106,23 +112,27 @@ def fidelity_ghz_randomized_measurements(
         dataset (xr.Dataset):
         qubit_layout: List[int]: The subset of system-qubits used in the protocol
         ideal_probabilities (List[Dict[str, int]]):
-        num_qubits (int):
+        num_qubits (int): Number of qubits
+        circuits (Circuits): Instance of `Circuits` containing transpiled circuits
     Returns:
-        Dict[str, float]
+        values: dict[str, Any]
+            The fidelities
+        uncertainties: dict[str, Any]
+            The uncertainties for the fidelities
     """
-
+    idx = BenchmarkObservationIdentifier(qubit_layout).string_identifier
     # List for each RM contribution to the fidelity
     fid_rm = []
 
     # Loop through RMs and add each contribution
-    num_rms = len(dataset.attrs["transpiled_circuits"][f"{str(qubit_layout)}"][tuple(qubit_layout)])
+    num_rms = len(circuits["transpiled_circuits"][f"{idx}_native_ghz"].circuits)
     for u in range(num_rms):
         # Probability estimates for noisy measurements
         probabilities_sample = {}
-        c_keys = dataset[f"{str(qubit_layout)}_state_{u}"].data  # measurements[u].keys()
-        num_shots_noisy = sum(dataset[f"{str(qubit_layout)}_counts_{u}"].data)
+        c_keys = dataset[f"{idx}_state_{u}"].data  # measurements[u].keys()
+        num_shots_noisy = sum(dataset[f"{idx}_counts_{u}"].data)
         for k, key in enumerate(c_keys):
-            probabilities_sample[key] = dataset[f"{str(qubit_layout)}_counts_{u}"].data[k] / num_shots_noisy
+            probabilities_sample[key] = dataset[f"{idx}_counts_{u}"].data[k] / num_shots_noisy
         # Keys for corresponding ideal probabilities
         c_id_keys = ideal_probabilities[u].keys()
 
@@ -132,17 +142,18 @@ def fidelity_ghz_randomized_measurements(
                 exponent = hamming(list(sa), list(sb)) * num_qubits
                 p_sum.append(np.power(-2, -exponent) * probabilities_sample[sa] * ideal_probabilities[u][sb])
         fid_rm.append((2**num_qubits) * sum(p_sum))
-    fidelities = {"mean": np.mean(fid_rm), "std": np.std(fid_rm) / np.sqrt(num_rms)}
+    values = {"fidelity": np.mean(fid_rm)}
+    uncertainties = {"fidelity": np.std(fid_rm) / np.sqrt(num_rms)}
 
     if dataset.attrs["rem"]:
         fid_rm_rem = []
         for u in range(num_rms):
             # Probability estimates for noisy measurements
             probabilities_sample = {}
-            c_keys = dataset[f"{str(qubit_layout)}_rem_state_{u}"].data  # measurements[u].keys()
-            num_shots_noisy = sum(dataset[f"{str(qubit_layout)}_rem_counts_{u}"].data)
+            c_keys = dataset[f"{idx}_rem_state_{u}"].data  # measurements[u].keys()
+            num_shots_noisy = sum(dataset[f"{idx}_rem_counts_{u}"].data)
             for k, key in enumerate(c_keys):
-                probabilities_sample[key] = dataset[f"{str(qubit_layout)}_rem_counts_{u}"].data[k] / num_shots_noisy
+                probabilities_sample[key] = dataset[f"{idx}_rem_counts_{u}"].data[k] / num_shots_noisy
             # Keys for corresponding ideal probabilities
             c_id_keys = ideal_probabilities[u].keys()
 
@@ -152,11 +163,12 @@ def fidelity_ghz_randomized_measurements(
                     exponent = hamming(list(sa), list(sb)) * num_qubits
                     p_sum.append(np.power(-2, -exponent) * probabilities_sample[sa] * ideal_probabilities[u][sb])
             fid_rm_rem.append((2**num_qubits) * sum(p_sum))
-        fidelities = fidelities | {"mean_rem": np.mean(fid_rm_rem), "std_rem": np.std(fid_rm_rem) / np.sqrt(num_rms)}
-    return fidelities
+        values = values | {"fidelity_rem": np.mean(fid_rm_rem)}
+        uncertainties = uncertainties | {"fidelity_rem": np.std(fid_rm_rem) / np.sqrt(num_rms)}
+    return values, uncertainties
 
 
-def fidelity_ghz_coherences(dataset: xr.Dataset, qubit_layout: List[int]) -> List[float]:
+def fidelity_ghz_coherences(dataset: xr.Dataset, qubit_layout: List[int], circuits: Circuits) -> list[Any]:
     """
     Estimates the GHZ state fidelity based on the multiple quantum coherences method based on [Mooney, 2021]
 
@@ -165,31 +177,25 @@ def fidelity_ghz_coherences(dataset: xr.Dataset, qubit_layout: List[int]) -> Lis
             An xarray dataset containing the measurement data
         qubit_layout: List[int]
             The subset of system-qubits used in the protocol
+        circuits: Circuits
+            Instance of `Circuits` containing transpiled circuits
 
     Returns:
-        List[int]: The ghz fidelity or, if rem=True, fidelity and readout error mitigated fidelity
+        dict[str, dict[str, Any]]: The ghz fidelity or, if rem=True, fidelity and readout error mitigated fidelity
     """
 
     num_qubits = len(qubit_layout)
     phases = [np.pi * i / (num_qubits + 1) for i in range(2 * num_qubits + 2)]
-    transpiled_circuits = dataset.attrs["transpiled_circuits"][f"{str(qubit_layout)}"][tuple(qubit_layout)]
+    idx = BenchmarkObservationIdentifier(qubit_layout).string_identifier
+    transpiled_circuits = circuits["transpiled_circuits"]
     num_shots = dataset.attrs["shots"]
-    num_circuits = len(transpiled_circuits)
+    num_circuits = len(transpiled_circuits[f"{qubit_layout}_native_ghz"].circuits)
 
     # Computing the phase acquired by the |11...1> component for each interval
     complex_coefficients = np.exp(1j * num_qubits * np.array(phases))
 
     # Loading the counts from the dataset
-    counts = xrvariable_to_counts(dataset, str(qubit_layout), num_circuits)
-    # for u in range(num_circuits):
-    #     counts.append(
-    #         dict(
-    #             zip(
-    #                 list(dataset[f"{str(qubit_layout)}_state_{u}"].data),
-    #                 dataset[f"{str(qubit_layout)}_counts_{u}"].data,
-    #             )
-    #         )
-    #     )
+    counts = xrvariable_to_counts(dataset, f"{idx}", num_circuits)
     all_zero_probability_list = []  # An ordered list for storing the probabilities of returning to the |00..0> state
     for count in counts[1:]:
         if "0" * num_qubits in count.keys():
@@ -211,16 +217,7 @@ def fidelity_ghz_coherences(dataset: xr.Dataset, qubit_layout: List[int]) -> Lis
 
     # Same procedure for error mitigated data
     if dataset.attrs["rem"]:
-        probs_mit = xrvariable_to_counts(dataset, f"{str(qubit_layout)}_rem", num_circuits)
-        # for u in range(num_circuits):
-        #     probs_mit.append(
-        #         dict(
-        #             zip(
-        #                 list(dataset[f"{str(qubit_layout)}_rem_state_{u}"].data),
-        #                 dataset[f"{str(qubit_layout)}_rem_counts_{u}"].data,
-        #             )
-        #         )
-        #     )
+        probs_mit = xrvariable_to_counts(dataset, f"{idx}_rem", num_circuits)
         all_zero_probability_list_mit = []
         for prob in probs_mit[1:]:
             if "0" * num_qubits in prob.keys():
@@ -255,11 +252,12 @@ def fidelity_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
 
     observation_list: list[BenchmarkObservation] = []
     for qubit_layout in qubit_layouts:
-        if routine == "randomized_measurements":
-            ideal_simulator = Aer.get_backend("statevector_simulator")
-            for qubit_layout in qubit_layouts:
+        match routine:
+            case "randomized_measurements":
+                ideal_simulator = Aer.get_backend("statevector_simulator")
                 ideal_probabilities = []
-                all_circuits = run.dataset.attrs["transpiled_circuits"][str(qubit_layout)][tuple(qubit_layout)]
+                idx = BenchmarkObservationIdentifier(qubit_layout).string_identifier
+                all_circuits = run.circuits["transpiled_circuits"][f"{idx}_native_ghz"].circuits
                 for qc in all_circuits:
                     qc_copy = qc.copy()
                     qc_copy.remove_final_measurements()
@@ -267,33 +265,39 @@ def fidelity_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
                     ideal_probabilities.append(
                         dict(sorted(ideal_simulator.run(deflated_qc).result().get_counts().items()))
                     )
+                values, uncertainties = fidelity_ghz_randomized_measurements(
+                    dataset, qubit_layout, ideal_probabilities, len(qubit_layout), run.circuits
+                )
                 observation_list.extend(
                     [
                         BenchmarkObservation(
-                            name=key, identifier=BenchmarkObservationIdentifier(qubit_layout), value=value
+                            name=key,
+                            identifier=BenchmarkObservationIdentifier(qubit_layout),
+                            value=value,
+                            uncertainty=uncertainties[key],
                         )
-                        for key, value in fidelity_ghz_randomized_measurements(
-                            dataset, qubit_layout, ideal_probabilities, len(qubit_layout)
-                        ).items()
+                        for key, value in values.items()
                     ]
                 )
-        else:  # default routine == "coherences":
-            fidelity = fidelity_ghz_coherences(dataset, qubit_layout)
-            observation_list.extend(
-                [
-                    BenchmarkObservation(
-                        name="fidelity", identifier=BenchmarkObservationIdentifier(qubit_layout), value=fidelity[0]
-                    )
-                ]
-            )
-            if len(fidelity) > 1:
-
-                observation_list.append(
-                    BenchmarkObservation(
-                        name="fidelity_rem", identifier=BenchmarkObservationIdentifier(qubit_layout), value=fidelity[1]
-                    )
+            case "coherences":
+                fidelity = fidelity_ghz_coherences(dataset, qubit_layout, run.circuits)
+                observation_list.extend(
+                    [
+                        BenchmarkObservation(
+                            name="fidelity", identifier=BenchmarkObservationIdentifier(qubit_layout), value=fidelity[0]
+                        )
+                    ]
                 )
-    return BenchmarkAnalysisResult(dataset=dataset, observations=observation_list)
+                if len(fidelity) > 1:
+                    observation_list.append(
+                        BenchmarkObservation(
+                            name="fidelity_rem",
+                            identifier=BenchmarkObservationIdentifier(qubit_layout),
+                            value=fidelity[1],
+                        )
+                    )
+    plots = {"All layout fidelities": plot_fidelities(observation_list, qubit_layouts)}
+    return BenchmarkAnalysisResult(dataset=dataset, observations=observation_list, plots=plots)
 
 
 def generate_ghz_linear(num_qubits: int) -> QuantumCircuit:
@@ -307,7 +311,8 @@ def generate_ghz_linear(num_qubits: int) -> QuantumCircuit:
         A quantum circuit generating a GHZ state of n qubits
     """
     s = int(num_qubits / 2)
-    qc = QuantumCircuit(num_qubits)
+    quantum_register = QuantumRegister(num_qubits)
+    qc = QuantumCircuit(quantum_register, name="GHZ_linear")
     qc.h(s)
 
     for m in range(s, 0, -1):
@@ -328,7 +333,8 @@ def generate_ghz_log_cruz(num_qubits: int) -> QuantumCircuit:
     Returns:
         A quantum circuit generating a GHZ state of n qubits
     """
-    qc = QuantumCircuit(num_qubits)
+    quantum_register = QuantumRegister(num_qubits)
+    qc = QuantumCircuit(quantum_register, name="GHZ_log_Cruz")
     qc.h(0)
 
     for m in range(num_qubits):
@@ -349,7 +355,8 @@ def generate_ghz_log_mooney(num_qubits: int) -> QuantumCircuit:
     Returns:
         A quantum circuit generating a GHZ state of n qubits
     """
-    qc = QuantumCircuit(num_qubits)
+    quantum_register = QuantumRegister(num_qubits)
+    qc = QuantumCircuit(quantum_register, name="GHZ_log_Mooney")
     qc.h(0)
 
     aux_n = int(np.ceil(np.log2(num_qubits)))
@@ -368,7 +375,8 @@ def generate_ghz_spanning_tree(
     n_state: int | None = None,
 ) -> Tuple[QuantumCircuit, List[int]]:
     """
-    Generates a GHZ state in log-depth by computing a minimal spanning tree for a given coupling map
+    Generates a GHZ state in log-depth by computing a minimal spanning tree for a given coupling map.
+
     Args:
         graph: networkx.Graph
             A graph of the backend coupling map
@@ -391,7 +399,8 @@ def generate_ghz_spanning_tree(
     participating_qubits = set(qubit for pair in cx_map[: n_state - 1] for qubit in pair)
 
     relabeling = {idx_old: idx_new for idx_new, idx_old in enumerate(participating_qubits)}
-    qc = QuantumCircuit(n_state, name="ghz")
+    n_state_register = QuantumRegister(n_state)
+    qc = QuantumCircuit(n_state_register, name="ghz")
     qc.h([relabeling[cx_map[0][0]]])
     for _, pair in zip(np.arange(n_state - 1), cx_map):
         relabeled_pair = [relabeling[pair[0]], relabeling[pair[1]]]
@@ -442,18 +451,23 @@ def extract_fidelities(cal_url: str, qubit_layout: List[int]) -> Tuple[List[List
     return list_couplings, list_fids
 
 
-def get_edges(coupling_map, qubit_layout, edges_cal=None, fidelities_cal=None):
+def get_edges(
+    coupling_map: CouplingMap,
+    qubit_layout: List[int],
+    edges_cal: Optional[List[List[int]]] = None,
+    fidelities_cal: Optional[List[float]] = None,
+):
     """Produces a networkx.Graph from coupling map fidelity information, with edges given by couplings
         and edge weights given by fidelities
 
     Args:
-        coupling_map: List[int]
+        coupling_map (CouplingMap):
             The list pairs on which 2-qubit gates are natively supported
-        qubit_layout: List[int]
+        qubit_layout (List[int]):
             The subset of system-qubits used in the protocol, indexed from 0
-        edges_cal: List[int]
-            Same as the coupling map, but only with connections that have CZ fidelities in the calibration data
-        fidelities_cal: List[float]
+        edges_cal (Optional[List[List[int]]]):
+            A coupling map of qubit pairs that have CZ fidelities in the calibration data
+        fidelities_cal (Optional[List[float]]):
             A list of CZ fidelities ordered in the same way as edges_cal
 
     Returns:
@@ -466,16 +480,18 @@ def get_edges(coupling_map, qubit_layout, edges_cal=None, fidelities_cal=None):
         if edge[0] in qubit_layout and edge[1] in qubit_layout:
             edges_patch.append([edge[0], edge[1]])
 
-    if fidelities_cal is None:
-        weights = np.ones(len(edges_patch))
-    else:
-        fidelities_cal = np.minimum(np.array(fidelities_cal), np.ones(len(fidelities_cal)))  # get rid of > 1 fidelities
+    if fidelities_cal is not None:
+        fidelities_cal = list(
+            np.minimum(np.array(fidelities_cal), np.ones(len(fidelities_cal)))
+        )  # get rid of > 1 fidelities
         fidelities_patch = []
         for edge in edges_patch:
-            for idx, edge_2 in enumerate(edges_cal):
+            for idx, edge_2 in enumerate(cast(List[int], edges_cal)):
                 if edge == edge_2:
                     fidelities_patch.append(fidelities_cal[idx])
         weights = -np.log(np.array(fidelities_patch))
+    else:
+        weights = np.ones(len(edges_patch))
     graph = Graph()
     for idx, edge in enumerate(edges_patch):
         graph.add_edge(*edge, weight=weights[idx])
@@ -484,7 +500,7 @@ def get_edges(coupling_map, qubit_layout, edges_cal=None, fidelities_cal=None):
     return graph
 
 
-def get_cx_map(qubit_layout, graph) -> list[list[int]]:
+def get_cx_map(qubit_layout: List[int], graph: networkx.Graph) -> list[list[int]]:
     """Calculate the cx_map based on participating qubits and the 2QB gate fidelities between them.
 
     Uses networkx graph algorithms to calculate the minimal spanning tree of the subgraph defined by qubit_layout.
@@ -525,8 +541,56 @@ def get_cx_map(qubit_layout, graph) -> list[list[int]]:
     return cx_map
 
 
+def plot_fidelities(observations: List[BenchmarkObservation], qubit_layouts: List[List[int]]) -> Figure:
+    """Plots all the fidelities stored in the observations into a single plot of fidelity vs. number of qubits
+
+    Parameters
+    ----------
+    observations: List[BenchmarkObservation]
+        A list of Observations, each assumed to be a fidelity
+    qubit_layouts
+        The list of qubit layouts as given by the user. This is used to name the layouts in order for identification
+        in the plot.
+    Returns
+    -------
+    fig :Figure
+        The figure object with the fidelity plot.
+    """
+    fig, ax = plt.subplots()
+    layout_short = {str(qubit_layout): f" L{i}" for i, qubit_layout in enumerate(qubit_layouts)}
+    recorded_labels = []
+    for i, obs in enumerate(observations):
+        label = "With REM" if "rem" in obs.name else "Unmitigated"
+        if label in recorded_labels:
+            label = "_nolegend_"
+        else:
+            recorded_labels.append(label)
+        x = sum(c.isdigit() for c in obs.identifier.string_identifier)
+        y = obs.value
+        ax.errorbar(
+            x,
+            y,
+            yerr=obs.uncertainty,
+            capsize=4,
+            color="orange" if "rem" in obs.name else "cornflowerblue",
+            label=label,
+            fmt="o",
+            alpha=1,
+            markersize=5,
+        )
+        ax.annotate(layout_short[obs.identifier.string_identifier], (x, y))
+    ax.axhline(0.5, linestyle="--", color="black", label="GME threshold")
+    # ax.set_ylim([0,1])
+    ax.set_title("GHZ fidelities of all qubit layouts")
+    ax.set_xlabel("Number of qubits")
+    ax.set_ylabel("Fidelity")
+    ax.legend(framealpha=0.5)
+    plt.close()
+    return fig
+
+
 class GHZBenchmark(Benchmark):
-    """The GHZ Benchmark estimates the quality of generated Greenberger-Horne-Zeilinger states"""
+    """The GHZ Benchmark estimates the quality of generated Greenberger–Horne–Zeilinger states"""
 
     analysis_function = staticmethod(fidelity_analysis)
     name = "ghz"
@@ -541,11 +605,11 @@ class GHZBenchmark(Benchmark):
         super().__init__(backend, configuration)
 
         self.state_generation_routine = configuration.state_generation_routine
-        self.choose_qubits_routine = configuration.choose_qubits_routine
         if configuration.custom_qubits_array:
             self.custom_qubits_array = configuration.custom_qubits_array
         else:
-            self.custom_qubits_array = list(set(chain(*backend.coupling_map)))
+            self.custom_qubits_array = [list(set(chain(*backend.coupling_map)))]
+        self.qubit_counts: Sequence[int] | List[int]
         if not configuration.qubit_counts:
             self.qubit_counts = [len(layout) for layout in self.custom_qubits_array]
         else:
@@ -555,24 +619,18 @@ class GHZBenchmark(Benchmark):
 
         self.qiskit_optim_level = configuration.qiskit_optim_level
         self.optimize_sqg = configuration.optimize_sqg
-
         self.fidelity_routine = configuration.fidelity_routine
         self.num_RMs = configuration.num_RMs
-
         self.rem = configuration.rem
         self.mit_shots = configuration.mit_shots
         self.cal_url = configuration.cal_url
-
         self.timestamp = strftime("%Y%m%d-%H%M%S")
 
-    # @staticmethod
-    # def name() -> str:
-    #     return "ghz"
-
-    def generate_native_ghz(self, qubit_layout: List[int], qubit_count: int, routine: str) -> QuantumCircuit:
+    def generate_native_ghz(self, qubit_layout: List[int], qubit_count: int, routine: str) -> CircuitGroup:
         """
-            Generate a circuit preparing a GHZ state,
-            according to a given routine and transpiled to the native gate set and topology
+        Generate a circuit preparing a GHZ state,
+        according to a given routine and transpiled to the native gate set and topology.
+
         Args:
             qubit_layout: List[int]
                 The subset of system-qubits used in the protocol, indexed from 0
@@ -585,12 +643,13 @@ class GHZBenchmark(Benchmark):
         Returns:
             QuantumCircuit implementing GHZ native state
         """
-        # num_qubits = len(qubit_layout)
+        circuit_group = CircuitGroup(name=f"{qubit_layout}_native_ghz")
         fixed_coupling_map = set_coupling_map(qubit_layout, self.backend, "fixed")
+        ghz_native_transpiled: List[QuantumCircuit]
 
         if routine == "naive":
-            ghz = generate_ghz_linear(qubit_count)
-            self.untranspiled_circuits[str(qubit_layout)].update({qubit_count: ghz})
+            ghz: QuantumCircuit = generate_ghz_linear(qubit_count)
+            circuit_group.add_circuit(ghz)
             ghz_native_transpiled, _ = perform_backend_transpilation(
                 [ghz],
                 self.backend,
@@ -607,7 +666,7 @@ class GHZBenchmark(Benchmark):
             else:
                 graph = get_edges(self.backend.coupling_map, qubit_layout)
             ghz, _ = generate_ghz_spanning_tree(graph, qubit_layout, qubit_count)
-            self.untranspiled_circuits[str(qubit_layout)].update({qubit_count: ghz})
+            circuit_group.add_circuit(ghz)
             ghz_native_transpiled, _ = perform_backend_transpilation(
                 [ghz],
                 self.backend,
@@ -631,12 +690,13 @@ class GHZBenchmark(Benchmark):
             if ghz_native_transpiled[0].depth() == ghz_native_transpiled[1].depth():
                 index_min_2q = np.argmin([c.count_ops()["cz"] for c in ghz_native_transpiled])
                 final_ghz = ghz_native_transpiled[index_min_2q]
-                self.untranspiled_circuits[str(qubit_layout)].update({qubit_count: ghz_log[index_min_2q]})
+                circuit_group.add_circuit(ghz_log[index_min_2q])
             else:
                 index_min_depth = np.argmin([c.depth() for c in ghz_native_transpiled])
                 final_ghz = ghz_native_transpiled[index_min_depth]
-                self.untranspiled_circuits[str(qubit_layout)].update({qubit_count: ghz_log[index_min_depth]})
-        return final_ghz[0]
+                circuit_group.add_circuit([ghz_log[index_min_depth]])
+        self.circuits["untranspiled_circuits"].circuit_groups.append(circuit_group)
+        return CircuitGroup(name=f"{qubit_layout}_native_ghz", circuits=[final_ghz[0]])
 
     def generate_coherence_meas_circuits(self, qubit_layout: List[int], qubit_count: int) -> List[QuantumCircuit]:
         """
@@ -653,9 +713,10 @@ class GHZBenchmark(Benchmark):
                 A list of transpiled quantum circuits to be measured
         """
 
-        qc = self.untranspiled_circuits[str(qubit_layout)][qubit_count]
-        qc_list = [qc.copy()]
+        idx = BenchmarkObservationIdentifier(qubit_layout).string_identifier
+        qc_list = self.circuits["untranspiled_circuits"][f"{qubit_layout}_native_ghz"].circuits
 
+        qc = qc_list[0].copy()
         qc.remove_final_measurements()
         qc_inv = qc.inverse()
         phases = [np.pi * i / (qubit_count + 1) for i in range(2 * qubit_count + 2)]
@@ -678,10 +739,11 @@ class GHZBenchmark(Benchmark):
             qiskit_optim_level=self.qiskit_optim_level,
             optimize_sqg=self.optimize_sqg,
         )
-        self.untranspiled_circuits[str(qubit_layout)].update({qubit_count: qc_list})
+        circuit_group = CircuitGroup(name=idx, circuits=qc_list)
+        self.circuits["untranspiled_circuits"].circuit_groups.append(circuit_group)
         return qc_list_transpiled
 
-    def generate_readout_circuit(self, qubit_layout, qubit_count):
+    def generate_readout_circuit(self, qubit_layout: List[int], qubit_count: int) -> CircuitGroup:
         """
         A wrapper for the creation of different circuits to estimate the fidelity
 
@@ -697,33 +759,32 @@ class GHZBenchmark(Benchmark):
                 A list of transpiled quantum circuits to be measured
         """
         # Generate the list of circuits
-        self.untranspiled_circuits[str(qubit_layout)] = {}
-        self.transpiled_circuits[str(qubit_layout)] = {}
 
         qcvv_logger.info(f"Now generating a {len(qubit_layout)}-qubit GHZ state on qubits {qubit_layout}")
-        transpiled_ghz = self.generate_native_ghz(qubit_layout, qubit_count, self.state_generation_routine)
+        transpiled_ghz_group: CircuitGroup = self.generate_native_ghz(
+            qubit_layout, qubit_count, self.state_generation_routine
+        )
 
-        if self.fidelity_routine == "randomized_measurements":
-            all_circuits_list, _ = append_rms(transpiled_ghz, cast(int, self.num_RMs), self.backend)
-            all_circuits_dict = {tuple(qubit_layout): all_circuits_list}
-        elif self.fidelity_routine == "coherences":
-            all_circuits_list = self.generate_coherence_meas_circuits(qubit_layout, qubit_count)
-            all_circuits_dict = {tuple(qubit_layout): all_circuits_list}
-        else:
-            all_circuits_list = transpiled_ghz
-            all_circuits_dict = {tuple(qubit_layout): all_circuits_list}
+        match self.fidelity_routine:
+            case "randomized_measurements":
+                all_circuits_list, _ = append_rms(
+                    transpiled_ghz_group.circuits[0], cast(int, self.num_RMs), self.backend
+                )
+                transpiled_ghz_group.circuits = all_circuits_list
+            case "coherences":
+                all_circuits_list = self.generate_coherence_meas_circuits(qubit_layout, qubit_count)
+                transpiled_ghz_group.circuits = all_circuits_list
+        self.circuits["transpiled_circuits"].circuit_groups.append(transpiled_ghz_group)
+        return transpiled_ghz_group
 
-        self.transpiled_circuits[str(qubit_layout)].update(all_circuits_dict)
-        return all_circuits_list
-
-    def add_configuration_to_dataset(self, dataset):  # CHECK
+    def add_configuration_to_dataset(self, dataset: xr.Dataset):  # CHECK
         """
-        Creates an xarray.Dataset and adds the circuits and configuration metadata to it
+        Creates a xarray.Dataset and adds the circuits and configuration metadata to it.
 
         Args:
-            self: Source class
+            dataset (xr.Dataset):
         Returns:
-            dataset: xarray.Dataset to be used for further data storage
+            xr.Dataset: dataset to be used for further data storage
         """
 
         for key, value in self.configuration:
@@ -732,8 +793,7 @@ class GHZBenchmark(Benchmark):
             else:
                 dataset.attrs[key] = value
         dataset.attrs[f"backend_name"] = self.backend.name
-        dataset.attrs[f"untranspiled_circuits"] = self.untranspiled_circuits
-        dataset.attrs[f"transpiled_circuits"] = self.transpiled_circuits
+        dataset.attrs["fidelity_routine"] = self.fidelity_routine
 
     def execute(self, backend) -> xr.Dataset:
         """
@@ -742,28 +802,43 @@ class GHZBenchmark(Benchmark):
         aux_custom_qubits_array = cast(List[List[int]], self.custom_qubits_array).copy()
         dataset = xr.Dataset()
 
+        # Submit all
+        all_jobs: Dict = {}
+
+        self.circuits = Circuits()
+        self.circuits.benchmark_circuits.append(BenchmarkCircuit(name="transpiled_circuits"))
+        self.circuits.benchmark_circuits.append(BenchmarkCircuit(name="untranspiled_circuits"))
         for qubit_layout in aux_custom_qubits_array:
+            Id = BenchmarkObservationIdentifier(qubit_layout)
+            idx = Id.string_identifier
+            # for qubit_count in self.qubit_counts[idx]:
             qubit_count = len(qubit_layout)
-            circuits = self.generate_readout_circuit(qubit_layout, qubit_count)
+            circuit_group: CircuitGroup = self.generate_readout_circuit(qubit_layout, qubit_count)
+            transpiled_circuit_dict = {tuple(qubit_layout): circuit_group.circuits}
+            all_jobs[idx], _ = submit_execute(
+                transpiled_circuit_dict,
+                backend,
+                self.shots,
+                self.calset_id,
+                max_gates_per_batch=self.max_gates_per_batch,
+            )
 
-            qcvv_logger.info(f"Retrieving results")
-            t_start = time()
-            job = backend.run(circuits, shots=self.shots)
-            counts = job.result().get_counts()
-            print(f"\t Getting counts took {time()-t_start:.2f} sec")
-
-            # coordinates = [(f"qubit_layout", [str(qubit_layout)])]
-            identifier = str(qubit_layout)
-            qcvv_logger.info(f"Adding counts to dataset")
-            dataset, _ = add_counts_to_dataset(counts, identifier, dataset)
+        # Retrieve all
+        qcvv_logger.info(f"Retrieving counts and adding counts to dataset...")
+        for qubit_layout in aux_custom_qubits_array:
+            # for qubit_count in self.qubit_counts[idx]:
+            Id = BenchmarkObservationIdentifier(qubit_layout)
+            idx = Id.string_identifier
+            qubit_count = len(qubit_layout)
+            counts, _ = retrieve_all_counts(all_jobs[idx])
+            dataset, _ = add_counts_to_dataset(counts, idx, dataset)
             if self.rem:
                 qcvv_logger.info(f"Applying readout error mitigation")
-                rem_results, _ = apply_readout_error_mitigation(
-                    backend, circuits, job.result().get_counts(), self.mit_shots
-                )
+                circuit_group = self.circuits["transpiled_circuits"][f"{idx}_native_ghz"]
+                rem_results, _ = apply_readout_error_mitigation(backend, circuit_group.circuits, counts, self.mit_shots)
                 rem_results_dist = [counts_mit.nearest_probability_distribution() for counts_mit in rem_results]
-                qcvv_logger.info(f"Adding REM results to dataset")
-                dataset, _ = add_counts_to_dataset(rem_results_dist, f"{identifier}_rem", dataset)
+                dataset, _ = add_counts_to_dataset(rem_results_dist, f"{idx}_rem", dataset)
+
         self.add_configuration_to_dataset(dataset)
         return dataset
 
@@ -787,9 +862,10 @@ class GHZConfiguration(BenchmarkConfigurationBase):
         custom_qubits_array (Optional[Sequence[Sequence[int]]]): A sequence (e.g., Tuple or List) of sequences of
         physical qubit layouts, as specified by integer labels, where the benchmark is meant to be run.
                                         * If None, takes all qubits specified in the backend coupling map.
-        qubit_counts (Optional[Sequence[int]]): A sequence (e.g., Tuple or List) of integers denoting number of qubits
+        qubit_counts (Optional[Sequence[int]]): CURRENTLY NOT SUPPORTED, A sequence (e.g., Tuple or List) of integers
+        denoting number of qubits
         for which the benchmark is meant to be run. The largest qubit count provided here has to be smaller than the
-        smallest given qubit layout.
+        smalles given qubit layout.
         qiskit_optim_level (int): The optimization level used for transpilation to backend architecture.
             * Default: 3
         optimize_sqg (bool): Whether consecutive single qubit gates are optimized for reduced gate count via
@@ -814,13 +890,13 @@ class GHZConfiguration(BenchmarkConfigurationBase):
 
     benchmark: Type[Benchmark] = GHZBenchmark
     state_generation_routine: str = "tree"
-    choose_qubits_routine: str = "custom"
-    custom_qubits_array: Optional[List[List[int]]] = None
-    qubit_counts: Optional[List[int]] = None
+    custom_qubits_array: Optional[Sequence[Sequence[int]]] = None
+    qubit_counts: Optional[Sequence[int]] = None
+    shots: int = 2**10
     qiskit_optim_level: int = 3
     optimize_sqg: bool = True
     fidelity_routine: str = "coherences"
-    num_RMs: Optional[int] = 24
+    num_RMs: Optional[int] = 100
     rem: bool = True
     mit_shots: int = 1_000
     cal_url: Optional[str] = None

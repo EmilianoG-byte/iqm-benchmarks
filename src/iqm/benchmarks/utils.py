@@ -25,12 +25,13 @@ from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple
 from more_itertools import chunked
 from mthree.utils import final_measurement_mapping
 import numpy as np
-from qiskit import ClassicalRegister, QuantumCircuit, transpile
+from qiskit import ClassicalRegister, transpile
 from qiskit.converters import circuit_to_dag
 from qiskit.transpiler import CouplingMap
 import xarray as xr
 
 from iqm.benchmarks.logging_config import qcvv_logger
+from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from iqm.qiskit_iqm import transpile_to_IQM
 from iqm.qiskit_iqm.fake_backends.fake_adonis import IQMFakeAdonis
 from iqm.qiskit_iqm.fake_backends.fake_apollo import IQMFakeApollo
@@ -136,37 +137,6 @@ def count_native_gates(
     )
 
     return avg_native_operations
-
-
-# DD code to be adapted to Pulla version once released
-# @timeit
-# def execute_with_dd(
-#     backend: IQMBackendBase, transpiled_circuits: List[QuantumCircuit], shots: int, dd_strategy: DDStrategy
-# ) -> List[Dict[str, int]]:
-#     """Executes a list of transpiled quantum circuits with dynamical decoupling according to a specified strategy
-#     Args:
-#         backend (IQMBackendBase):
-#         transpiled_circuits (List[QuantumCircuit]):
-#         shots (int):
-#         dd_strategy (DDStrategy):
-#
-#     Returns:
-#         List[Dict[str, int]]: The counts of the execution with dynamical decoupling
-#     """
-#     warnings.warn("Suppressing INFO messages from Pulla with logging.disable(sys.maxsize) - update if problematic!")
-#     logging.disable(sys.maxsize)
-#
-#     pulla_obj = Pulla(cocos_url=iqm_url)
-#
-#     execution_results = dd.execute_with_dd(
-#         pulla_obj,
-#         backend=backend,
-#         circuits=transpiled_circuits,
-#         shots=shots,
-#         dd_strategy=dd_strategy,
-#     )
-#
-#     return execution_results
 
 
 # pylint: disable=too-many-branches
