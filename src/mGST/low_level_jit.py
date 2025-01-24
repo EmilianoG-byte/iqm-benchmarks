@@ -76,7 +76,7 @@ def local_basis(x, b, length):
     return r
 
 
-# @njit(cache=True)
+@njit(cache=True)
 def contract(X, j_vec):
     """Contract a sequence of matrices in the given order.
 
@@ -104,7 +104,7 @@ def contract(X, j_vec):
     return res
 
 
-# @njit(cache=True, fastmath=True)
+@njit(cache=True, fastmath=True)
 def objf(X, E, rho, J, y):
     """Calculate the objective function value for matrices, POVM elements, and target values.
 
@@ -144,7 +144,6 @@ import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
-# @jax.jit
 def cost_function_jax(K, d, r, E, rho, J, y):
     """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
 
@@ -176,15 +175,89 @@ def cost_function_jax(K, d, r, E, rho, J, y):
     m = len(J)
     n_povm = y.shape[0]
     objf_ = 0
-    for i in prange(m):  # pylint: disable=not-an-iterable
+    for i in range(m):  # pylint: disable=not-an-iterable
         j = J[i][J[i] >= 0] # This is being done here because of the padding with -1
-        # J[i]
         C = contract_jax(X, j)
         for o in range(n_povm):
-            objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
+            objf_ += _mean_squared_error_inner(E[o], C, rho, y[o, i])
     return objf_ / m / n_povm
 
-@jax.jit
+def _mean_squared_error_inner(E, C, rho, y):
+    """Compute a single term of the mean squared error (MSE) cost function.
+    
+    See equation 19 in mGST paper.
+    """
+    return abs(E.conj() @ C @ rho - y) ** 2
+    
+_mean_squared_error_inner_jit = jax.jit(_mean_squared_error_inner)
+
+def cost_function_jax_jit(K, d, r, E, rho, J, y):
+    """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
+
+    This function computes the objective function value based on input matrices X, POVM elements E,
+    density matrix rho, and target values y.
+
+    Parameters
+    ----------
+    K : numpy.ndarray
+        Kraus tensor (see dimensions)
+    d: 
+    r: 
+    E : numpy.ndarray
+        A 2D array representing the POVM elements, of shape (n_povm, r).
+    rho : numpy.ndarray
+        A 1D array representing the density matrix.
+    J : list of arrays representing the indices for which the objective function will be evaluated.
+    y : numpy.ndarray
+        A 2D array of shape (n_povm, len(J)) containing the target values.
+
+    Returns
+    -------
+    float
+        The objective function value for the given set of matrices, POVM elements,
+        and target values, normalized by m and n_povm.
+    """
+    
+    X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
+    m = len(J)
+    n_povm = y.shape[0]
+    objf_ = 0
+    # previous_count = contract_jax_jit._cache_size()
+    # print(f'Initial count: {previous_count}')
+    for i in range(m):  # pylint: disable=not-an-iterable
+        j = J[i]
+        C = contract_jax_jit(X, j)
+        # new_count = contract_jax_jit._cache_size()
+        # if new_count != previous_count:
+        #     print(f'at iteration {i} the new count is: {new_count}')
+        #     previous_count = new_count
+        for o in range(n_povm):
+            objf_ += _mean_squared_error_inner_jit(E[o], C, rho, y[o, i])
+            
+    # print("final _mean_squared_error_inner_jit count: ",_mean_squared_error_inner_jit._cache_size())
+    # print("final contract_jax_jit: ", contract_jax_jit._cache_size())
+    return objf_ / m / n_povm
+
+# @jax.jit
+# def _cost_function_jax_jit(X, E, rho, J, y):
+#     m = len(J)
+#     n_povm = y.shape[0]
+#     objf_ = 0
+#     for i in prange(m):  # pylint: disable=not-an-iterable
+#         j =  J[i]
+#         C = contract_jax_jit(X, j)
+#         for o in range(n_povm):
+#             objf_ += _mean_squared_error_inner_jit(E[o], C, rho, y[o, i])
+#     return objf_ / m / n_povm
+    
+# def _cost_function_jax_unjit(k, d, r):
+#     "Contract k along the rank dimension to obtain x"
+#     return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((d, r, r))
+
+# def cost_function_jax_jit(K, d, r, E, rho, J, y):
+#     X = _cost_function_jax_unjit(K, d, r)
+#     return _cost_function_jax_jit(X, E, rho, J, y)
+
 def contract_jax(X, j_vec):
     """Contract a sequence of matrices in the given order using JAX.
 
@@ -206,13 +279,22 @@ def contract_jax(X, j_vec):
     """
     res = jnp.eye(X[0].shape[0], dtype=jnp.complex128)
     for j in j_vec:
+        # I can actually erase this comparison here if I preprocess J beforehand
         res = jnp.where(j >= 0, res.dot(X[j]), res)
     return res
+
+contract_jax_jit = jax.jit(contract_jax)
+# This function will only get compiled when the type of length of j_vec or X changes.
 
 def dK_jax(K, E, rho, J, y, d, r):
     "Calculate the Euclidean derivative wrt the Gate tensor K using JAX"
     print('Using JAX power')
     return jax.grad(fun=cost_function_jax, argnums=0)(K, d, r, E, rho, J, y)
+
+def dK_jax_jit(K, E, rho, J, y, d, r):
+    "Calculate the Euclidean derivative wrt the Gate tensor K using JAX"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_jit, argnums=0)(K, d, r, E, rho, J, y)
 
 @njit(cache=True)
 def MVE_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm):
@@ -313,7 +395,7 @@ def Mp_norm_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm, p):
     return dist ** (1 / p) / m / n_povm, max_dist ** (1 / p)
 
 
-# @njit(cache=True)
+@njit(cache=True)
 def dK(X, K, E, rho, J, y, d, r, rK):
     """Compute the derivative of the Kraus operator K with respect to its parameters.
 

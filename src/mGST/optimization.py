@@ -5,7 +5,7 @@ Functions related to optimization on manifolds
 import numpy as np
 from scipy.linalg import eigh
 
-from mGST.low_level_jit import ddM, dK_dMdM, objf
+from mGST.low_level_jit import ddM, dK_dMdM, objf, cost_function_jax_jit
 
 
 def eigy_expm(A):
@@ -95,7 +95,7 @@ def update_K_geodesic(K, H, a):
     return K_new.reshape(d, rK, pdim, pdim)
 
 
-def lineobjf_isom_geodesic(a, H, K, E, rho, J, y):
+def lineobjf_isom_geodesic(a, H, K, E, rho, J, y, use_jax:bool=False):
     """Compute objective function at position on geodesic
 
     Parameters
@@ -125,6 +125,8 @@ def lineobjf_isom_geodesic(a, H, K, E, rho, J, y):
     pdim = K.shape[2]
     r = pdim**2
     K_test = update_K_geodesic(K, H, a)
+    if use_jax:
+        return cost_function_jax_jit(K_test, d, r, E, rho, J, y)
     X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((d, r, r))
     return objf(X_test, E, rho, J, y)
 

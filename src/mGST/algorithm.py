@@ -246,9 +246,15 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     B_new = update_B_geodesic(B, Delta, a)
     return B_new
 
-from mGST.low_level_jit import dK_jax
+from mGST.low_level_jit import dK_jax_jit
 
-def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False, conjugate:bool=False):
+def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
+       use_jax:bool=False, 
+       conjugate:bool=False,
+       optimize_step:bool=True,
+       step_size:float=1,
+       verbose:bool=False,
+       ):
     """Do Riemannian gradient descent optimization step on gates
 
     Parameters
@@ -294,7 +300,7 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False, 
         X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
         dK_ = dK(X, K, E, rho, J, y, d, r, rK)
     else:
-        dK_ = dK_jax( K, E, rho, J, y, d, r)
+        dK_ = dK_jax_jit( K, E, rho, J, y, d, r)
         
     if conjugate:
         dK_ = dK_.conj()
@@ -308,8 +314,13 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA", use_jax:bool=False, 
         Delta[k] = rGrad
 
     Delta = tangent_proj(K, Delta, d, rK)
-    res = minimize(lineobjf_isom_geodesic, 1e-8, args=(Delta, K, E, rho, J, y), method=ls, options={"maxiter": 200})
-    a = res.x
+    if optimize_step:
+        res = minimize(lineobjf_isom_geodesic, 1e-8, args=(Delta, K, E, rho, J, y, use_jax), method=ls, options={"maxiter": 200})
+        a = res.x
+        if verbose:
+            print('optimized step size: ', a)
+    else:
+        a = step_size
     K_new = update_K_geodesic(K, Delta, a)
 
     return K_new
