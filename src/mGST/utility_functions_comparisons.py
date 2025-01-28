@@ -80,12 +80,15 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
 
 from mGST.algorithm import gd
 
-def get_x_from_k(k, d, r):
-    return np.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((d, r, r))
+def get_x_from_k(k, depth=None, dim_squared=None):
+    if not depth or not dim_squared:
+        depth = k.shape[0]
+        dim_squared = k.shape[-1]**2
+    return np.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
 
 def compute_new_x(K, E, rho, y, J, d, r, rK, fixed_gates, gds_kwargs={}):
     K_gds = gd(K, E, rho, y, J, d, r, rK, fixed_gates=fixed_gates, ls="COBYLA", **gds_kwargs)
-    return get_x_from_k(k=K_gds, d=d, r=r)
+    return get_x_from_k(k=K_gds, depth=d, dim_squared=r)
 
 from mGST.low_level_jit import objf
 
