@@ -5,7 +5,10 @@ from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_f
 
 from mGST.qiskit_interface import qiskit_gate_to_operator
 
-import numpy as np
+from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
+from qiskit.circuit.library import CZGate, RGate
+
+import jax.numpy as jnp
 
 backend = "iqmfakeapollo"
 
@@ -37,29 +40,29 @@ def initialize_mgst_parameters(dataset, target_init = True):
     
     if target_init:
         K_target = qiskit_gate_to_operator(dataset.attrs["gate_set"])
-        X_target = np.einsum("ijkl,ijnm -> iknlm", K_target, K_target.conj()).reshape(
+        X_target = jnp.einsum("ijkl,ijnm -> iknlm", K_target, K_target.conj()).reshape(
             (dataset.attrs["num_gates"], dataset.attrs["pdim"] ** 2, dataset.attrs["pdim"] ** 2)
         )  # tensor of superoperators
         
         rho = (
-            np.kron(additional_fns.basis(dataset.attrs["pdim"], 0).T.conj(), additional_fns.basis(dataset.attrs["pdim"], 0))
+            jnp.kron(additional_fns.basis(dataset.attrs["pdim"], 0).T.conj(), additional_fns.basis(dataset.attrs["pdim"], 0))
             .reshape(-1)
-            .astype(np.complex128)
+            .astype(jnp.complex128)
         )
         
         # Computational basis measurement:
-        E = np.array(
+        E = jnp.array(
             [
-                np.kron(
+                jnp.kron(
                     additional_fns.basis(dataset.attrs["pdim"], i).T.conj(), additional_fns.basis(dataset.attrs["pdim"], i)
                 ).reshape(-1)
                 for i in range(dataset.attrs["pdim"])
             ]
-        ).astype(np.complex128)
+        ).astype(jnp.complex128)
         
         
         K = additional_fns.perturbed_target_init(X_target, dataset.attrs["rank"])
-        X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
+        X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
     else:
         K, X, E, rho = random_gs(d, r, rK, n_povm)
         
@@ -84,7 +87,7 @@ def get_x_from_k(k, depth=None, dim_squared=None):
     if not depth or not dim_squared:
         depth = k.shape[0]
         dim_squared = k.shape[-1]**2
-    return np.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
+    return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
 
 def compute_new_x(K, E, rho, y, J, d, r, rK, fixed_gates, gds_kwargs={}):
     K_gds = gd(K, E, rho, y, J, d, r, rK, fixed_gates=fixed_gates, ls="COBYLA", **gds_kwargs)
@@ -110,8 +113,53 @@ def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=20
         Xi = get_x_from_k(Ki, d, r)
         cost_function_history.append(objf(Xi, E, rho, J, y))
         
-        if np.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] < target_rel_prec:
+        if jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] < target_rel_prec:
             print('Success threshold reached prematurely.')
             break
         
     return Ki, cost_function_history
+
+def create_4q_gst_config():
+    """Create the configuration to run a 4 qubit Gate set tomography protocol.
+
+    Returns:
+       The configuration used for 4Q GST
+    """
+
+    cz_cz = QuantumCircuit(4)
+    cz_cz.append(CZGate(), [0,1])
+    cz_cz.append(CZGate(), [2,3])
+
+    gate_list = [
+        RGate(0.5 * jnp.pi, 0),
+        RGate(0.5 * jnp.pi, 0),
+        RGate(0.5 * jnp.pi, 0),
+        RGate(0.5 * jnp.pi, 0),
+        RGate(0.5 * jnp.pi, jnp.pi / 2),
+        RGate(0.5 * jnp.pi, jnp.pi / 2),
+        RGate(0.5 * jnp.pi, jnp.pi / 2),
+        RGate(0.5 * jnp.pi, jnp.pi / 2),
+        cz_cz,
+    ]
+    gates = [QuantumCircuit(4, 0) for _ in range(len(gate_list))]
+    gate_qubits = [[0], [1], [2], [3], [0], [1], [2], [3], [0, 1, 2, 3]]
+    for i, gate in enumerate(gate_list):
+        if isinstance(gate, QuantumCircuit):
+            gates[i].compose(gate, gate_qubits[i], inplace = True)
+        else:
+            gates[i].append(gate, gate_qubits[i])
+            
+    gate_labels = ["Rx(pi/2)", "Rx(pi/2)", "Rx(pi/2)", "Rx(pi/2)", 
+                "Ry(pi/2)", "Ry(pi/2)", "Ry(pi/2)", "Ry(pi/2)", 
+                "CZ-CZ"]
+
+    Q4_GST = GSTConfiguration(
+        qubit_layouts=[[0,1,3,4]],
+        gate_set=gates,
+        gate_labels=gate_labels,
+        num_circuits=2000,
+        shots=1000,
+        rank=1,
+    )
+
+    return Q4_GST

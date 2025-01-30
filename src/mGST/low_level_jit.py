@@ -140,9 +140,80 @@ def objf(X, E, rho, J, y):
             objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
     return objf_ / m / n_povm
 
+def cost_function_numba(K, E, rho, J, y):
+    num_gates = K.shape[0]
+    dim = K.shape[2]
+    # einsum is not supported by numba
+    X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((num_gates, dim**2, dim**2))
+    
+    return objf(X, E, rho, J, y)
+
 import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
+
+
+def contract_mps_all_povm(kraus, gates_indices, povm_tensor, state):
+    """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_tensor
+
+    Args:
+        kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
+        povm_tensor: tensor containing all povm of dimensions: (num_povm, dim, dim)
+        state: tensor of dimensions: (dim, dim)
+    """
+    # Initialize right tensor as the state
+    right_tensor = state  # dim_up_in, dim_down_in
+    optimal_path = [(0, 1), (0, 1)]
+    # Iterate through the Kraus tensors in reverse order
+    for idx in reversed(gates_indices):
+        k = kraus[idx]  # kraus_rank, dim_up_out, dim_up_in
+        # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) -> kraus_rank, dim_up_out, dim_down_in
+        right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
+        
+    return  jnp.sum(povm_tensor.conj() * right_tensor.T, axis=(1, 2)) # num_povm, dim, dim x dim, dim -> num_povm
+
+def cost_function_mps_single_gate_sequence(kraus, gates_indices, povm_tensor, state, prob_vector):
+    """Compute the full cost function for a single set of gate indices.
+
+    Args:
+        kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
+        povm_tensor: tensor containing all povm of dimensions: (num_povm, dim, dim)
+        state: tensor of dimensions: (dim, dim)
+        prob_vector: tensor of dimension: (num_povm)
+    """
+    inner_prod_vector = contract_mps_all_povm(kraus, gates_indices, povm_tensor, state) # num_povm
+    cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2
+    return jnp.sum(cost_vector) # num_povm -> 
+
+cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
+
+def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, jit:bool=False):
+    """Compute the cost function using jax and mps contraction strategy.
+    
+    Optimized using the most scalable jnp functions.
+
+    Args:
+        kraus: kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_tensor: tensor of dimensions (num_povm, dim, dim)
+        state: tensor of dimensions (dim, dim)
+        indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
+        prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+    """
+    cost_value = 0
+    num_gate_sequences = len(indices_list)
+    num_povm = povm_tensor.shape[0]
+    if jit:
+        inner_function = cost_function_mps_single_gate_sequence_jit
+    else:
+        inner_function = cost_function_mps_single_gate_sequence
+    
+    for idx, gates_indices in enumerate(indices_list):
+        cost_value += inner_function(kraus, gates_indices, povm_tensor, state, prob_matrix[:,idx])
+    return cost_value / (num_gate_sequences * num_povm)
+
+    
 
 def cost_function_jax(K, d, r, E, rho, J, y):
     """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
@@ -285,6 +356,19 @@ def contract_jax(X, j_vec):
 
 contract_jax_jit = jax.jit(contract_jax)
 # This function will only get compiled when the type of length of j_vec or X changes.
+
+def gradient_k_mps_jit(kraus, povm_tensor, state, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=True)
+
+def gradient_k_numba(K, E, rho, J, y):
+    num_gates = K.shape[0]
+    kraus_rank = K.shape[1]
+    dim = K.shape[2]
+    # einsum is not supported by numba
+    X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((num_gates, dim**2, dim**2))
+    return dK(X, K, E, rho, J, y, d=num_gates, r=dim**2, rK=kraus_rank) 
 
 def dK_jax(K, E, rho, J, y, d, r):
     "Calculate the Euclidean derivative wrt the Gate tensor K using JAX"
