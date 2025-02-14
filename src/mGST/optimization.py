@@ -5,7 +5,7 @@ Functions related to optimization on manifolds
 import numpy as np
 from scipy.linalg import eigh
 
-from mGST.low_level_jit import ddM, dK_dMdM, objf, cost_function_jax_jit, cost_function_jax_mps
+from mGST.low_level_jit import ddM, dK_dMdM, objf, cost_function_jax_mps
 
 
 def eigy_expm(A):

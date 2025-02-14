@@ -246,7 +246,7 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     B_new = update_B_geodesic(B, Delta, a)
     return B_new
 
-from mGST.low_level_jit import dK_jax_jit, gradient_k_and_value_jit, gradient_k_mps_jit
+from mGST.low_level_jit import dK_jax, gradient_k_and_value_jit, gradient_k_mps_jit
 import jax.numpy as jnp
 
 def gradient_descent_step(kraus, povm_tensor, state, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, step_size:float=1, verbose:bool=False):
@@ -333,7 +333,7 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
         X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
         dK_ = dK(X, K, E, rho, J, y, d, r, rK)
     else:
-        dK_ = dK_jax_jit( K, E, rho, J, y, d, r)
+        dK_ = dK_jax( K, E, rho, J, y, d, r)
         
     if conjugate:
         dK_ = dK_.conj()
