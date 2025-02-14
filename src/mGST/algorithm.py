@@ -246,7 +246,40 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     B_new = update_B_geodesic(B, Delta, a)
     return B_new
 
-from mGST.low_level_jit import dK_jax_jit
+from mGST.low_level_jit import dK_jax_jit, gradient_k_and_value_jit, gradient_k_mps_jit
+import jax.numpy as jnp
+
+def gradient_descent_step(kraus, povm_tensor, state, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, step_size:float=1, verbose:bool=False):
+    
+    num_gates, kraus_rank, dim, _ = kraus.shape
+    n = kraus_rank * dim
+    # tangent_tensor = jnp.zeros((num_gates, n, dim))
+    if optimize_step:
+        grad_k = gradient_k_mps_jit(kraus, povm_tensor, state, indices_list, prob_matrix)
+        cost_value = None
+    else:
+        cost_value, grad_k = gradient_k_and_value_jit(kraus, povm_tensor, state, indices_list, prob_matrix)
+    riem_grad_list = []
+        
+    for idx in range(num_gates):
+        # derivative
+        Fy = grad_k[idx].reshape(n, dim)
+        Y = kraus[idx].reshape(n, dim)
+        # Riem. gradient taken from conjugate derivative
+        riem_grad = Fy.conj() - Y @ Fy.T @ Y
+        riem_grad_list.append(riem_grad)
+
+    riem_grad_tensor = jnp.array(riem_grad_list)
+    # Delta = tangent_proj(K, Delta, d, rK)
+    
+    if optimize_step:
+        res = minimize(lineobjf_isom_geodesic, step_size, args=(riem_grad_tensor, kraus, povm_tensor, state, indices_list, prob_matrix), method=ls_method, options={"maxiter": ls_max_iter})
+        step_size = res.x
+        if verbose:
+            print('optimized step size: ', step_size)
+    
+    return update_K_geodesic(kraus, riem_grad_tensor, step_size), step_size, cost_value
+    
 
 def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
        use_jax:bool=False, 

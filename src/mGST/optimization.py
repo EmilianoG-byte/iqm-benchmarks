@@ -5,7 +5,7 @@ Functions related to optimization on manifolds
 import numpy as np
 from scipy.linalg import eigh
 
-from mGST.low_level_jit import ddM, dK_dMdM, objf, cost_function_jax_jit
+from mGST.low_level_jit import ddM, dK_dMdM, objf, cost_function_jax_jit, cost_function_jax_mps
 
 
 def eigy_expm(A):
@@ -95,7 +95,7 @@ def update_K_geodesic(K, H, a):
     return K_new.reshape(d, rK, pdim, pdim)
 
 
-def lineobjf_isom_geodesic(a, H, K, E, rho, J, y, use_jax:bool=False):
+def lineobjf_isom_geodesic(step_size, tanget_vector, kraus, povm_tensor, state, indices_list, prob_matrix):
     """Compute objective function at position on geodesic
 
     Parameters
@@ -121,14 +121,11 @@ def lineobjf_isom_geodesic(a, H, K, E, rho, J, y, use_jax:bool=False):
     f(a): float
         Objective function value at new position along the geodesic
     """
-    d = K.shape[0]
-    pdim = K.shape[2]
-    r = pdim**2
-    K_test = update_K_geodesic(K, H, a)
-    if use_jax:
-        return cost_function_jax_jit(K_test, d, r, E, rho, J, y)
-    X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((d, r, r))
-    return objf(X_test, E, rho, J, y)
+    K_test = update_K_geodesic(kraus, tanget_vector, step_size)
+   
+    return cost_function_jax_mps(K_test, povm_tensor, state, indices_list, prob_matrix, jit=True)
+    # X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((num_gates, r, r))
+    # return objf(X_test, E, rho, J, y)
 
 
 def update_A_geodesic(A, H, a):

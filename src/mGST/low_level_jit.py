@@ -185,11 +185,11 @@ def cost_function_mps_single_gate_sequence(kraus, gates_indices, povm_tensor, st
     """
     inner_prod_vector = contract_mps_all_povm(kraus, gates_indices, povm_tensor, state) # num_povm
     cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2
-    return jnp.sum(cost_vector) # num_povm -> 
+    return jnp.sum(cost_vector) # num_povm ->
 
 cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
 
-def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, jit:bool=False):
+def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
     """Compute the cost function using jax and mps contraction strategy.
     
     Optimized using the most scalable jnp functions.
@@ -206,11 +206,19 @@ def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, 
     num_povm = povm_tensor.shape[0]
     if jit:
         inner_function = cost_function_mps_single_gate_sequence_jit
+        previous_count = cost_function_mps_single_gate_sequence_jit._cache_size()
+        if verbose:
+            print(f'Initial count: {previous_count}')
     else:
         inner_function = cost_function_mps_single_gate_sequence
     
     for idx, gates_indices in enumerate(indices_list):
         cost_value += inner_function(kraus, gates_indices, povm_tensor, state, prob_matrix[:,idx])
+        if jit:
+            new_count = cost_function_mps_single_gate_sequence_jit._cache_size()
+            if new_count != previous_count and verbose:
+                print(f'at iteration {idx} the new count changed to: {new_count}')
+                previous_count = new_count
     return cost_value / (num_gate_sequences * num_povm)
 
     
@@ -357,10 +365,23 @@ def contract_jax(X, j_vec):
 contract_jax_jit = jax.jit(contract_jax)
 # This function will only get compiled when the type of length of j_vec or X changes.
 
+def gradient_k_mps(kraus, povm_tensor, state, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=False)
+
 def gradient_k_mps_jit(kraus, povm_tensor, state, indices_list, prob_matrix):
     "Calculate the Euclidean gradient"
     print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=True)
+
+def gradient_k_and_value_jit(kraus, povm_tensor, state, indices_list, prob_matrix):
+    "computes both the value of the function and gradient"
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=True)
+
+def gradient_k_and_value_nojit(kraus, povm_tensor, state, indices_list, prob_matrix):
+    "computes both the value of the function and gradient"
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=False)
 
 def gradient_k_numba(K, E, rho, J, y):
     num_gates = K.shape[0]

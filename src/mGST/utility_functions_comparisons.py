@@ -119,6 +119,38 @@ def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=20
         
     return Ki, cost_function_history
 
+from mGST.low_level_jit import cost_function_jax_mps
+from mGST.algorithm import gradient_descent_step
+
+def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True):
+    
+    if optimize_step:
+        cost_function_history = [cost_function_jax_mps(kraus0, povm_tensor, state, indices_list, prob_matrix, jit=True)]
+    else:
+        cost_function_history = [] # the cost function will be evaluated in the first step
+    
+    krausi = kraus0
+    opt_step_size = step_size
+    
+    for i in range(max_iter):
+        print('iteration: ', i)
+
+        if optimize_step:
+            krausi, opt_step_size, _ = gradient_descent_step(krausi, povm_tensor, state, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, step_size=opt_step_size, verbose=False)
+            
+            cost_function_history.append(cost_function_jax_mps(krausi, povm_tensor, state, indices_list, prob_matrix, jit=True))
+        else:
+            # every time we take the derivative the cost function is evaluated, so we can actually avoid calling the cost here again if we use jax.grad_and_fn function
+            krausi, _, cost_i = gradient_descent_step(krausi, povm_tensor, state, indices_list, prob_matrix, optimize_step=optimize_step, step_size=opt_step_size)
+            cost_function_history.append(cost_i)
+        print('cost: ', cost_function_history[-1])
+        if i > 1:
+            if jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] <   target_rel_prec:
+                print('Success threshold reached prematurely.')
+                break
+    
+    return krausi, cost_function_history
+
 def create_4q_gst_config():
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
 
@@ -163,3 +195,14 @@ def create_4q_gst_config():
     )
 
     return Q4_GST
+
+def check_kraus_tensor_is_isometry(kraus_tensor:jnp.array)->bool: 
+    """Check if the Kraus tensor is an isometry.
+
+    Args:
+        kraus_tensor (jnp.array): The Kraus tensor to check. Dimensions: rank, dim, dim
+
+    Returns:
+        bool: True if the Kraus tensor is an isometry, False otherwise.
+    """
+    return jnp.allclose(jnp.eye(kraus_tensor.shape[-1]), jnp.einsum("ijk,ijl->kl", kraus_tensor, kraus_tensor.conj()))
