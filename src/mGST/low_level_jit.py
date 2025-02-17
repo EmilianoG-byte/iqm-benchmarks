@@ -153,57 +153,63 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 
-def contract_mps_all_povm(kraus, gates_indices, povm_tensor, state):
+def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
     """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_tensor
 
     Args:
         kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
         gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
-        povm_tensor: tensor containing all povm of dimensions: (num_povm, dim, dim)
-        state: tensor of dimensions: (dim, dim)
     """
     # Initialize right tensor as the state
-    right_tensor = state  # dim_up_in, dim_down_in
+    right_tensor = state_psd @ state_psd.conj().T  # dim_up_in, dim_down_in
     optimal_path = [(0, 1), (0, 1)]
     # Iterate through the Kraus tensors in reverse order
     for idx in reversed(gates_indices):
         k = kraus[idx]  # kraus_rank, dim_up_out, dim_up_in
-        # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) -> kraus_rank, dim_up_out, dim_down_in
+        # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) x (kraus_rank, dim_down_out, dim_down_in) -> dim_up_out, dim_down_in
         right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
         
-    return  jnp.sum(povm_tensor.conj() * right_tensor.T, axis=(1, 2)) # num_povm, dim, dim x dim, dim -> num_povm
+    return jnp.einsum("ijk, jl, ilk -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
+    # Previous implementation using the Hadamard product:
+    # povm_tensor = jnp.einsum("ijk, ilk -> ilj", povm_psd, povm_psd.conj()) # (num_povm, dim, rank) x (num_povm, dim, rank) -> num_povm, dim_up_in, dim_down_in
+    # return  jnp.sum(povm_tensor.conj() * right_tensor, axis=(1, 2)) # num_povm, dim_up_in, dim_down_in x (dim_up_out, dim_down_in) -> num_povm
 
-def cost_function_mps_single_gate_sequence(kraus, gates_indices, povm_tensor, state, prob_vector):
+def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
     """Compute the full cost function for a single set of gate indices.
 
     Args:
         kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
         gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
-        povm_tensor: tensor containing all povm of dimensions: (num_povm, dim, dim)
-        state: tensor of dimensions: (dim, dim)
         prob_vector: tensor of dimension: (num_povm)
     """
-    inner_prod_vector = contract_mps_all_povm(kraus, gates_indices, povm_tensor, state) # num_povm
+    inner_prod_vector = contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices) # num_povm
     cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2
     return jnp.sum(cost_vector) # num_povm ->
 
 cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
 
-def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
+def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
     """Compute the cost function using jax and mps contraction strategy.
     
     Optimized using the most scalable jnp functions.
 
     Args:
         kraus: kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
-        povm_tensor: tensor of dimensions (num_povm, dim, dim)
-        state: tensor of dimensions (dim, dim)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) factor of the state of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
         indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
         prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
     """
     cost_value = 0
     num_gate_sequences = len(indices_list)
-    num_povm = povm_tensor.shape[0]
+    num_povm = povm_psd.shape[0]
     if jit:
         inner_function = cost_function_mps_single_gate_sequence_jit
         previous_count = cost_function_mps_single_gate_sequence_jit._cache_size()
@@ -213,15 +219,13 @@ def cost_function_jax_mps(kraus, povm_tensor, state, indices_list, prob_matrix, 
         inner_function = cost_function_mps_single_gate_sequence
     
     for idx, gates_indices in enumerate(indices_list):
-        cost_value += inner_function(kraus, gates_indices, povm_tensor, state, prob_matrix[:,idx])
+        cost_value += inner_function(kraus, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
         if jit:
             new_count = cost_function_mps_single_gate_sequence_jit._cache_size()
             if new_count != previous_count and verbose:
                 print(f'at iteration {idx} the new count changed to: {new_count}')
                 previous_count = new_count
     return cost_value / (num_gate_sequences * num_povm)
-
-    
 
 def cost_function_jax(K, d, r, E, rho, J, y):
     """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
@@ -296,23 +300,23 @@ def contract_jax(X, j_vec):
 contract_jax_jit = jax.jit(contract_jax)
 # This function will only get compiled when the type of length of j_vec or X changes.
 
-def gradient_k_mps(kraus, povm_tensor, state, indices_list, prob_matrix):
+def gradient_k_mps(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient"
     print('Using JAX power')
-    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=False)
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=False)
 
-def gradient_k_mps_jit(kraus, povm_tensor, state, indices_list, prob_matrix):
+def gradient_k_mps_jit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient"
     print('Using JAX power')
-    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=True)
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
 
-def gradient_k_and_value_jit(kraus, povm_tensor, state, indices_list, prob_matrix):
+def gradient_k_and_value_jit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     "computes both the value of the function and gradient"
-    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=True)
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
 
-def gradient_k_and_value_nojit(kraus, povm_tensor, state, indices_list, prob_matrix):
+def gradient_k_and_value_nojit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     "computes both the value of the function and gradient"
-    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state, indices_list, prob_matrix, jit=False)
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=False)
 
 def gradient_k_numba(K, E, rho, J, y):
     num_gates = K.shape[0]

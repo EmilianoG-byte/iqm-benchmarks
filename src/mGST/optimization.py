@@ -95,37 +95,24 @@ def update_K_geodesic(K, H, a):
     return K_new.reshape(d, rK, pdim, pdim)
 
 
-def lineobjf_isom_geodesic(step_size, tanget_vector, kraus, povm_tensor, state, indices_list, prob_matrix):
+def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     """Compute objective function at position on geodesic
-
-    Parameters
-    ----------
-    a : float
-        Geodesic curve parameter
-    H : numpy array
-        Element of the tangent space at K and local direction of the geodesic
-    K : numpy array
-        Current position
-    E : numpy array
-        Current POVM estimate
-    rho : numpy array
-        Current initial state estimate
-    J : numpy array
-        2D array where each row contains the gate indices of a gate sequence
-    y : numpy array
-        2D array of measurement outcomes for sequences in J;
-        The columns contain the outcome probabilities for different povm elements
-
-    Returns
-    -------
-    f(a): float
+    
+    Args:
+        step_size: Geodesic curve parameter
+        tanget_vector: Element of the tangent space at K and local direction of the geodesic
+        kraus: Current position. Dimensions are (num_gates, kraus_rank, dim_out, dim_in)
+        povm_tensor: Current POVM estimate. Dimensions are (num_povm, dim_out, dim_out)
+        state_psd: Positive semidefinite matrix representing the initial state. Dimensions are (dim_out, dim_out)
+        indices_list: 2D array where each row contains the gate indices of a gate sequence
+        prob_matrix: 2D array of measurement outcomes for sequences in J.
+        
+    Returns:
         Objective function value at new position along the geodesic
     """
     K_test = update_K_geodesic(kraus, tanget_vector, step_size)
    
-    return cost_function_jax_mps(K_test, povm_tensor, state, indices_list, prob_matrix, jit=True)
-    # X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((num_gates, r, r))
-    # return objf(X_test, E, rho, J, y)
+    return cost_function_jax_mps(K_test, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
 
 
 def update_A_geodesic(A, H, a):

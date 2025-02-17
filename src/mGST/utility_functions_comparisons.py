@@ -9,6 +9,7 @@ from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
 
 import jax.numpy as jnp
+import jax
 
 backend = "iqmfakeapollo"
 
@@ -122,10 +123,27 @@ def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=20
 from mGST.low_level_jit import cost_function_jax_mps
 from mGST.algorithm import gradient_descent_step
 
-def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True):
+def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state_psd, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True):
+    """Run a simple gradient descent optimization on the gates using JAX.
+
+    Args:
+        kraus0: Kraus tensor to start the optimization from. Dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_tensor: POVM tensor. Dimensions: num_povm, dim, dim
+        state_psd: Positive semidefinite state dimensions are (dim, state_rank)
+        indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
+         prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+        max_iter: Max number of iterations to run GDS for. Defaults to 200.
+        target_rel_prec: Relative precision used to decide whether to terminate optimization early. Defaults to 1e-3.
+        step_size: Step size used throughought the optimization. Use only if line search is not desired. Defaults to 1.
+        optimize_step: Whether to optimize the step_size using line search or not. Defaults to True.
+
+    Returns:
+        krausi: Optimized Kraus tensor.
+        cost_function_history: History of the cost function values at each iteration.
+    """
     
     if optimize_step:
-        cost_function_history = [cost_function_jax_mps(kraus0, povm_tensor, state, indices_list, prob_matrix, jit=True)]
+        cost_function_history = [cost_function_jax_mps(kraus0, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)]
     else:
         cost_function_history = [] # the cost function will be evaluated in the first step
     
@@ -136,12 +154,12 @@ def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state, indices_list, prob_m
         print('iteration: ', i)
 
         if optimize_step:
-            krausi, opt_step_size, _ = gradient_descent_step(krausi, povm_tensor, state, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, step_size=opt_step_size, verbose=False)
+            krausi, opt_step_size, _ = gradient_descent_step(krausi, povm_tensor, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, step_size=opt_step_size, verbose=False)
             
-            cost_function_history.append(cost_function_jax_mps(krausi, povm_tensor, state, indices_list, prob_matrix, jit=True))
+            cost_function_history.append(cost_function_jax_mps(krausi, povm_tensor, state_psd, indices_list, prob_matrix, jit=True))
         else:
             # every time we take the derivative the cost function is evaluated, so we can actually avoid calling the cost here again if we use jax.grad_and_fn function
-            krausi, _, cost_i = gradient_descent_step(krausi, povm_tensor, state, indices_list, prob_matrix, optimize_step=optimize_step, step_size=opt_step_size)
+            krausi, _, cost_i = gradient_descent_step(krausi, povm_tensor, state_psd, indices_list, prob_matrix, optimize_step=optimize_step, step_size=opt_step_size)
             cost_function_history.append(cost_i)
         print('cost: ', cost_function_history[-1])
         if i > 1:
@@ -206,3 +224,60 @@ def check_kraus_tensor_is_isometry(kraus_tensor:jnp.array)->bool:
         bool: True if the Kraus tensor is an isometry, False otherwise.
     """
     return jnp.allclose(jnp.eye(kraus_tensor.shape[-1]), jnp.einsum("ijk,ijl->kl", kraus_tensor, kraus_tensor.conj()))
+
+
+# Extracted from openTN
+def split_matrix_svd(op: jnp.ndarray, max_rank: int = 2):
+    """
+    Perform batched singular value decomposition (SVD) on an operator (matrix),
+    truncating small singular values based on the given rank.
+
+    Supports input tensors of shape (..., N, M), where the SVD is applied independently
+    to each (N, M) matrix along the batch dimensions.
+
+    Args:
+        op (jnp.ndarray): Input tensor of shape (..., N, M).
+        max_rank (int): Maximum number of singular values to keep.
+
+    Returns:
+        u (jnp.ndarray): Left singular vectors of shape (..., N, min(sv_keep, M)).
+        s (jnp.ndarray): Singular values of shape (..., min(max_rank, M)).
+    """
+    if not max_rank >=1:
+        raise ValueError(f"max_rank={max_rank} must be at least 1")
+    if not op.ndim >= 2:
+        raise ValueError(f"op.ndim={op.ndim} must be at least 2")
+    
+    # Compute batched SVD
+    u, s, _ = jnp.linalg.svd(op, hermitian=True)
+    
+    # Truncate singular values and vectors accordingly
+    u = u[..., :max_rank]  # Keep only the top singular vectors
+    s = s[..., :max_rank]  # Keep only the top singular values
+    return u, s
+
+
+def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None) -> jnp.ndarray:
+    """
+    Factorizes a batch of positive semi-definite (PSD) matrices by truncating singular values.
+
+    More robust to small values than cholesky decomposition from numpy.
+
+    Returns x' such that psd ≈ x' @ x'.conj().T
+    
+    Args:
+    psd (jnp.ndarray): Input tensor of shape (..., N, N) (must be Hermitian).
+    max_rank (int, optional): Maximum number of singular values to keep.
+    
+    Returns:
+        jnp.ndarray: The factorized matrix `x'` of shape (..., N, min(max_rank, N)).
+    """
+    if max_rank is None:
+        max_rank = psd.shape[-1]  # Assume full rank by default
+        
+    x, s, = split_matrix_svd(psd, max_rank)
+    
+     # Use vmap to apply jnp.diag batch-wise
+    return x * jnp.sqrt(s)[..., None, :]
+    #  s[..., None, :] reshapes s into shape (..., 1, min(max_rank, N)), allowing elementwise multiplication with x ((..., N, min(max_rank, N))).
+
