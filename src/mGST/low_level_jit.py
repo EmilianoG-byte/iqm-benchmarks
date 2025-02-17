@@ -173,9 +173,6 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
         right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
         
     return jnp.einsum("ijk, jl, ilk -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
-    # Previous implementation using the Hadamard product:
-    # povm_tensor = jnp.einsum("ijk, ilk -> ilj", povm_psd, povm_psd.conj()) # (num_povm, dim, rank) x (num_povm, dim, rank) -> num_povm, dim_up_in, dim_down_in
-    # return  jnp.sum(povm_tensor.conj() * right_tensor, axis=(1, 2)) # num_povm, dim_up_in, dim_down_in x (dim_up_out, dim_down_in) -> num_povm
 
 def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
     """Compute the full cost function for a single set of gate indices.
