@@ -294,7 +294,7 @@ def polar_decomposition_rectangular(x:jnp.ndarray, z:jnp.ndarray, step_size:floa
         [1] https://page.math.tu-berlin.de/~mehl/papers/hmt1.pdf
         [2] https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.polar.html
     """
-    return jax.scipy.linalg.polar(x + step_size * z)[0]
+    return jax.scipy.linalg.polar(x - step_size * z)[0]
 
 
 def project_onto_tangent_space(x: jnp.array, z: jnp.array)->jnp.array:

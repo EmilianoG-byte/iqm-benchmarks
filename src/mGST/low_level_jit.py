@@ -165,6 +165,7 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
     """
     # Initialize right tensor as the state
     right_tensor = state_psd @ state_psd.conj().T  # dim_up_in, dim_down_in
+    # right_tensor = state_psd
     optimal_path = [(0, 1), (0, 1)]
     # Iterate through the Kraus tensors in reverse order
     for idx in reversed(gates_indices):
@@ -174,6 +175,7 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
         
     # (num_povm, dim_up_in, rank_povm) x (dim_up_in, dim_down_in) x (num_povm, dim_down_in, rank_povm) -> num_povm
     return jnp.einsum("ijk, jl, ilk -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
+    # return jnp.sum(povm_psd.conj() * right_tensor.T, axis=(1, 2))
 
 def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
     """Compute the full cost function for a single set of gate indices.
@@ -216,6 +218,7 @@ def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix,
     else:
         inner_function = cost_function_mps_single_gate_sequence
     
+    print('jax power')
     for idx, gates_indices in enumerate(indices_list):
         cost_value += inner_function(kraus, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
         if jit:

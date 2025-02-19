@@ -283,8 +283,9 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     if use_geodesic:
         new_kraus_tensor = update_K_geodesic(kraus_tensor, stiefel_gradient_tensor, step_size)
     else:
-        new_isometries = [polar_decomposition_rectangular(x = isometry, z = gradient, step_size=step_size) for isometry, gradient in zip(kraus_isometries_tensor, stiefel_gradient_tensor)]    
-        new_kraus_tensor = [jnp.reshape(isometry, shape=kraus_tensor.shape) for isometry in new_isometries]
+        new_isometries = [polar_decomposition_rectangular(x = isometry, z = gradient, step_size=step_size) for isometry, gradient in zip(kraus_isometries_tensor, stiefel_gradient_tensor)]
+        rank_kraus, dim = kraus_tensor.shape[1], kraus_tensor.shape[2]
+        new_kraus_tensor = jnp.array([jnp.reshape(isometry, shape=(rank_kraus, dim, dim)) for isometry in new_isometries])
     
     return new_kraus_tensor, step_size, cost_value
     

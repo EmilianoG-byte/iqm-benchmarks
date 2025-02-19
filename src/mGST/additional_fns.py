@@ -66,8 +66,10 @@ def randpsd(n, normalized="True"):
     mat = mat.reshape(-1)
     return mat
 
+import jax
+import jax.numpy as jnp
 
-def randvec(n):
+def randvec(n, seed:int = 42):
     """Generate vector with real and imaginary part drawn from the normal distribution
 
     Parameters
@@ -82,12 +84,16 @@ def randvec(n):
         from the normal distribution with mean 0 and variance 1.
     """
     # randn(n) produces a random vector of length n with mean 0 and variance 1
-    g = np.random.randn(n) + 1j * np.random.randn(n)
-    g = g / np.linalg.norm(g)
+    key = jax.random.key(seed)
+    key2 = jax.random.key(seed+1)
+    
+    g = jax.random.normal(key, (n,)) + 1j * jax.random.normal(key2, (n,))
+    # g = np.random.randn(n) + 1j * np.random.randn(n)
+    g = g / jnp.linalg.norm(g)
     return g
 
 
-def randHerm(n):
+def randHerm(n, seed:int = 42):
     """Generate random square hermitian matrix
 
     Parameters
@@ -105,7 +111,7 @@ def randHerm(n):
         This matrix is then projected onto the space of hermitian
         matrices and normalized in spectral norm.
     """
-    G = randvec(n * n).reshape(n, n)
+    G = randvec(n * n, seed=seed).reshape(n, n)
     G = (G + G.T.conj()) / 2
     # ord=2 gives the spectral norm
     G = G / np.linalg.norm(G, ord=2)
@@ -140,7 +146,7 @@ def randHermGS(d, r):
     return X
 
 
-def randU(n, a=1):
+def randU(n:int, a: float = 1, seed:int = 42):
     """Generates random unitary from a random hermitian generator
 
     Parameters
@@ -155,7 +161,7 @@ def randU(n, a=1):
     U: 2D numpy array
         Matrix exponential of random hermitian matrix times the imaginary unit.
     """
-    return expm(1j * a * randHerm(n)).astype(np.complex128)
+    return expm(1j * a * randHerm(n, seed=seed)).astype(np.complex128)
 
 
 def randU_Haar(n):
@@ -177,19 +183,15 @@ def randU_Haar(n):
     return np.dot(Q, D)
 
 
-def randKrausSet(d, r, rK, a=1):
+def randKrausSet(num_gate_sequences:int, dim:int, rank_kraus:int, a: float =1, seed:int = 42):
     """Generates random set of Kraus operators
 
     Parameters
     ----------
-    d : int
-        Number of gates
-    r : int
-        Superoperator dimension of the gates given by the square of the physical dimension
-    rK : int
-        Number of Kraus operators per gate ("Kraus rank")
-    a : float
-        Parameter to control the norm of the hermitian generator and thereby
+    num_gate_sequences : Number of gate sequences in the gate set
+    dim: Dimension of the Hilbert space the Kraus operators acts on. This is dim = 2**num_qubits
+    rank_kraus: Number of Kraus operators per gate ("Kraus rank")
+    a : Parameter to control the norm of the hermitian generator and thereby
         how far the gates are from the identity
 
     Returns
@@ -203,11 +205,10 @@ def randKrausSet(d, r, rK, a=1):
         by taking the first pdim columns of a random unitary of size rK*pdim.
         The random unitary is generated from a random hermitian matrix.
     """
-    pdim = int(np.sqrt(r))
-    K = np.zeros((d, rK, pdim, pdim)).astype(np.complex128)
-    for i in range(d):
-        K[i, :, :, :] += randU(pdim * rK, a)[:, :pdim].reshape(rK, pdim, pdim)
-    return K
+    kraus_tensor_perturbed = np.zeros((num_gate_sequences, rank_kraus, dim, dim)).astype(np.complex128)
+    for i in range(num_gate_sequences):
+        kraus_tensor_perturbed[i, :, :, :] += randU(dim * rank_kraus, a, seed=seed)[:, :dim].reshape(rank_kraus, dim, dim)
+    return kraus_tensor_perturbed
 
 
 def randKrausSet_Haar(d, r, rK):
@@ -306,7 +307,7 @@ def random_gs_Haar(d, r, rK, n_povm):
     return K, X, E, rho
 
 
-def perturbed_target_init(X_target, rK):
+def perturbed_target_init(X_target, rK, seed:int = 42):
     """Generates a small random noise gate around the identity and applies it to the target gate
     The reason for using this gate as an initialization as opposed the the target gate itself, is
     that the non-dominant Kraus operators we start with are now not zero, but small random matrices.
@@ -327,7 +328,7 @@ def perturbed_target_init(X_target, rK):
     """
     d, r, _ = X_target.shape
     pdim = int(np.sqrt(r))
-    K_perturb = randKrausSet(d, r, rK, a=0.1)
+    K_perturb = randKrausSet(d, r, rK, a=0.1, seed=seed)
     X_perturb = np.einsum("ijkl,ijnm -> iknlm", K_perturb, K_perturb.conj()).reshape((d, r, r))
     X_init = np.einsum("ikl,ilm ->ikm", X_perturb, X_target)
     K_init = Kraus_rep(X_init, d, pdim, rK)
