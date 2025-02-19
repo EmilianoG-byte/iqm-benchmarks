@@ -120,18 +120,17 @@ def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=20
         
     return Ki, cost_function_history
 
-from mGST.low_level_jit import cost_function_jax_mps
 from mGST.algorithm import gradient_descent_step
 
-def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state_psd, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True):
+def run_simple_gds_on_gates_jax(kraus0, povm_psd, state_psd, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, use_geodesic:bool=True):
     """Run a simple gradient descent optimization on the gates using JAX.
 
     Args:
         kraus0: Kraus tensor to start the optimization from. Dimensions: (num_gates, kraus_rank, dim_out, dim_in)
-        povm_tensor: POVM tensor. Dimensions: num_povm, dim, dim
-        state_psd: Positive semidefinite state dimensions are (dim, state_rank)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
         indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
-         prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+        prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
         max_iter: Max number of iterations to run GDS for. Defaults to 200.
         target_rel_prec: Relative precision used to decide whether to terminate optimization early. Defaults to 1e-3.
         step_size: Step size used throughought the optimization. Use only if line search is not desired. Defaults to 1.
@@ -142,30 +141,27 @@ def run_simple_gds_on_gates_jax(kraus0, povm_tensor, state_psd, indices_list, pr
         cost_function_history: History of the cost function values at each iteration.
     """
     
-    if optimize_step:
-        cost_function_history = [cost_function_jax_mps(kraus0, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)]
-    else:
-        cost_function_history = [] # the cost function will be evaluated in the first step
+   
+    cost_function_history = [] # the cost function will be evaluated in the first step
     
     krausi = kraus0
     opt_step_size = step_size
     
-    for i in range(max_iter):
-        print('iteration: ', i)
+    try:
+        for i in range(max_iter):
+            print('iteration: ', i)
 
-        if optimize_step:
-            krausi, opt_step_size, _ = gradient_descent_step(krausi, povm_tensor, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, step_size=opt_step_size, verbose=False)
-            
-            cost_function_history.append(cost_function_jax_mps(krausi, povm_tensor, state_psd, indices_list, prob_matrix, jit=True))
-        else:
-            # every time we take the derivative the cost function is evaluated, so we can actually avoid calling the cost here again if we use jax.grad_and_fn function
-            krausi, _, cost_i = gradient_descent_step(krausi, povm_tensor, state_psd, indices_list, prob_matrix, optimize_step=optimize_step, step_size=opt_step_size)
+            krausi, opt_step_size, cost_i = gradient_descent_step(krausi, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, step_size=opt_step_size, use_geodesic=use_geodesic)
+                
             cost_function_history.append(cost_i)
-        print('cost: ', cost_function_history[-1])
-        if i > 1:
-            if jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] <   target_rel_prec:
+            print('cost: ', cost_function_history[-1])
+            
+            if i > 1 and jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] <   target_rel_prec:
                 print('Success threshold reached prematurely.')
                 break
+    except KeyboardInterrupt:
+        print(f"Optimization was stopped prematurely at iteration: {i}")
+        return krausi, cost_function_history
     
     return krausi, cost_function_history
 
@@ -225,6 +221,9 @@ def check_kraus_tensor_is_isometry(kraus_tensor:jnp.array)->bool:
     """
     return jnp.allclose(jnp.eye(kraus_tensor.shape[-1]), jnp.einsum("ijk,ijl->kl", kraus_tensor, kraus_tensor.conj()))
 
+def is_isometry(x:jnp.ndarray)->bool:
+    "check if `x` belongs to the stiefel manifold"
+    return jnp.allclose(x.conj().T @ x, jnp.eye(x.shape[1]))
 
 # Extracted from openTN
 def split_matrix_svd(op: jnp.ndarray, max_rank: int = 2):
@@ -277,7 +276,77 @@ def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None) -> jn
         
     x, s, = split_matrix_svd(psd, max_rank)
     
-     # Use vmap to apply jnp.diag batch-wise
     return x * jnp.sqrt(s)[..., None, :]
     #  s[..., None, :] reshapes s into shape (..., 1, min(max_rank, N)), allowing elementwise multiplication with x ((..., N, min(max_rank, N))).
+
+def polar_decomposition_rectangular(x:jnp.ndarray, z:jnp.ndarray, step_size:float = 1):
+    """
+    Retraction based on canonical polar decomposition of scipy. Uses the SVD decomposition to obtain the isometry corresponding to z.
+    
+    Args:
+        x: The base point of the retraction
+        z: The matrix to retract
+        step_size: The step size of the retraction
+    Returns:
+        The retracted matrix
+
+    References:
+        [1] https://page.math.tu-berlin.de/~mehl/papers/hmt1.pdf
+        [2] https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.polar.html
+    """
+    return jax.scipy.linalg.polar(x + step_size * z)[0]
+
+
+def project_onto_tangent_space(x: jnp.array, z: jnp.array)->jnp.array:
+    """ Project a matrix z onto the tangent space of the manifold at x
+
+    Args:
+        x: The base point of the tangent space
+        z: The matrix to project onto the tangent space
+
+    Returns:
+        A matrix projected onto the tangent space of the manifold at x
+    """
+    return 0.5*(z - x @ z.conj().T @ x)
+
+def tensor_to_isometry(tensor: jnp.array, n:int, p:int)-> jnp.array:
+    """ Reshape a tensor into an isometry matrix of dimensions n and p
+
+    Args:
+        x: tensor to be reshaped
+        row_dim: Row dimension of the new matrix
+        col_dim: Column dimension fo the new matrix
+
+    Returns:
+        Matrix of dimensions (row_dim, col_dim)
+    """
+    return jnp.reshape(tensor, shape=(n, p))
+
+
+def euclidean_gradients_to_stiefel(gradient_tensor: jnp.array, kraus_tensor: jnp.array)-> jnp.array:
+    """ Project a sequence of tensor of Euclidean gradients onto the Stiefel manifold
+
+    Args:
+        gradient_tensor: The Euclidean gradient tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        kraus_tensor: The kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+    Returns:
+        A tuple containing:
+            An array of gradients projected onto the Stiefel manifold
+            An array of isometries corresponding to the kraus tensors
+    """
+    _, rank_kraus, dim, _ = kraus_tensor.shape
+    n = rank_kraus * dim
+    p = dim
+    
+    kraus_isometries = []
+    gradients_stiefel = []
+    
+    for gradient, kraus in zip(gradient_tensor, kraus_tensor):
+        kraus_stiefel = tensor_to_isometry(tensor=kraus, n=n, p=p)
+        gradient_np = tensor_to_isometry(tensor=gradient, n=n, p=p)
+        
+        gradients_stiefel.append(project_onto_tangent_space(x = kraus_stiefel, z = gradient_np))
+        kraus_isometries.append(kraus_stiefel)
+            
+    return jnp.array(gradients_stiefel), jnp.array(kraus_isometries)
 

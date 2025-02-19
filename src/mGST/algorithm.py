@@ -247,38 +247,46 @@ def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     return B_new
 
 from mGST.low_level_jit import dK_jax, gradient_k_and_value_jit, gradient_k_mps_jit
+from mGST.utility_functions_comparisons import euclidean_gradients_to_stiefel, polar_decomposition_rectangular
 import jax.numpy as jnp
 
-def gradient_descent_step(kraus, povm_tensor, state, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, step_size:float=1, verbose:bool=False):
-    
-    num_gates, kraus_rank, dim, _ = kraus.shape
-    n = kraus_rank * dim
-    # tangent_tensor = jnp.zeros((num_gates, n, dim))
-    if optimize_step:
-        grad_k = gradient_k_mps_jit(kraus, povm_tensor, state, indices_list, prob_matrix)
-        cost_value = None
-    else:
-        cost_value, grad_k = gradient_k_and_value_jit(kraus, povm_tensor, state, indices_list, prob_matrix)
-    riem_grad_list = []
-        
-    for idx in range(num_gates):
-        # derivative
-        Fy = grad_k[idx].reshape(n, dim)
-        Y = kraus[idx].reshape(n, dim)
-        # Riem. gradient taken from conjugate derivative
-        riem_grad = Fy.conj() - Y @ Fy.T @ Y
-        riem_grad_list.append(riem_grad)
+def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, step_size:float=1, use_geodesic:bool=True)->tuple[jnp.array, float, float]:
+    """Perform a gradient descent step on the Kraus operators
 
-    riem_grad_tensor = jnp.array(riem_grad_list)
-    # Delta = tangent_proj(K, Delta, d, rK)
+    Args:
+        kraus_tensor: The current Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+        indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
+        prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+        ls_method: Method to use in line search optimization. Defaults to "COBYLA".
+        ls_max_iter: Max number of iterations used in line search. Defaults to 200.
+        optimize_step: Whether to optimize the step size using line search. Defaults to True.
+        step_size: Step size for the update of the gradient descent step. Defaults to 1.
+        use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+            If false, we use the polar decomposition.
+
+    Returns:
+        tuple[jnp.array, float, float]: The updated Kraus tensor, the step size used, and the cost value.
+    """
+    cost_value, ambient_gradient_k = gradient_k_and_value_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    
+    # We would want to project 2 * (conjugate_wirtinger_derivative)
+    # However, JAX returns already 2 * wirtinger_derivative, so we just need to take the conjugate
+    stiefel_gradient_tensor, kraus_isometries_tensor =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_gradient_k.conj(), kraus_tensor=kraus_tensor)
     
     if optimize_step:
-        res = minimize(lineobjf_isom_geodesic, step_size, args=(riem_grad_tensor, kraus, povm_tensor, state, indices_list, prob_matrix), method=ls_method, options={"maxiter": ls_max_iter})
+        res = minimize(lineobjf_isom_geodesic, step_size, args=(stiefel_gradient_tensor, kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix), method=ls_method, options={"maxiter": ls_max_iter})
         step_size = res.x
-        if verbose:
-            print('optimized step size: ', step_size)
+        print('optimized step size: ', step_size)
+            
+    if use_geodesic:
+        new_kraus_tensor = update_K_geodesic(kraus_tensor, stiefel_gradient_tensor, step_size)
+    else:
+        new_isometries = [polar_decomposition_rectangular(x = isometry, z = gradient, step_size=step_size) for isometry, gradient in zip(kraus_isometries_tensor, stiefel_gradient_tensor)]    
+        new_kraus_tensor = [jnp.reshape(isometry, shape=kraus_tensor.shape) for isometry in new_isometries]
     
-    return update_K_geodesic(kraus, riem_grad_tensor, step_size), step_size, cost_value
+    return new_kraus_tensor, step_size, cost_value
     
 
 def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",

@@ -154,7 +154,7 @@ jax.config.update("jax_enable_x64", True)
 
 
 def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
-    """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_tensor
+    """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd
 
     Args:
         kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
@@ -172,6 +172,7 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
         # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) x (kraus_rank, dim_down_out, dim_down_in) -> dim_up_out, dim_down_in
         right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
         
+    # (num_povm, dim_up_in, rank_povm) x (dim_up_in, dim_down_in) x (num_povm, dim_down_in, rank_povm) -> num_povm
     return jnp.einsum("ijk, jl, ilk -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
 
 def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
@@ -297,23 +298,51 @@ def contract_jax(X, j_vec):
 contract_jax_jit = jax.jit(contract_jax)
 # This function will only get compiled when the type of length of j_vec or X changes.
 
-def gradient_k_mps(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
+def gradient_k_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient"
     print('Using JAX power')
-    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=False)
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
 
-def gradient_k_mps_jit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
+def gradient_k_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient"
     print('Using JAX power')
-    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
+    return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
 
-def gradient_k_and_value_jit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
-    "computes both the value of the function and gradient"
-    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
+def gradient_povm_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient with respect to the state"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=1)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
 
-def gradient_k_and_value_nojit(kraus, povm_tensor, state_psd, indices_list, prob_matrix):
+def gradient_state_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient with respect to the state"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=2)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
+
+def gradient_all_3_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient with respect to the kraus, sate, and povm"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=(0, 1, 2))(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
+
+def gradient_all_3_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "Calculate the Euclidean gradient with respect to the kraus, sate, and povm"
+    print('Using JAX power')
+    return jax.grad(fun=cost_function_jax_mps, argnums=(0, 1, 2))(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+
+def gradient_all_3_and_value(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "computes both the value of the function and gradient"
-    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_tensor, state_psd, indices_list, prob_matrix, jit=False)
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=(0,1,2))(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
+
+def gradient_all_3_and_value_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "computes both the value of the function and gradient"
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=(0,1,2))(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+
+def gradient_k_and_value_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "computes both the value of the function and gradient"
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+
+def gradient_k_and_value_nojit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
+    "computes both the value of the function and gradient"
+    return jax.value_and_grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
 
 def gradient_k_numba(K, E, rho, J, y):
     num_gates = K.shape[0]
@@ -818,7 +847,7 @@ def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
     return dA_ * 2 / m / n_povm, dMdM * 2 / m / n_povm, dMconjdM * 2 / m / n_povm, dconjdA * 2 / m / n_povm
 
 
-@njit(parallel=True, cache=True)
+# @njit(parallel=True, cache=True)
 def ddB_derivs(X, A, B, J, y, r, pdim):
     """Calculate the derivatives of the isometry matrix B with respect to its parameters.
 

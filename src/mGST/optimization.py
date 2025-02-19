@@ -94,6 +94,42 @@ def update_K_geodesic(K, H, a):
         K_new[i] = K[i] @ MN[:pdim, :] + Q @ MN[pdim:, :]
     return K_new.reshape(d, rK, pdim, pdim)
 
+import jax.numpy as jnp
+
+def update_k_geodesic_single_isometry(x, z, step_size: float = 1):
+    """Compute a new point on the geodesic for a single isometry"""
+    
+    n, p = x.shape
+    dim = p
+    
+    Q, R = jnp.linalg.qr((jnp.eye(n) - x @ x.T.conj()) @ z)
+    
+    # Construct AR_mat directly using jnp.block
+    AR_mat = jnp.block([
+        [x.T.conj() @ z, -R.T.conj()],
+        [R, jnp.zeros((dim, dim), dtype=jnp.complex128)]
+    ])
+    
+    MN = eigy_expm_jax(-step_size * AR_mat) @ jnp.eye(2 * dim, dim)
+    
+    return x @ MN[:dim, :] + Q @ MN[dim:, :]
+    
+def eigy_expm_jax(A):
+    """Custom Matrix exponential using the eigendecomposition of numpy.linalg
+
+    Parameters
+    ----------
+    A : numpy array
+        Matrix to be exponentiated
+
+    Returns
+    -------
+    M: numpy array
+        Matrix exponential of A
+    """
+    vals, vects = jnp.linalg.eig(A)
+    return jnp.einsum("...ik, ...k, ...kj -> ...ij", vects, jnp.exp(vals), jnp.linalg.inv(vects))
+    
 
 def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     """Compute objective function at position on geodesic
