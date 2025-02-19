@@ -32,7 +32,7 @@ def get_mgst_parameters_from_dataset(dataset, qubit_layout, rK):
 ## Preparing an initialization (random gate set or target gate set)
 from mGST.additional_fns import random_gs
 
-def initialize_mgst_parameters(dataset, target_init = True):
+def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
     d = dataset.attrs["num_gates"]
     pdim = dataset.attrs["pdim"]
     r = pdim ** 2
@@ -62,14 +62,14 @@ def initialize_mgst_parameters(dataset, target_init = True):
         ).astype(jnp.complex128)
         
         
-        K = additional_fns.perturbed_target_init(X_target, dataset.attrs["rank"])
+        K = additional_fns.perturbed_target_init(X_target, dataset.attrs["rank"], seed=seed)
         X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
     else:
         K, X, E, rho = random_gs(d, r, rK, n_povm)
         
     return K, X, E, rho
 
-def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend):
+def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend, seed:int = 42):
     
     benchmark = CompressiveGST(backend, configuration)
     result = benchmark.run()
@@ -78,7 +78,7 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     qubit_layout = configuration.qubit_layouts[0]
     dataset = result.dataset
     y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt = get_mgst_parameters_from_dataset(dataset, qubit_layout=qubit_layout, rK=rK)
-    K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True)
+    K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True, seed=seed)
     
     return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, rK
 

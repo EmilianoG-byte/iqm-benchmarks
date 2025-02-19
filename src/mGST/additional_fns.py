@@ -89,7 +89,7 @@ def randvec(n, seed:int = 42):
     
     g = jax.random.normal(key, (n,)) + 1j * jax.random.normal(key2, (n,))
     # g = np.random.randn(n) + 1j * np.random.randn(n)
-    g = g / jnp.linalg.norm(g)
+    g /= jnp.linalg.norm(g)
     return g
 
 
