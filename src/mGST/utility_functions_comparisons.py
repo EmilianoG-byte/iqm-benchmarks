@@ -4,9 +4,17 @@ from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, Com
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
 
 from mGST.qiskit_interface import qiskit_gate_to_operator
+from mGST.low_level_jit import gradient_k_and_value_jit
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
+
+from scipy.optimize import minimize
+
+from mGST.optimization import (
+    lineobjf_isom_geodesic,
+    update_K_geodesic,
+)
 
 import jax.numpy as jnp
 import jax
@@ -120,8 +128,6 @@ def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=20
         
     return Ki, cost_function_history
 
-from mGST.algorithm import gradient_descent_step
-
 def run_simple_gds_on_gates_jax(kraus0, povm_psd, state_psd, indices_list, prob_matrix, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, use_geodesic:bool=True):
     """Run a simple gradient descent optimization on the gates using JAX.
 
@@ -164,6 +170,45 @@ def run_simple_gds_on_gates_jax(kraus0, povm_psd, state_psd, indices_list, prob_
         return krausi, cost_function_history
     
     return krausi, cost_function_history
+
+def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, step_size:float=1, use_geodesic:bool=True)->tuple[jnp.array, float, float]:
+    """Perform a gradient descent step on the Kraus operators
+
+    Args:
+        kraus_tensor: The current Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+        indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
+        prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+        ls_method: Method to use in line search optimization. Defaults to "COBYLA".
+        ls_max_iter: Max number of iterations used in line search. Defaults to 200.
+        optimize_step: Whether to optimize the step size using line search. Defaults to True.
+        step_size: Step size for the update of the gradient descent step. Defaults to 1.
+        use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+            If false, we use the polar decomposition.
+
+    Returns:
+        tuple[jnp.array, float, float]: The updated Kraus tensor, the step size used, and the cost value.
+    """
+    cost_value, ambient_gradient_k = gradient_k_and_value_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    
+    # We would want to project 2 * (conjugate_wirtinger_derivative)
+    # However, JAX returns already 2 * wirtinger_derivative, so we just need to take the conjugate
+    stiefel_gradient_tensor, kraus_isometries_tensor =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_gradient_k.conj(), kraus_tensor=kraus_tensor)
+    
+    if optimize_step:
+        res = minimize(lineobjf_isom_geodesic, step_size, args=(stiefel_gradient_tensor, kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix), method=ls_method, options={"maxiter": ls_max_iter})
+        step_size = res.x
+        print('optimized step size: ', step_size)
+            
+    if use_geodesic:
+        new_kraus_tensor = update_K_geodesic(kraus_tensor, stiefel_gradient_tensor, step_size)
+    else:
+        new_isometries = [polar_decomposition_rectangular(x = isometry, z = gradient, step_size=step_size) for isometry, gradient in zip(kraus_isometries_tensor, stiefel_gradient_tensor)]
+        rank_kraus, dim = kraus_tensor.shape[1], kraus_tensor.shape[2]
+        new_kraus_tensor = jnp.array([jnp.reshape(isometry, shape=(rank_kraus, dim, dim)) for isometry in new_isometries])
+    
+    return new_kraus_tensor, step_size, cost_value
 
 def create_4q_gst_config():
     """Create the configuration to run a 4 qubit Gate set tomography protocol.

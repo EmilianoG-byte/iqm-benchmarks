@@ -218,7 +218,6 @@ def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix,
     else:
         inner_function = cost_function_mps_single_gate_sequence
     
-    print('jax power')
     for idx, gates_indices in enumerate(indices_list):
         cost_value += inner_function(kraus, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
         if jit:
