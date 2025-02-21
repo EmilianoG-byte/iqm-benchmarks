@@ -315,7 +315,7 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
 
     Delta = tangent_proj(K, Delta, d, rK)
     if optimize_step:
-        res = minimize(lineobjf_isom_geodesic, 1e-8, args=(Delta, K, E, rho, J, y, use_jax), method=ls, options={"maxiter": 200})
+        res = minimize(lineobjf_isom_geodesic, 1e-8, args=(Delta, K, E, rho, J, y), method=ls, options={"maxiter": 200})
         a = res.x
         if verbose:
             print('optimized step size: ', a)
@@ -623,6 +623,7 @@ def optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements):
     X_new = np.einsum("ijkl,ijnm -> iknlm", K_new, K_new.conj()).reshape((d, r, r))
     return K_new, X_new, E_new, rho_new, A_new, B_new
 
+from mGST.low_level_jit import cost_function_jax
 
 def run_mGST(
     *args,
@@ -668,7 +669,7 @@ def run_mGST(
     target_rel_prec : float
         Target precision relative to stopping value at which the final iteration loop breaks
     init : [ , , ]
-        List of 3 numpy arrays in the format [X,E,rho], that can be used as an initialization;
+        List of 3 numpy arrays in the format [K, E, rho], that can be used as an initialization;
         If no initialization is given a random initialization is used
 
     Returns
@@ -715,13 +716,14 @@ def run_mGST(
     A = np.array([la.cholesky(E[k].reshape(pdim, pdim) + 1e-14 * np.eye(pdim)).T.conj() for k in range(n_povm)])
     B = la.cholesky(rho.reshape(pdim, pdim))
     X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
-    res_list = [objf(X, E, rho, J, y)]
+    res_list = [cost_function_jax(X, E, rho, J, y)]
+    # res_list = [objf(X, E, rho, J, y)]
 
     for i in range(max_inits):
         for _ in tqdm(range(max_iter), file=sys.stdout):
             yb, Jb = batch(y, J, bsize)
             K, X, E, rho, A, B = optimize(yb, Jb, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements)
-            res_list.append(objf(X, E, rho, J, y))
+            res_list.append(cost_function_jax(X, E, rho, J, y))
             if res_list[-1] < delta:
                 print(f"Batch optimization successful, improving estimate over full data....")
                 success = True
@@ -736,7 +738,7 @@ def run_mGST(
         print(f"Success threshold not reached, attempting optimization over full data set...")
     for _ in tqdm(range(final_iter), file=sys.stdout):
         K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements)
-        res_list.append(objf(X, E, rho, J, y))
+        res_list.append(cost_function_jax(X, E, rho, J, y))
         if np.abs(res_list[-2] - res_list[-1]) < delta * target_rel_prec:
             break
     if testing:
@@ -746,7 +748,7 @@ def run_mGST(
     else:
         print(f"\t Convergence criterion not satisfied,", f"try increasing max_iter or using new initializations.")
     print(
-        f"\t Final objective {Decimal(res_list[-1]):.2e}",
+        f"\t Final objective {res_list[-1]}",
         f"in time {(time.time() - t0):.2f}s",
     )
     return K, X, E, rho, res_list

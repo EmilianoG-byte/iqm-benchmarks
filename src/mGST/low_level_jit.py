@@ -227,43 +227,44 @@ def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix,
                 previous_count = new_count
     return cost_value / (num_gate_sequences * num_povm)
 
-def cost_function_jax(K, d, r, E, rho, J, y):
-    """Calculate the objective function value for matrices, POVM elements, and target values using JAX.
+def cost_function_jax(kraus_contracted, povm_matrix, state_vector, indices_list, prob_matrix):
+    """Implementation of the cost_function_jax_mps used with the input of the rest of the mGST code.
 
-    This function computes the objective function value based on input matrices X, POVM elements E,
-    density matrix rho, and target values y.
+    This is the code implemented in cost_function_jax_mps without fragmenting into separate functions since we don't care about JIT.
 
     Parameters
     ----------
-    K : numpy.ndarray
-        Kraus tensor (see dimensions)
-    d: 
-    r: 
-    E : numpy.ndarray
-        A 2D array representing the POVM elements, of shape (n_povm, r).
-    rho : numpy.ndarray
-        A 1D array representing the density matrix.
-    J : numpy.ndarray
-        A 2D array representing the indices for which the objective function will be evaluated.
-    y : numpy.ndarray
-        A 2D array of shape (n_povm, len(J)) containing the target values.
+    kraus_contracted : Contracted Kraus tensor of dimensions (num_gates, dim_out, dim_in)
+    povm_tensor : A 2D array representing the POVM elements, of dimensions (num_povm, dim**2).
+    state_vector : A 1D array representing the density matrix of dimensions (dim**2).
+    indices_list : A list of lists representing the indices for which the objective function will be evaluated.
+    prob_matrix: A 2D array of shape (num_povm, num_gate_sequences) containing the measured probabilities.
 
     Returns
     -------
-    float
-        The objective function value for the given set of matrices, POVM elements,
-        and target values, normalized by m and n_povm.
+    The cost function value.
     """
-    X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
-    m = len(J)
-    n_povm = y.shape[0]
-    objf_ = 0
-    for i in range(m):  # pylint: disable=not-an-iterable
-        j = J[i][J[i] >= 0] # This is being done here because of the padding with -1
-        C = contract_jax(X, j)
-        for o in range(n_povm):
-            objf_ += _mean_squared_error_inner(E[o], C, rho, y[o, i])
-    return objf_ / m / n_povm
+    
+    cost_value = 0
+    num_gate_sequences = len(indices_list)
+    num_povm = povm_matrix.shape[0]
+    dim = int(jnp.sqrt(kraus_contracted.shape[-1]))
+        
+    for idx, gates_indices in enumerate(indices_list):
+        
+        prob_vector = prob_matrix[:,idx]
+        
+        right_tensor = state_vector  # dim_up_in, dim_down_in
+        # Iterate through the Kraus tensors in reverse order
+        for gate_idx in reversed(gates_indices):
+            k = kraus_contracted[gate_idx]
+            right_tensor = k @ right_tensor
+       
+        inner_prod_vector = povm_matrix.conj() @  right_tensor # -> num_povm
+                
+        cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2        
+        cost_value += jnp.sum(cost_vector) # num_povm ->
+    return cost_value / (num_gate_sequences * num_povm)
 
 def _mean_squared_error_inner(E, C, rho, y):
     """Compute a single term of the mean squared error (MSE) cost function.

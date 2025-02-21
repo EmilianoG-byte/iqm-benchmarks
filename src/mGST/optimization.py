@@ -92,44 +92,7 @@ def update_K_geodesic(K, H, a):
         AR_mat[:pdim, pdim:] = -R.T.conj()
         MN = eigy_expm(-a * AR_mat) @ np.eye(2 * pdim, pdim)
         K_new[i] = K[i] @ MN[:pdim, :] + Q @ MN[pdim:, :]
-    return K_new.reshape(d, rK, pdim, pdim)
-
-import jax.numpy as jnp
-
-def update_k_geodesic_single_isometry(x, z, step_size: float = 1):
-    """Compute a new point on the geodesic for a single isometry"""
-    
-    n, p = x.shape
-    dim = p
-    
-    Q, R = jnp.linalg.qr((jnp.eye(n) - x @ x.T.conj()) @ z)
-    
-    # Construct AR_mat directly using jnp.block
-    AR_mat = jnp.block([
-        [x.T.conj() @ z, -R.T.conj()],
-        [R, jnp.zeros((dim, dim), dtype=jnp.complex128)]
-    ])
-    
-    MN = eigy_expm_jax(-step_size * AR_mat) @ jnp.eye(2 * dim, dim)
-    
-    return x @ MN[:dim, :] + Q @ MN[dim:, :]
-    
-def eigy_expm_jax(A):
-    """Custom Matrix exponential using the eigendecomposition of numpy.linalg
-
-    Parameters
-    ----------
-    A : numpy array
-        Matrix to be exponentiated
-
-    Returns
-    -------
-    M: numpy array
-        Matrix exponential of A
-    """
-    vals, vects = jnp.linalg.eig(A)
-    return jnp.einsum("...ik, ...k, ...kj -> ...ij", vects, jnp.exp(vals), jnp.linalg.inv(vects))
-    
+    return K_new.reshape(d, rK, pdim, pdim)    
 
 def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, state_psd, indices_list, prob_matrix):
     """Compute objective function at position on geodesic
@@ -147,8 +110,10 @@ def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, s
         Objective function value at new position along the geodesic
     """
     K_test = update_K_geodesic(kraus, tanget_vector, step_size)
-   
-    return cost_function_jax_mps(K_test, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
+    num_gates, rank_kraus, dim, dim  = K_test.shape
+    X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((num_gates, dim**2, dim**2))
+    return cost_function_jax(X_test, povm_tensor, state_psd, indices_list, prob_matrix)
+    # return cost_function_jax_mps(K_test, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
 
 
 def update_A_geodesic(A, H, a):
@@ -217,6 +182,7 @@ def update_B_geodesic(B, H, a):
     B_temp = B * MN[0] + Q * MN[1]
     return B_temp.reshape(pdim, pdim)
 
+from mGST.low_level_jit import cost_function_jax
 
 def lineobjf_A_geodesic(a, H, X, A, rho, J, y):
     """Compute objective function at position on geodesic for POVM parametrization
@@ -247,7 +213,8 @@ def lineobjf_A_geodesic(a, H, X, A, rho, J, y):
     n_povm = A.shape[0]
     A_test = update_A_geodesic(A, H, a)
     E_test = np.array([(A_test[i].T.conj() @ A_test[i]).reshape(-1) for i in range(n_povm)])
-    return objf(X, E_test, rho, J, y)
+    return cost_function_jax(X, E_test, rho, J, y)
+    # return objf(X, E_test, rho, J, y)
 
 
 def lineobjf_B_geodesic(a, H, X, E, B, J, y):
@@ -278,7 +245,8 @@ def lineobjf_B_geodesic(a, H, X, E, B, J, y):
     """
     B_test = update_B_geodesic(B, H, a)
     rho_test = (B_test @ B_test.T.conj()).reshape(-1)
-    return objf(X, E, rho_test, J, y)
+    return cost_function_jax(X, E, rho_test, J, y)
+    # return objf(X, E, rho_test, J, y)
 
 
 def lineobjf_A_B(a, v, delta_v, X, C, y, J, argument):
@@ -318,10 +286,12 @@ def lineobjf_A_B(a, v, delta_v, X, C, y, J, argument):
     v_test = v - a * delta_v
     if argument == "rho":
         rho_test = (v_test @ v_test.T.conj()).reshape(-1)
-        return objf(X, C, rho_test, J, y)
+        return cost_function_jax(X, C, rho_test, J, y)
+        # return objf(X, C, rho_test, J, y)
     if argument == "E":
         E_test = (v_test @ v_test.T.conj()).reshape(-1)
-        return objf(X, E_test, C, J, y)
+        return cost_function_jax(X, E_test, C, J, y)
+        # return objf(X, E_test, C, J, y)
     raise ValueError("The <argument> variable takes either E or rho")
 
 
