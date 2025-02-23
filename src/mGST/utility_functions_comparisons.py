@@ -245,18 +245,25 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     # However, JAX returns already 2 * wirtinger_derivative, so we just need to take the conjugate
     
     # Kraus tensor to stiefel
-    kraus_stiefel_gradient, kraus_isometries =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_kraus.conj(), operator_tensor=kraus_tensor, operator_name="kraus")
+    kraus_stiefel_gradient, kraus_isometries =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_kraus.conj(), operator_tensor=kraus_tensor, operator_name="kraus") # num_gates, rank_kraus*dim, dim
     
     # State tensor to stiefel
-    state_stiefel_gradient, state_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_state.conj(), operator_tensor=state_psd, operator_name="state")
+    state_stiefel_gradient, state_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_state.conj(), operator_tensor=state_psd, operator_name="state") # dim*rank_state, 1
     
     # POVM tensor to stiefel
-    povm_stiefel_gradient, povm_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_povm.conj(), operator_tensor=povm_psd, operator_name="povm")
+    povm_stiefel_gradient, povm_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_povm.conj(), operator_tensor=povm_psd, operator_name="povm") # num_povm*rank_povm, dim
+    previous_povm_shape = povm_psd.shape[0], povm_psd.shape[2], povm_psd.shape[1] # num_povm, rank_povm, dim
+    
     
     if optimize_step:
-        original_tensor_shape = kraus_tensor.shape
-        res = minimize(line_search_isometry_geodesic_jax, step_size, args=(kraus_stiefel_gradient, kraus_isometries, povm_psd, state_psd, indices_list, prob_matrix, original_tensor_shape, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
-        step_size = res.x
+        
+        stiefel_gradients = (kraus_stiefel_gradient, povm_stiefel_gradient, state_stiefel_gradient)
+        stiefel_isometries = (kraus_isometries, povm_isometry, state_isometry)
+        shapes_of_tensors = (kraus_tensor.shape, previous_povm_shape, state_psd.shape)
+        
+        optimization_result = minimize(cost_function_from_updated_isometries, step_size, args=(stiefel_gradients, stiefel_isometries, indices_list, prob_matrix, shapes_of_tensors, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
+        
+        step_size = optimization_result.x
         print('optimized step size: ', step_size)
             
     # update kraus tensor
@@ -269,11 +276,12 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     
     # update povm
     povm_isometry_updated = update_isometries(isometries = povm_isometry, riemannian_gradients = povm_stiefel_gradient, step_size = step_size, operator_name="povm", use_geodesic=use_geodesic)
-    new_povm_psd = jnp.reshape(povm_isometry_updated, shape=povm_psd.shape)
+    new_povm_psd = jnp.reshape(povm_isometry_updated, shape=previous_povm_shape) # num_povm, rank_povm, dim
+    new_povm_psd = jnp.transpose(new_povm_psd, axes=(0, 2, 1)) # num_povm, dim, rank_povm
     
     return new_kraus_tensor, new_povm_psd, new_state_psd, step_size, cost_value
 
-def line_search_isometry_geodesic_jax(step_size:float, kraus_stiefel_gradient, kraus_isometries, povm_psd, state_psd, indices_list, prob_matrix, kraus_shape, use_geodesic:bool=False)->float:
+def cost_function_from_updated_isometries(step_size:float, stiefel_gradients:tuple[jnp.ndarray], stiefel_isometries:tuple[jnp.ndarray], indices_list:list[list[int]], prob_matrix:jnp.ndarray, shapes_of_tensors:tuple[tuple[int]], use_geodesic:bool=False)->float:
     """Compute objective function at position on geodesic
     
     Args:
@@ -289,20 +297,24 @@ def line_search_isometry_geodesic_jax(step_size:float, kraus_stiefel_gradient, k
         Objective function value at new position along the geodesic
     """
     
+    kraus_gradients, povm_gradient, state_gradient = stiefel_gradients
+    kraus_isometries, povm_isometry, state_isometry = stiefel_isometries
+    previous_kraus_shape, previous_povm_shape, previous_state_shape = shapes_of_tensors
+    
     # update kraus tensor
-    kraus_isometries_updated = update_isometries(isometries = kraus_isometries, riemannian_gradients = kraus_stiefel_gradient, step_size = step_size, operator_name="kraus", use_geodesic=use_geodesic)    
-    new_kraus_tensor = jnp.reshape(kraus_isometries_updated, shape=kraus_shape) # num_gates, rank_kraus, dim, dim
+    kraus_isometries_updated = update_isometries(isometries = kraus_isometries, riemannian_gradients = kraus_gradients, step_size = step_size, operator_name="kraus", use_geodesic=use_geodesic)    
+    new_kraus_tensor = jnp.reshape(kraus_isometries_updated, shape=previous_kraus_shape) # num_gates, rank_kraus, dim, dim
     
-    # # update state
-    # state_isometry_updated = update_isometries(isometries = state_isometry, riemannian_gradients = state_stiefel_gradient, step_size = step_size, operator_name="state", use_geodesic=use_geodesic)
-    # new_state_psd = jnp.reshape(state_isometry_updated, shape=state_psd.shape)
+    # update state
+    state_isometry_updated = update_isometries(isometries = state_isometry, riemannian_gradients = state_gradient, step_size = step_size, operator_name="state", use_geodesic=use_geodesic)
+    new_state_psd = jnp.reshape(state_isometry_updated, shape=previous_state_shape)
     
-    # # update povm
-    # povm_isometry_updated = update_isometries(isometries = povm_isometry, riemannian_gradients = povm_stiefel_gradient, step_size = step_size, operator_name="povm", use_geodesic=use_geodesic)
-    # new_povm_psd = jnp.reshape(povm_isometry_updated, shape=povm_psd.shape)
+    # update povm
+    povm_isometry_updated = update_isometries(isometries = povm_isometry, riemannian_gradients = povm_gradient, step_size = step_size, operator_name="povm", use_geodesic=use_geodesic)
+    new_povm_psd = jnp.reshape(povm_isometry_updated, shape=previous_povm_shape)
+    new_povm_psd = jnp.transpose(new_povm_psd, axes=(0, 2, 1)) # num_povm, dim, rank_povm
     
-        
-    return cost_function_jax_mps(new_kraus_tensor, new_state_psd, new_povm_psd, indices_list, prob_matrix, jit=True)
+    return cost_function_jax_mps(new_kraus_tensor, new_povm_psd, new_state_psd, indices_list, prob_matrix, jit=True)
 
 def check_kraus_tensor_is_isometry(kraus_tensor:jnp.ndarray)->bool: 
     """Check if the Kraus tensor is an isometry.
@@ -455,7 +467,7 @@ def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor
         num_povm, dim, rank_povm = operator_tensor.shape # num_povm, dim, rank_povm
         n = num_povm * rank_povm
         p = dim
-        operator_tensor = jnp.transpose(operator_tensor, axes=(0, 2, 1))
+        operator_tensor = jnp.transpose(operator_tensor, axes=(0, 2, 1)) # num_povm, rank_povm, dim
         
     else:
         raise ValueError(f"Operator name {operator_name} is not recognized. Please use one of the following: 'kraus', 'state', 'povm'")
