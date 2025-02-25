@@ -788,7 +788,7 @@ def dB(X, A, B, J, y, pdim):
     return dB_
 
 
-@njit(parallel=True, cache=True)
+@njit(parallel=False, cache=True)
 def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
     """Calculate the derivatives of a given POVM element with respect to its parameters.
 
