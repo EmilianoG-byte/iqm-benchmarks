@@ -4,7 +4,7 @@ from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, Com
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
 
 from mGST.qiskit_interface import qiskit_gate_to_operator
-from mGST.low_level_jit import gradient_all_3_and_value_jit, cost_function_jax_mps
+from mGST.low_level_jit import gradient_all_3_and_value_jit, cost_function_jax_mps, gradient_povm_mps_jit, gradient_k_mps_jit, gradient_state_mps_jit
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
@@ -216,7 +216,7 @@ def run_simple_gds_on_gates_jax(kraus_tensor, povm_psd, state_psd, indices_list,
     
     return kraus_i, povm_i, state_i, cost_function_history
 
-def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:float=1, use_geodesic:bool=True)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
+def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, dmrg_like:bool = False, initial_step_size:float=1, use_geodesic:bool=True)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
     """Perform a gradient descent step on the Kraus operators
 
     Args:
@@ -228,6 +228,7 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
         ls_method: Method to use in line search optimization. Defaults to "COBYLA".
         ls_max_iter: Max number of iterations used in line search. Defaults to 200.
         optimize_step: Whether to optimize the step size using line search. Defaults to True.
+        dmrg_like: Whether to use a DMRG-like optimization for the step size (alternating). Defaults to False.
         step_size: Step size for the update of the gradient descent step. Defaults to 1.
         use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
             If false, we use the polar decomposition.
@@ -240,6 +241,137 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
             The updated step size (if optimize_step is False this is just the same as input step_size)
             The cost function evaluated at the intial kraus, povm and state tensors.
     """
+    
+    if dmrg_like:
+        return _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=initial_step_size, use_geodesic=use_geodesic)
+        
+    return _gradient_descent_step_no_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=initial_step_size, use_geodesic=use_geodesic)
+    
+    
+def _update_povm_tensor(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step:float=1, use_geodesic:bool=True):
+    """Update the POVM tensor following the gradient direction.
+
+    Args:
+        kraus_tensor (jnp.ndarray): The current Kraus tensor.
+        povm_psd (jnp.ndarray): The current POVM tensor.
+        state_psd (jnp.ndarray): The current state tensor.
+        indices_list (list[list[int]]): List of indices corresponding to gate sequences.
+        prob_matrix (jnp.ndarray): Probability matrix of shape (num_povm, num_gate_sequences).
+        ls_method (str, optional): The method to use in line search optimization. Defaults to "COBYLA".
+        ls_max_iter (int, optional): The max number of iterations used in line search. Defaults to 200.
+        optimize_step (bool, optional): Whether to optimize the step size using line search. Defaults to True.
+        initial_step (float, optional): The initial step size for the update of the gradient descent step. Defaults to 1.
+        use_geodesic (bool, optional): Whether to use the geodesic to compute to the updated POVM tensor. Defaults to True.
+
+    Returns:
+        jnp.ndarray: The updated POVM tensor.
+    """
+    
+    # First we optimize the POVM
+    ambient_grad_povm = gradient_povm_mps_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    povm_stiefel_gradient, povm_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_povm.conj(), operator_tensor=povm_psd, operator_name="povm") # num_povm*rank_povm, dim
+    previous_povm_shape = povm_psd.shape[0], povm_psd.shape[2], povm_psd.shape[1]
+    
+    
+    if optimize_step:
+        optimization_result = minimize(cost_function_from_updated_operator, initial_step, args=(povm_isometry, povm_stiefel_gradient, previous_povm_shape, "povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
+        
+        optimized_step = optimization_result.x
+        print(f"optimized step size for POVM: {optimized_step}")
+    else:
+        optimized_step = initial_step
+        
+    return _update_operator(optimized_step, povm_isometry, povm_stiefel_gradient, previous_povm_shape, "povm", use_geodesic), optimized_step
+
+
+def _update_kraus_tensor(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step:float=1, use_geodesic:bool=True):
+    """Update the Kraus tensor following the gradient direction.
+
+    Args:
+        kraus_tensor (jnp.ndarray): The current Kraus tensor.
+        povm_psd (jnp.ndarray): The current POVM tensor.
+        state_psd (jnp.ndarray): The current state tensor.
+        indices_list (list[list[int]]): List of indices corresponding to gate sequences.
+        prob_matrix (jnp.ndarray): Probability matrix of shape (num_povm, num_gate_sequences).
+        ls_method (str, optional): The method to use in line search optimization. Defaults to "COBYLA".
+        ls_max_iter (int, optional): The max number of iterations used in line search. Defaults to 200.
+        optimize_step (bool, optional): Whether to optimize the step size using line search. Defaults to True.
+        initial_step (float, optional): The initial step size for the update of the gradient descent step. Defaults to 1.
+        use_geodesic (bool, optional): Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+
+    Returns:
+        jnp.ndarray: The updated Kraus tensor.
+    """
+    
+    # Now we optimize the kraus tensor
+    ambient_grad_kraus = gradient_k_mps_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    kraus_stiefel_gradient, kraus_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_kraus.conj(), operator_tensor=kraus_tensor, operator_name="kraus") # num_gates, rank_kraus*dim, dim
+    previous_shape = kraus_tensor.shape
+        
+    if optimize_step:
+        optimization_result = minimize(cost_function_from_updated_operator, initial_step, args=(kraus_isometry, kraus_stiefel_gradient, previous_shape, "kraus", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
+        
+        optimized_step = optimization_result.x
+        print(f"optimized step size for Kraus: {optimized_step}")
+    else:
+        optimized_step = initial_step
+        
+    return _update_operator(optimized_step, kraus_isometry, kraus_stiefel_gradient, previous_shape, "kraus", use_geodesic), optimized_step
+    
+def _update_state_tensor(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step:float=1, use_geodesic:bool=True):
+    """Update the state tensor following the gradient direction.
+
+    Args:
+        kraus_tensor (jnp.ndarray): The current Kraus tensor.
+        povm_psd (jnp.ndarray): The current POVM tensor.
+        state_psd (jnp.ndarray): The current state tensor.
+        indices_list (list[list[int]]): List of indices corresponding to gate sequences.
+        prob_matrix (jnp.ndarray): Probability matrix of shape (num_povm, num_gate_sequences).
+        ls_method (str, optional): The method to use in line search optimization. Defaults to "COBYLA".
+        ls_max_iter (int, optional): The max number of iterations used in line search. Defaults to 200.
+        optimize_step (bool, optional): Whether to optimize the step size using line search. Defaults to True.
+        initial_step (float, optional): The initial step size for the update of the gradient descent step. Defaults to 1.
+        use_geodesic (bool, optional): Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+
+    Returns:
+        jnp.ndarray: The updated state tensor.
+    """
+    
+    ambient_grad_state = gradient_state_mps_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    state_stiefel_gradient, state_isometry =  euclidean_gradients_to_stiefel(gradient_tensor=ambient_grad_state.conj(), operator_tensor=state_psd, operator_name="state") # dim*rank_state, 1
+    previous_shape = state_psd.shape
+    
+        
+    if optimize_step:
+        optimization_result = minimize(cost_function_from_updated_operator, initial_step, args=(state_isometry, state_stiefel_gradient, previous_shape, "state", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
+        
+        optimized_step = optimization_result.x
+        print(f"optimized step size for State: {optimized_step}")
+    else:
+        optimized_step = initial_step
+        
+    return _update_operator(optimized_step, state_isometry, state_stiefel_gradient, previous_shape, "state", use_geodesic), optimized_step
+    
+def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:float=1, use_geodesic:bool=True):
+    
+    # Get the individual step sizes
+    initial_step_kraus, initial_step_povm, initial_step_state = initial_step_size
+    # Initial cost value
+    initial_cost_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+
+    # First sweep over the POVM tensor        
+    new_povm_psd, optimized_step_povm = _update_povm_tensor(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_povm, use_geodesic=use_geodesic)
+    # Then over the kraus tensor
+    new_kraus_tensor, optimized_step_kraus = _update_kraus_tensor(kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_kraus, use_geodesic=use_geodesic)
+    # And finally we optimize the state tensor
+    new_state_psd, optimized_step_state = _update_state_tensor(new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_state, use_geodesic=use_geodesic)
+        
+    optimized_step = jnp.array([optimized_step_kraus, optimized_step_povm, optimized_step_state])
+        
+    return new_kraus_tensor, new_povm_psd, new_state_psd, optimized_step, initial_cost_value 
+    
+def _gradient_descent_step_no_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:float=1, use_geodesic:bool=True):
+    
     # cost_value, ambient_grad_kraus = gradient_k_and_value_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     cost_value, ambient_gradients = gradient_all_3_and_value_jit(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     ambient_grad_kraus, ambient_grad_povm, ambient_grad_state = ambient_gradients
@@ -263,20 +395,82 @@ def gradient_descent_step(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     stiefel_isometries = (kraus_isometries, povm_isometry, state_isometry)
     
     if optimize_step:
-        
         optimization_result = minimize(cost_function_from_updated_isometries_individual_step_size, initial_step_size, args=(stiefel_gradients, stiefel_isometries, indices_list, prob_matrix, shapes_of_tensors, use_geodesic), method=ls_method, options={"maxiter": ls_max_iter})
         
         optimized_step_size = optimization_result.x
         # number_of_iterations = optimization_result.nit
         print(f"optimized step size: {optimized_step_size}")
+    else:
+        optimized_step_size = initial_step_size
             
     # update all isometries using gradient and optimized step size
     kraus_isometries_updated, povm_isometry_updated, state_isometry_updated = update_all_isometries(optimized_step_size, stiefel_gradients, stiefel_isometries, use_geodesic)
     
     # reshape all isometries back to tensors
-    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
+    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_all_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
     
     return new_kraus_tensor, new_povm_psd, new_state_psd, optimized_step_size, cost_value
+    
+def cost_function_from_updated_operator(
+    step_size: float,
+    initial_isometry: jnp.ndarray,
+    riemannian_gradient: jnp.ndarray,
+    tensor_shape: tuple[int],
+    operator_name: str,
+    kraus_tensor: jnp.ndarray = None,
+    povm_psd: jnp.ndarray = None,
+    state_psd: jnp.ndarray = None,
+    indices_list: list[list[int]] = None,
+    prob_matrix: jnp.ndarray = None,
+    use_geodesic: bool = False
+) -> float:
+    """Compute the objective function after updating an operator.
+
+    Args:
+        step_size (float): Gradient descent step size to be optimized.
+        initial_isometry (jnp.ndarray): Initial operator on the isometry manifold.
+        riemannian_gradient (jnp.ndarray): Riemannian direction to move in.
+        tensor_shape (tuple[int]): Original shape of the operator tensor.
+        operator_name (str): The name of the operator ('povm', 'state', 'kraus').
+        kraus_tensor (jnp.ndarray, optional): Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
+        povm_psd (jnp.ndarray, optional): POVM tensor of shape (num_povm, dim, rank_povm).
+        state_psd (jnp.ndarray, optional): State tensor of shape (dim, rank_state).
+        indices_list (list[list[int]], optional): List of indices corresponding to gate sequences.
+        prob_matrix (jnp.ndarray, optional): Probability matrix of shape (num_povm, num_gate_sequences).
+        use_geodesic (bool, optional): Whether to use geodesic as a retraction.
+
+    Returns:
+        float: The cost function value at the updated operator tensor.
+    """    
+    
+    updated_tensor = _update_operator(step_size, initial_isometry, riemannian_gradient, tensor_shape, operator_name, use_geodesic)
+    
+    if operator_name == "povm":
+        return cost_function_jax_mps(kraus_tensor, updated_tensor, state_psd, indices_list, prob_matrix, jit=True)
+    elif operator_name == "state":
+        return cost_function_jax_mps(kraus_tensor, povm_psd, updated_tensor, indices_list, prob_matrix, jit=True)
+    elif operator_name == "kraus":
+        return cost_function_jax_mps(updated_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+    else:
+        raise ValueError(f"Unsupported operator_name: {operator_name}")
+    
+def _update_operator(step_size: float,
+    initial_isometry: jnp.ndarray,
+    riemannian_gradient: jnp.ndarray,
+    tensor_shape: tuple[int],
+    operator_name: str,
+    use_geodesic: bool = False) -> jnp.ndarray:
+    """Update an operator following gradient direction and return it back to original tensor shape."""
+    
+    updated_isometry = update_isometries(
+        isometries=initial_isometry,
+        riemannian_gradients=riemannian_gradient,
+        step_size=step_size,
+        operator_name=operator_name,
+        use_geodesic=use_geodesic
+    )
+    
+    return isometry_to_tensor(operator_name, updated_isometry, tensor_shape)
 
 def cost_function_from_updated_isometries_individual_step_size(steps_size:jnp.array, stiefel_gradients:tuple[jnp.ndarray], stiefel_isometries:tuple[jnp.ndarray], indices_list:list[list[int]], prob_matrix:jnp.ndarray, shapes_of_tensors:tuple[tuple[int]], use_geodesic:bool=False)->float:
     """Compute objective function at position on geodesic
@@ -296,7 +490,7 @@ def cost_function_from_updated_isometries_individual_step_size(steps_size:jnp.ar
     
     kraus_isometries_updated, povm_isometry_updated, state_isometry_updated = update_all_isometries(steps_size, stiefel_gradients, stiefel_isometries, use_geodesic)
     
-    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
+    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_all_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
     
     return cost_function_jax_mps(new_kraus_tensor, new_povm_psd, new_state_psd, indices_list, prob_matrix, jit=True)
 
@@ -332,7 +526,7 @@ def update_all_isometries(step_size: jnp.ndarray | float, stiefel_gradients:tupl
 
     return kraus_isometries_updated, povm_isometry_updated, state_isometry_updated
 
-def reshape_isometries_to_tensors(stiefel_isometries:tuple[jnp.ndarray], shapes_of_tensors:tuple[tuple[int]]):
+def reshape_all_isometries_to_tensors(stiefel_isometries:tuple[jnp.ndarray], shapes_of_tensors:tuple[tuple[int]]):
     """Reshape the isometries back to tensors of indicated shapes
     
     Args:
@@ -344,13 +538,31 @@ def reshape_isometries_to_tensors(stiefel_isometries:tuple[jnp.ndarray], shapes_
     kraus_isometries, povm_isometry, state_isometry = stiefel_isometries
     previous_kraus_shape, previous_povm_shape, previous_state_shape = shapes_of_tensors
     
-    new_kraus_tensor = jnp.reshape(kraus_isometries, shape=previous_kraus_shape) # num_gates, rank_kraus, dim, dim
-    new_state_psd = jnp.reshape(state_isometry, shape=previous_state_shape) # dim, rank_state
+    new_kraus_tensor = isometry_to_tensor("kraus", kraus_isometries, tensor_shape=previous_kraus_shape) # num_gates, rank_kraus, dim, dim
     
-    new_povm_psd = jnp.reshape(povm_isometry, shape=previous_povm_shape) # num_povm, rank_povm, dim
-    new_povm_psd = jnp.transpose(new_povm_psd, axes=(0, 2, 1)) # num_povm, dim, rank_povm
+    new_state_psd = isometry_to_tensor("state", state_isometry, tensor_shape=previous_state_shape) # dim, rank_state
     
+    new_povm_psd = isometry_to_tensor("povm", povm_isometry, tensor_shape=previous_povm_shape) # num_povm, dim, rank_povm
+        
     return new_kraus_tensor, new_povm_psd, new_state_psd
+
+def isometry_to_tensor(operator_name: str, isometry: jnp.ndarray, tensor_shape: tuple[int]) -> jnp.ndarray:
+    """Reshape the updated isometry based on the operator type.
+
+    Args:
+        operator_name (str): The type of operator being updated ('povm', 'state', or 'kraus').
+        isometry (jnp.ndarray): The updated isometry tensor.
+        tensor_shape (tuple[int]): The target shape for reshaping.
+
+    Returns:
+        jnp.ndarray: The reshaped tensor.
+    """
+    reshaped_tensor = jnp.reshape(isometry, shape=tensor_shape)
+    
+    if operator_name == "povm":
+        # Need extra step to convert from num_povm, rank_povm, dim -> num_povm, dim, rank_povm
+        return jnp.transpose(reshaped_tensor, axes=(0, 2, 1))
+    return reshaped_tensor
 
 def cost_function_from_updated_isometries_single_step_size(step_size:float, stiefel_gradients:tuple[jnp.ndarray], stiefel_isometries:tuple[jnp.ndarray], indices_list:list[list[int]], prob_matrix:jnp.ndarray, shapes_of_tensors:tuple[tuple[int]], use_geodesic:bool=False)->float:
     """Compute objective function at position on geodesic
@@ -370,7 +582,7 @@ def cost_function_from_updated_isometries_single_step_size(step_size:float, stie
     
     kraus_isometries_updated, povm_isometry_updated, state_isometry_updated = update_all_isometries(step_size, stiefel_gradients, stiefel_isometries, use_geodesic)
     
-    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
+    new_kraus_tensor, new_povm_psd, new_state_psd = reshape_all_isometries_to_tensors(stiefel_isometries=(kraus_isometries_updated, povm_isometry_updated, state_isometry_updated), shapes_of_tensors=shapes_of_tensors)
     
     return cost_function_jax_mps(new_kraus_tensor, new_povm_psd, new_state_psd, indices_list, prob_matrix, jit=True)
 
@@ -388,6 +600,10 @@ def check_kraus_tensor_is_isometry(kraus_tensor:jnp.ndarray)->bool:
 def is_isometry(x:jnp.ndarray)->bool:
     "check if `x` belongs to the stiefel manifold"
     return jnp.allclose(x.conj().T @ x, jnp.eye(x.shape[1]))
+
+def is_in_tangent_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
+    "checks if the matrix z is in the tangent space of isometry x"
+    return jnp.allclose(x.conj().T @ z, - z.conj().T @ x)
 
 # Extracted from openTN
 def split_matrix_svd(op: jnp.ndarray, max_rank: int = 2):
@@ -526,6 +742,7 @@ def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor
         n = num_povm * rank_povm
         p = dim
         operator_tensor = jnp.transpose(operator_tensor, axes=(0, 2, 1)) # num_povm, rank_povm, dim
+        gradient_tensor = jnp.transpose(gradient_tensor, axes=(0, 2, 1)) # num_povm, rank_povm, dim
         
     else:
         raise ValueError(f"Operator name {operator_name} is not recognized. Please use one of the following: 'kraus', 'state', 'povm'")
