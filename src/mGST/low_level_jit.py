@@ -158,7 +158,7 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
 
     Args:
         kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
-        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
             (see B in Eq. 9 of mGST paper)
         gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
@@ -173,8 +173,8 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
         # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) x (kraus_rank, dim_down_out, dim_down_in) -> dim_up_out, dim_down_in
         right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
         
-    # (num_povm, dim_up_in, rank_povm) x (dim_up_in, dim_down_in) x (num_povm, dim_down_in, rank_povm) -> num_povm
-    return jnp.einsum("ijk, jl, ilk -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
+    # (num_povm, rank_povm, dim_up_in) x (dim_up_in, dim_down_in) x (num_povm, rank_povm, dim_down_in) -> num_povm
+    return jnp.einsum("ijk, kl, ijl -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
     # return jnp.sum(povm_psd.conj() * right_tensor.T, axis=(1, 2))
 
 def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
@@ -182,7 +182,7 @@ def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_ind
 
     Args:
         kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
-        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
             (see B in Eq. 9 of mGST paper)
         gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
@@ -201,7 +201,7 @@ def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix,
 
     Args:
         kraus: kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
-        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, dim, rank_povm)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) factor of the state of dimensions: (dim, rank_state)
             (see B in Eq. 9 of mGST paper)
         indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
