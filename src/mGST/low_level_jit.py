@@ -194,6 +194,55 @@ def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_ind
 
 cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
 
+def frobenius_norm(A:jnp.ndarray, B:jnp.ndarray):
+    """Compute the Frobenius norm between two matrices A and B."""
+    return jnp.linalg.norm(A - B)
+
+def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
+                                      povm_psd:jnp.ndarray,
+                                      state_psd:jnp.ndarray,
+                                      indices_list:list[list[int]],
+                                      prob_matrix:jnp.ndarray,
+                                      target_kraus_tensor:jnp.ndarray,
+                                      target_povm_psd:jnp.ndarray,
+                                      target_state_psd:jnp.ndarray,
+                                      num_samples:int,
+                                      regularization_parameter: float =  None,
+                                      metric_function:callable = frobenius_norm,
+                                      jit:bool=False,
+                                      verbose:bool=True)->jnp.ndarray:
+    
+    loss_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit, verbose)
+    
+    # regularization
+    regularized_value = 0
+    
+    state_estimate = state_psd @ state_psd.conj().T
+    state_target = target_state_psd @ target_state_psd.conj().T
+    
+    regularized_value += 0.5 * metric_function(state_estimate, state_target)**2
+    
+    num_povm = povm_psd.shape[0]
+    povm_estimate = povm_psd.conj().transpose(0, 2, 1) @ povm_psd
+    povm_target = target_povm_psd.conj().transpose(0, 2, 1) @ target_povm_psd
+    
+    for op_estimate, op_target in zip(povm_estimate, povm_target):
+        regularized_value += metric_function(op_estimate, op_target)**2
+    regularized_value *=  0.5 / num_povm
+    
+    num_gates, _, dim_out, dim_in = kraus_tensor.shape
+    kraus_estimate = jnp.einsum("ijkl, ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
+    kraus_target = jnp.einsum("ijkl, ijnm -> iknlm", target_kraus_tensor, target_kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
+    
+    for op_estimate, op_target in zip(kraus_estimate, kraus_target):
+        regularized_value += metric_function(op_estimate, op_target)**2
+    regularized_value /= 2 * dim_in ** 2
+    
+    if regularization_parameter is None:
+        reegularization_parameter = 10 / num_samples
+    
+    return loss_value + reegularization_parameter * regularized_value
+
 def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
     """Compute the cost function using jax and mps contraction strategy.
     
@@ -265,13 +314,6 @@ def cost_function_jax(kraus_contracted, povm_matrix, state_vector, indices_list,
         cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2        
         cost_value += jnp.sum(cost_vector) # num_povm ->
     return cost_value / (num_gate_sequences * num_povm)
-
-def _mean_squared_error_inner(E, C, rho, y):
-    """Compute a single term of the mean squared error (MSE) cost function.
-    
-    See equation 19 in mGST paper.
-    """
-    return abs(E.conj() @ C @ rho - y) ** 2
     
 def contract_jax(X, j_vec):
     """Contract a sequence of matrices in the given order using JAX.

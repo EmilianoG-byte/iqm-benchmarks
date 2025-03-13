@@ -390,7 +390,7 @@ def cost_function_from_updated_operator(
         initial_isometry (jnp.ndarray): Initial operator on the isometry manifold.
         riemannian_gradient (jnp.ndarray): Riemannian direction to move in.
         tensor_shape (tuple[int]): Original shape of the operator tensor.
-        operator_name (str): The name of the operator ('povm', 'state', 'kraus').
+        operator_type (str): The name of the operator ('povm', 'state', 'kraus').
         kraus_tensor (jnp.ndarray, optional): Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
         povm_psd (jnp.ndarray, optional): POVM tensor of shape (num_povm, rank_povm, dim).
         state_psd (jnp.ndarray, optional): State tensor of shape (dim, rank_state).
@@ -411,7 +411,7 @@ def cost_function_from_updated_operator(
     elif operator_type == "kraus":
         return cost_function_jax_mps(updated_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
     else:
-        raise ValueError(f"Unsupported operator_name: {operator_type}")
+        raise ValueError(f"Unsupported operator_type: {operator_type}")
     
 def _update_isometry_and_back_to_tensor(step_size: float,
     initial_isometry: jnp.ndarray,
