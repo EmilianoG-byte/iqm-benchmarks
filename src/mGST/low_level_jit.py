@@ -217,11 +217,13 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
     # regularization
     regularized_value = 0
     
+    # State
     state_estimate = state_psd @ state_psd.conj().T
     state_target = target_state_psd @ target_state_psd.conj().T
     
     regularized_value += 0.5 * metric_function(state_estimate, state_target)**2
     
+    # POVM
     num_povm = povm_psd.shape[0]
     povm_estimate = povm_psd.conj().transpose(0, 2, 1) @ povm_psd
     povm_target = target_povm_psd.conj().transpose(0, 2, 1) @ target_povm_psd
@@ -230,6 +232,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
         regularized_value += metric_function(op_estimate, op_target)**2
     regularized_value *=  0.5 / num_povm
     
+    # Kraus
     num_gates, _, dim_out, dim_in = kraus_tensor.shape
     kraus_estimate = jnp.einsum("ijkl, ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
     kraus_target = jnp.einsum("ijkl, ijnm -> iknlm", target_kraus_tensor, target_kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
@@ -353,6 +356,10 @@ def gradient_k_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=0)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
 
+def gradient_k_mps_jit_reg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples):
+    "Calculate the Euclidean gradient"
+    return jax.grad(fun=cost_function_jax_mps_regularized, argnums=0)(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples, jit=True)
+
 def gradient_povm_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient with respect to the state"
     print('Using JAX power')
@@ -363,6 +370,10 @@ def gradient_povm_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix)
     print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=1)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
 
+def gradient_povm_mps_jit_reg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples):
+    "Calculate the Euclidean gradient"
+    return jax.grad(fun=cost_function_jax_mps_regularized, argnums=1)(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples, jit=True)
+
 def gradient_state_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient with respect to the state"
     print('Using JAX power')
@@ -372,6 +383,10 @@ def gradient_state_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix
     "Calculate the Euclidean gradient with respect to the state"
     print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=2)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+
+def gradient_state_mps_jit_reg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples):
+    "Calculate the Euclidean gradient"
+    return jax.grad(fun=cost_function_jax_mps_regularized, argnums=2)(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples, jit=True)
 
 def gradient_all_3_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient with respect to the kraus, sate, and povm"

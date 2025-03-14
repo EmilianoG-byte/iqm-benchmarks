@@ -4,7 +4,7 @@ from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, Com
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
 
 from mGST.qiskit_interface import qiskit_gate_to_operator
-from mGST.low_level_jit import gradient_all_3_and_value_jit, cost_function_jax_mps, gradient_povm_mps_jit, gradient_k_mps_jit, gradient_state_mps_jit
+from mGST.low_level_jit import gradient_all_3_and_value_jit, cost_function_jax_mps, gradient_povm_mps_jit, gradient_k_mps_jit, gradient_state_mps_jit, cost_function_jax_mps_regularized, gradient_povm_mps_jit_reg, gradient_k_mps_jit_reg, gradient_state_mps_jit_reg
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
@@ -133,45 +133,79 @@ def create_4q_gst_config():
 
     return Q4_GST
 
-from mGST.algorithm import gd
-
 def get_x_from_k(k, depth=None, dim_squared=None):
     if not depth or not dim_squared:
         depth = k.shape[0]
         dim_squared = k.shape[-1]**2
     return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
 
-def compute_new_x(K, E, rho, y, J, d, r, rK, fixed_gates, gds_kwargs={}):
-    K_gds = gd(K, E, rho, y, J, d, r, rK, fixed_gates=fixed_gates, ls="COBYLA", **gds_kwargs)
-    return get_x_from_k(k=K_gds, depth=d, dim_squared=r)
-
-from mGST.low_level_jit import objf
-
-def run_simple_gds_on_gates(K0, E, rho, y, J, d, r, rK, fixed_gates, max_iter=200, gds_kwargs={}, threshold_multiplier=3, target_rel_prec=1e-4):
-    """Function emulating what run_mGST does, but focusing only on the optimization of the gates using GDS.
+def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus_rank:int = 1, state_rank:int = 1, povm_rank:int = 1)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Get the compressed representation of the MGST operators.\
+    
+    Args:
+        kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+        povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+        state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
+        kraus_rank: Rank of the Kraus operators in the compressed representation. Defaults to 1.
+        state_rank: Rank of the state operator in the compressed representation. Defaults to 1.
+        povm_rank: Rank of the POVM operators in the compressed representation. Defaults to 1.
+    
+    Returns:
+        A tuple containing the compressed representation of the Kraus, POVM, and State.
+            * kraus_tensor: dimensions (num_gates, kraus_rank, dim_out, dim_in)
+            * povm_psd: dimensions (num_povm, povm_rank, dim_in)
+            * state_psd: dimensions (dim_out, state_rank)
+            
+    Note:
+        To compare the resulting POVM with the one used in the mGST code, we have to take into account that povm_jax = povm_mgst *. Which means, also the factorizations follow this relation: povm_psd_jax = povm_psd_mgst *. Therefore, in order to compute if the resulting POVM is the same we should do:
+        >>> povm_jax = povm_psd.transpose(0, 2, 1).conj() @ povm_psd
+        >>> jnp.allclose(povm_jax.conj(), povm_mgst)
     """
-    # n_povm = E.shape[0]
-    # delta = threshold_multiplier * (1 - y.reshape(-1)) @ y.reshape(-1) / len(J) / n_povm / shots
+    # POVM
+    num_povm, dim_squared = povm_mgst.shape
+    dim = int(jnp.sqrt(dim_squared))
+    povm_tensor = jnp.reshape(povm_mgst, shape=(num_povm, dim, dim)) # num_povm, dim_in, dim_in*
+    povm_psd  = factorize_psd_truncated(psd=povm_tensor, max_rank=povm_rank).transpose(0, 2, 1) # num_povm, rank_povm, dim_in
+    # STATE
+    state = jnp.reshape(state_mgst, shape=(dim, dim)) # dim_out, dim_out*
+    state_psd = factorize_psd_truncated(psd=state, max_rank=state_rank) # dim_out, rank_state
+    # KRAUS
+    kraus_mgst_trans = kraus_mgst.transpose(0, 2, 1) # num_gates, dim_in x dim_in*, dim_out x dim_out*
+    num_gates, *_ = kraus_mgst_trans.shape
+    choi_kraus = superop2choi(kraus_mgst_trans) # num_gates, dim_in x dim_out, dim_in* x dim_out*
+    choi_psd = factorize_psd_truncated(choi_kraus, max_rank=kraus_rank) # num_gates, dim_in x dim_out, rank_kraus
+    kraus_tensor = jnp.reshape(choi_psd, shape=(num_gates, dim, dim, kraus_rank)) # num_gates, dim_in, dim_out, rank_kraus
+    kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
     
-    X0 = get_x_from_k(K0, d, r)
-    cost_function_history = [objf(X0, E, rho, J, y)]
-    
-    Ki = K0
-    
-    for i in range(max_iter):
-        print('iteration: ', i)
-        print('cost: ', cost_function_history[-1])
-        Ki = gd(Ki, E, rho, y, J, d, r, rK, fixed_gates=fixed_gates, ls="COBYLA", **gds_kwargs)
-        Xi = get_x_from_k(Ki, d, r)
-        cost_function_history.append(objf(Xi, E, rho, J, y))
-        
-        if jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] < target_rel_prec:
-            print('Success threshold reached prematurely.')
-            break
-        
-    return Ki, cost_function_history
+    return kraus_tensor, povm_psd, state_psd
 
-def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, use_geodesic:bool=True, dmrg_like:bool=False)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
+def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
+    """
+    Convert a superoperator into its choi matrix representation.
+
+    Args:
+        superop: Superoperator representation of the quantum
+            channel with dimensions (..., dim x dim, dim x dim)
+            This assumes an order: (dim_in x dim_in*, dim_out xdim_out*)
+        
+    Returns:
+        Choi Matrix representation of the quantum channel with dimensions (..., dim^2, dim^2): (..., dim_in x dim_out, dim_in* x dim_out*)
+    """
+    *batch_shape, m, n = superop.shape  # Extract batch dimensions
+    if m != n:
+        raise ValueError(f"Input must be square in the last two dimensions. Instead got dimensions {m} and {n}")
+    
+    dim = int(jnp.sqrt(m))
+    if dim * dim != m:
+        raise ValueError(f"Invalid input size: {m}. Expected dim^2 for some integer dim.")
+            
+    superop_shape = tuple(batch_shape) + (dim,)*4
+        
+    superop_tensor = superop.reshape(superop_shape)  # (..., dim_in, dim_in*, dim_out, dim_out*)
+    original_shape = superop.shape
+    return superop_tensor.swapaxes(-2, -3).reshape(original_shape) # (..., dim_in x dim_out, dim_in* x dim_out*)
+
+def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, use_geodesic:bool=True, dmrg_like:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
     """Run a simple gradient descent optimization on the gates using JAX.
 
     Args:
@@ -206,7 +240,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
         for i in range(max_iter):
             print('iteration: ', i)
 
-            kraus_i, povm_i, state_i, opt_step_size, cost_i = gradient_descent_step(kraus_i, povm_i, state_i, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, initial_step_size=opt_step_size, use_geodesic=use_geodesic, dmrg_like=dmrg_like)
+            kraus_i, povm_i, state_i, opt_step_size, cost_i = gradient_descent_step(kraus_i, povm_i, state_i, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, initial_step_size=opt_step_size, use_geodesic=use_geodesic, dmrg_like=dmrg_like, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
                 
             cost_function_history.append(cost_i)
             print('cost: ', cost_function_history[-1])
@@ -220,7 +254,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
     
     return kraus_i, povm_i, state_i, cost_function_history
 
-def gradient_descent_step(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, optimize_step:bool=True, dmrg_like:bool = False, initial_step_size:float|jnp.ndarray=1, use_geodesic:bool=True)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
+def gradient_descent_step(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, optimize_step:bool=True, dmrg_like:bool = False, initial_step_size:float|jnp.ndarray=1, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
     """Perform a gradient descent step on the Kraus operators
 
     Args:
@@ -247,14 +281,16 @@ def gradient_descent_step(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_
     """
     
     if dmrg_like:
-        return _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=initial_step_size, use_geodesic=use_geodesic)
+        return _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=initial_step_size, use_geodesic=use_geodesic, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
         
     return _gradient_descent_step_no_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=initial_step_size, use_geodesic=use_geodesic)
     
     
-def _update_tensor_via_gradient(operator_type: str, kraus_tensor: jnp.ndarray, povm_psd: jnp.ndarray, state_psd: jnp.ndarray,
-                   indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
-                   optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True)->tuple[jnp.ndarray, float]:
+def _update_tensor_via_gradient(
+    operator_type: str, kraus_tensor: jnp.ndarray, povm_psd: jnp.ndarray, state_psd: jnp.ndarray,
+    indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
+    optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True,
+    regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, float]:
     """Update a given operator tensor (POVM, Kraus, or State) following the gradient direction.
 
     Args:
@@ -280,6 +316,12 @@ def _update_tensor_via_gradient(operator_type: str, kraus_tensor: jnp.ndarray, p
         "state": gradient_state_mps_jit
     }
     
+    gradient_functions_regularized = {
+        "povm": gradient_povm_mps_jit_reg,
+        "kraus": gradient_k_mps_jit_reg,
+        "state": gradient_state_mps_jit_reg
+    }
+    
     operator_tensors = {
         "povm": povm_psd,
         "kraus": kraus_tensor,
@@ -289,7 +331,12 @@ def _update_tensor_via_gradient(operator_type: str, kraus_tensor: jnp.ndarray, p
     if operator_type not in gradient_functions:
         raise ValueError(f"Invalid operator type: {operator_type}. Choose from 'povm', 'kraus', or 'state'.")
     
-    ambient_gradient = gradient_functions[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
+    if regularized:
+        target_kraus, target_povm, target_state = target_operators
+        ambient_gradient = gradient_functions_regularized[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix,
+                                                                         target_kraus, target_povm, target_state, num_samples)    
+    else:
+        ambient_gradient = gradient_functions[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     
     stiefel_gradient, isometry = euclidean_gradients_to_stiefel(
         gradient_tensor=ambient_gradient.conj(), operator_tensor=operator_tensors[operator_type], operator_type=operator_type
@@ -312,7 +359,7 @@ def _update_tensor_via_gradient(operator_type: str, kraus_tensor: jnp.ndarray, p
     return _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient, previous_shape, operator_type, use_geodesic), optimized_step
 
     
-def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:jnp.ndarray | None = None, use_geodesic:bool=True)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float]:
+def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:jnp.ndarray | None = None, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float]:
     """Perform a gradient descent step on the Kraus operators using a DMRG-like optimization."""
     
     if initial_step_size is None:
@@ -321,14 +368,21 @@ def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list,
     # Get the individual step sizes
     initial_step_kraus, initial_step_povm, initial_step_state = initial_step_size
     # Initial cost value
-    initial_cost_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+    if not regularized:
+        initial_cost_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+    else:
+        kraus_target, povm_target, state_target = target_operators
+        initial_cost_value = cost_function_jax_mps_regularized(
+            kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix,
+            kraus_target, povm_target, state_target, num_samples,
+            jit=True)
 
     # First sweep over the POVM tensor        
-    new_povm_psd, optimized_step_povm = _update_tensor_via_gradient("povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_povm, use_geodesic=use_geodesic)
+    new_povm_psd, optimized_step_povm = _update_tensor_via_gradient("povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_povm, use_geodesic=use_geodesic, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
     # Then over the kraus tensor
-    new_kraus_tensor, optimized_step_kraus = _update_tensor_via_gradient("kraus", kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_kraus, use_geodesic=use_geodesic)
+    new_kraus_tensor, optimized_step_kraus = _update_tensor_via_gradient("kraus", kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_kraus, use_geodesic=use_geodesic, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
     # And finally we optimize the state tensor
-    new_state_psd, optimized_step_state = _update_tensor_via_gradient("state", new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_state, use_geodesic=use_geodesic)
+    new_state_psd, optimized_step_state = _update_tensor_via_gradient("state", new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step=initial_step_state, use_geodesic=use_geodesic, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
         
     optimized_step = jnp.array([optimized_step_kraus, optimized_step_povm, optimized_step_state])
         
@@ -381,7 +435,10 @@ def cost_function_from_updated_operator(
     state_psd: jnp.ndarray = None,
     indices_list: list[list[int]] = None,
     prob_matrix: jnp.ndarray = None,
-    use_geodesic: bool = False
+    use_geodesic: bool = False,
+    regularized:bool=False,
+    target_operators:Sequence[jnp.ndarray]=  None,
+    num_samples:int = None,
 ) -> float:
     """Compute the objective function after updating an operator.
 
@@ -404,12 +461,21 @@ def cost_function_from_updated_operator(
     
     updated_tensor = _update_isometry_and_back_to_tensor(step_size, initial_isometry, riemannian_gradient, tensor_shape, operator_type, use_geodesic)
     
+    if regularized:
+        kraus_target, povm_target, state_target = target_operators
+        cost_function = lambda *args: cost_function_jax_mps_regularized(
+            *args,
+            target_kraus_tensor=kraus_target, target_povm_psd=povm_target, target_state_psd=state_target, num_samples=num_samples,
+            jit=True)
+    else:
+        cost_function = lambda *args: cost_function_jax_mps(*args, jit=True)
+    
     if operator_type == "povm":
-        return cost_function_jax_mps(kraus_tensor, updated_tensor, state_psd, indices_list, prob_matrix, jit=True)
+        return cost_function(kraus_tensor, updated_tensor, state_psd, indices_list, prob_matrix)
     elif operator_type == "state":
-        return cost_function_jax_mps(kraus_tensor, povm_psd, updated_tensor, indices_list, prob_matrix, jit=True)
+        return cost_function(kraus_tensor, povm_psd, updated_tensor, indices_list, prob_matrix)
     elif operator_type == "kraus":
-        return cost_function_jax_mps(updated_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
+        return cost_function(updated_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     else:
         raise ValueError(f"Unsupported operator_type: {operator_type}")
     
