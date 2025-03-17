@@ -198,6 +198,37 @@ def frobenius_norm(A:jnp.ndarray, B:jnp.ndarray):
     """Compute the Frobenius norm between two matrices A and B."""
     return jnp.linalg.norm(A - B)
 
+def frobenius_norm_like(estimate:jnp.ndarray, target:jnp.ndarray)->float:
+    """Expressions "equivalent" to the ``frobenius_norm`` function (squared), used for better stability in the optimization.
+    
+    Important: when using this function, we DO NOT need to add the ``**2`` (squaring the value).
+
+    Notes:
+        * I have added the jnp.trace(target.conj().T @ target) even though it's a constant value, to make the function positive.
+        * The ``jnp.real`` is needed because ``jax.grad`` needs a real-valued function.
+
+    Args:
+        estimate: matrix of the estimate operator
+        target: matrix of the target operator
+
+    Returns:
+       Pseudo-Frobenius norm between the two operators.
+    """
+    return jnp.real(jnp.trace(target.conj().T @ target) + jnp.trace(estimate.conj().T @ estimate) - 2 * jnp.trace(estimate.conj().T @ target).real)
+
+# def state_fidelity(operator_1:jnp.ndarray, operator_2:jnp.ndarray)->float:
+#     """Compute the fidelity between the estimate and target operator.
+
+#     Args:
+#         operator_1: matrix of the estimate state
+#         operator_2: matrix of the target state
+
+#     Returns:
+#         The fidelity between the two operators.
+#     """
+#     if operator_2.shape[1]
+    
+
 def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
                                       povm_psd:jnp.ndarray,
                                       state_psd:jnp.ndarray,
@@ -208,7 +239,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
                                       target_state_psd:jnp.ndarray,
                                       num_samples:int,
                                       regularization_parameter: float =  None,
-                                      metric_function:callable = frobenius_norm,
+                                      metric_function:callable = frobenius_norm_like,
                                       jit:bool=False,
                                       verbose:bool=True)->jnp.ndarray:
     
@@ -221,7 +252,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
     state_estimate = state_psd @ state_psd.conj().T
     state_target = target_state_psd @ target_state_psd.conj().T
     
-    regularized_value += 0.5 * metric_function(state_estimate, state_target)**2
+    regularized_value += 0.5 * metric_function(state_estimate, state_target)
     
     # POVM
     num_povm = povm_psd.shape[0]
@@ -229,7 +260,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
     povm_target = target_povm_psd.conj().transpose(0, 2, 1) @ target_povm_psd
     
     for op_estimate, op_target in zip(povm_estimate, povm_target):
-        regularized_value += metric_function(op_estimate, op_target)**2
+        regularized_value += metric_function(op_estimate, op_target)
     regularized_value *=  0.5 / num_povm
     
     # Kraus
@@ -238,7 +269,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
     kraus_target = jnp.einsum("ijkl, ijnm -> iknlm", target_kraus_tensor, target_kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
     
     for op_estimate, op_target in zip(kraus_estimate, kraus_target):
-        regularized_value += metric_function(op_estimate, op_target)**2
+        regularized_value += metric_function(op_estimate, op_target)
     regularized_value /= 2 * dim_in ** 2
     
     if regularization_parameter is None:
