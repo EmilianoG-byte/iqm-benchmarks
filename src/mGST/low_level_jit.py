@@ -194,12 +194,12 @@ def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_ind
 
 cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
 
-def frobenius_norm(A:jnp.ndarray, B:jnp.ndarray):
+def frobenius_distance(A:jnp.ndarray, B:jnp.ndarray):
     """Compute the Frobenius norm between two matrices A and B."""
-    return jnp.linalg.norm(A - B)
+    return jnp.linalg.norm(A - B)**2
 
-def frobenius_norm_like(estimate:jnp.ndarray, target:jnp.ndarray)->float:
-    """Expressions "equivalent" to the ``frobenius_norm`` function (squared), used for better stability in the optimization.
+def frobenius_distance_expanded(estimate:jnp.ndarray, target:jnp.ndarray)->float:
+    """Expressions "equivalent" to the ``frobenius_distance`` function, used for better stability in the optimization.
     
     Important: when using this function, we DO NOT need to add the ``**2`` (squaring the value).
 
@@ -212,22 +212,75 @@ def frobenius_norm_like(estimate:jnp.ndarray, target:jnp.ndarray)->float:
         target: matrix of the target operator
 
     Returns:
-       Pseudo-Frobenius norm between the two operators.
+       Frobenius distance between the two operators.
     """
     return jnp.real(jnp.trace(target.conj().T @ target) + jnp.trace(estimate.conj().T @ estimate) - 2 * jnp.trace(estimate.conj().T @ target).real)
 
-# def state_fidelity(operator_1:jnp.ndarray, operator_2:jnp.ndarray)->float:
-#     """Compute the fidelity between the estimate and target operator.
+def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
+    """Compute the fidelity between the estimate and target states.
 
-#     Args:
-#         operator_1: matrix of the estimate state
-#         operator_2: matrix of the target state
+    This implementation uses:
+    f(rho, sigma) = ||sqrt(rho) * sqrt(sigma)||_tr^2
 
-#     Returns:
-#         The fidelity between the two operators.
-#     """
-#     if operator_2.shape[1]
+    Args:
+        operator_sqrt_est: cholesky factor of the estimation matrix
+        operator_sqrt_target: cholesky factor of the target matrix
+
+    Returns:
+        The fidelity between the two operators.
+    """
+    return jnp.linalg.norm(operator_sqrt_est @ operator_sqrt_target, ord="nuc") ** 2
     
+def entanglement_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
+    """Compute the entanglement fidelity between the estimate and target Kraus operators.
+    
+    With the new implementation using ellipsis, we can use the same function for individual kraus and tensor of 4 dimensions.
+    This assumes the first dimension (ommited in the ellipsis) is the number of gates.
+
+    Args:
+        kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
+        kraus_tensor_target: kraus tensor of the target of dimensions (..., kraus_rank, dim_out, dim_in)
+
+    Returns:
+        The fidelity between the two quantum channels.
+    """
+    # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
+    # and then contracting these together, scaling of rank_1 * rank_2
+    # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
+    optimal_path = [(0, 1), (0, 1), (0, 1)]
+
+    return jnp.einsum(
+        "...ajk, ...bjk, ...alm, ...blm->", 
+        kraus_tensor_target.conj(), kraus_tensor_est, 
+        kraus_tensor_target, kraus_tensor_est.conj(), optimize=optimal_path
+    )
+    
+def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray)->float:
+    """Compute the entanglement fidelity between the estimate and target classical quantum channels arising from the POVM's.
+    
+    This is the ent. fidelity between the quantum channels that map the input state to a diagonal state in the computational basis with amplitudes as the probabilities.
+    
+    We can use the same function for individual POVM's and tensor of 3 dimensions.
+    
+    This assumes the first dimension (ommited in the ellipsis) is the number of povm's.
+
+    Args:
+        povm_tensor_est: estimate povm tensor of dimensions (..., povm_rank, dim_in)
+        povm_tensor_target: estimate povm tensor of dimensions (..., povm_rank, dim_in)
+
+    Returns:
+        The fidelity between the classical quantum channels.
+    """
+    # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
+    # and then contracting these together, scaling of rank_1 * rank_2
+    # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
+    optimal_path = [(0, 1), (0, 1), (0, 1)]
+
+    return jnp.einsum_path(
+        "...aj, ...bj, ...ak, ...bk->", 
+        povm_tensor_target.conj(), povm_tensor_est, 
+        povm_tensor_target, povm_tensor_est.conj(),
+    )
 
 def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
                                       povm_psd:jnp.ndarray,
@@ -239,7 +292,7 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
                                       target_state_psd:jnp.ndarray,
                                       num_samples:int,
                                       regularization_parameter: float =  None,
-                                      metric_function:callable = frobenius_norm_like,
+                                      metric_function:callable = frobenius_distance_expanded,
                                       jit:bool=False,
                                       verbose:bool=True)->jnp.ndarray:
     
@@ -273,9 +326,9 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
     regularized_value /= 2 * dim_in ** 2
     
     if regularization_parameter is None:
-        reegularization_parameter = 10 / num_samples
+        regularization_parameter = 10 / num_samples
     
-    return loss_value + reegularization_parameter * regularized_value
+    return loss_value + regularization_parameter * regularized_value
 
 def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
     """Compute the cost function using jax and mps contraction strategy.
