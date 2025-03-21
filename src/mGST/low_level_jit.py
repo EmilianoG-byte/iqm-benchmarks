@@ -229,7 +229,20 @@ def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarr
     Returns:
         The fidelity between the two operators.
     """
-    return jnp.linalg.norm(operator_sqrt_est @ operator_sqrt_target, ord="nuc") ** 2
+    return jnp.linalg.norm(operator_sqrt_est.conj().T @ operator_sqrt_target, ord="nuc") ** 2
+
+from mGST.utility_functions_comparisons import factorize_psd_truncated
+
+def state_fidelity_from_density_matrices(rho_est:jnp.ndarray, rho_target:jnp.ndarray)->float:
+    """Compute the fidelity between the estimate and target states.
+
+    This implementation uses:
+    f(rho, sigma) = trace(sqrt(rho) * sigma * sqrt(rho))**2
+    """
+    # return jnp.trace(factorize_psd_truncated(rho_est @ rho_target, unique_srt=True))**2
+    rho_est_sqrt = factorize_psd_truncated(rho_est, unique_srt=True)
+    return jnp.trace(factorize_psd_truncated(rho_est_sqrt.conj().T @ rho_target @ rho_est_sqrt, unique_srt=True))**2
+    
     
 def entanglement_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
     """Compute the entanglement fidelity between the estimate and target Kraus operators.

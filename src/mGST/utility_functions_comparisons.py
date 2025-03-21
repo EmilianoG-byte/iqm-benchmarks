@@ -660,7 +660,7 @@ def split_matrix_svd(op: jnp.ndarray, max_rank: int = 2):
     return u, s
 
 
-def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None) -> jnp.ndarray:
+def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None, unique_srt:bool = True) -> jnp.ndarray:
     """
     Factorizes a batch of positive semi-definite (PSD) matrices by truncating singular values.
 
@@ -669,8 +669,11 @@ def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None) -> jn
     Returns x' such that psd ≈ x' @ x'.conj().T
     
     Args:
-    psd (jnp.ndarray): Input tensor of shape (..., N, N) (must be Hermitian).
-    max_rank (int, optional): Maximum number of singular values to keep.
+        psd: Input tensor of shape (..., N, N) (must be Hermitian).
+        max_rank: Maximum number of singular values to keep.
+        unique_srt: Whether to return the unique square root of the factorized matrix.
+            This is the hermitian (square) matrix satisfying x^2 = x' @ x' = psd.
+            If False, the factorized matrix is x' @ x'.conj().T.
     
     Returns:
         jnp.ndarray: The factorized matrix `x'` of shape (..., N, min(max_rank, N)).
@@ -678,10 +681,14 @@ def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None) -> jn
     if max_rank is None:
         max_rank = psd.shape[-1]  # Assume full rank by default
         
-    x, s, = split_matrix_svd(psd, max_rank)
+    u, s, = split_matrix_svd(psd, max_rank)
     
-    return x * jnp.sqrt(s)[..., None, :]
+    factorization = u * jnp.sqrt(s)[..., None, :]
+    if unique_srt:
+        return factorization @ u.conj().swapaxes(-1, -2)
+    return factorization
     #  s[..., None, :] reshapes s into shape (..., 1, min(max_rank, N)), allowing elementwise multiplication with x ((..., N, min(max_rank, N))).
+    
 
 def update_isometry_using_polar_decomposition(x:jnp.ndarray, z:jnp.ndarray, step_size:float = 1):
     """
