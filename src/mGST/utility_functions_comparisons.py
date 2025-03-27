@@ -4,7 +4,16 @@ from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, Com
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
 
 from mGST.qiskit_interface import qiskit_gate_to_operator
-from mGST.low_level_jit import gradient_all_3_and_value_jit, cost_function_jax_mps, gradient_povm_mps_jit, gradient_k_mps_jit, gradient_state_mps_jit, cost_function_jax_mps_regularized, gradient_povm_mps_jit_reg, gradient_k_mps_jit_reg, gradient_state_mps_jit_reg
+from mGST.low_level_jit import (
+    gradient_all_3_and_value_jit,
+    cost_function_jax_mps,
+    gradient_povm_mps_jit,
+    gradient_k_mps_jit,
+    gradient_state_mps_jit,
+    cost_function_jax_mps_regularized,
+    gradient_povm_mps_jit_reg,
+    gradient_k_mps_jit_reg,
+    gradient_state_mps_jit_reg)
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
@@ -140,7 +149,7 @@ def get_x_from_k(k, depth=None, dim_squared=None):
     return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
 
 def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus_rank:int = 1, state_rank:int = 1, povm_rank:int = 1)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Get the compressed representation of the MGST operators.\
+    """Get the compressed representation of the MGST operators.
     
     Args:
         kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
@@ -205,7 +214,7 @@ def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     original_shape = superop.shape
     return superop_tensor.swapaxes(-2, -3).reshape(original_shape) # (..., dim_in x dim_out, dim_in* x dim_out*)
 
-def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, use_geodesic:bool=True, dmrg_like:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
+def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
     """Run a simple gradient descent optimization on the gates using JAX.
 
     Args:
@@ -218,6 +227,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
         target_rel_prec: Relative precision used to decide whether to terminate optimization early. Defaults to 1e-3.
         step_size: Step size used throughought the optimization. Use only if line search is not desired. Defaults to 1.
         optimize_step: Whether to optimize the step_size using line search or not. Defaults to True.
+        ls_max_iter: Max number of iterations used in line search. Defaults to 20.
         use_geodesic: Whether to use the geodesic to compute to the updated tensors after following the gradient direction. Defaults to True. If False, use the polar decomposition.
         dmrg_like: Whether to use a DMRG-like optimization for the step size (alternating). Defaults to False for backwards compatibility.
 
@@ -240,7 +250,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
         for i in range(max_iter):
             print('iteration: ', i)
 
-            kraus_i, povm_i, state_i, opt_step_size, cost_i = gradient_descent_step(kraus_i, povm_i, state_i, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=20, optimize_step=optimize_step, initial_step_size=opt_step_size, use_geodesic=use_geodesic, dmrg_like=dmrg_like, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
+            kraus_i, povm_i, state_i, opt_step_size, cost_i = gradient_descent_step(kraus_i, povm_i, state_i, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=opt_step_size, use_geodesic=use_geodesic, dmrg_like=dmrg_like, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
                 
             cost_function_history.append(cost_i)
             print('cost: ', cost_function_history[-1])
@@ -250,7 +260,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
                 break
     except KeyboardInterrupt:
         print(f"Optimization was stopped prematurely at iteration: {i}")
-        return kraus_i, cost_function_history
+        return kraus_i, povm_i, state_i, cost_function_history
     
     return kraus_i, povm_i, state_i, cost_function_history
 
@@ -660,7 +670,7 @@ def split_matrix_svd(op: jnp.ndarray, max_rank: int = 2):
     return u, s
 
 
-def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None, unique_srt:bool = True) -> jnp.ndarray:
+def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None, unique_srt:bool = False) -> jnp.ndarray:
     """
     Factorizes a batch of positive semi-definite (PSD) matrices by truncating singular values.
 

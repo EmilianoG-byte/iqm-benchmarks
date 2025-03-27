@@ -231,9 +231,9 @@ def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarr
     """
     return jnp.linalg.norm(operator_sqrt_est.conj().T @ operator_sqrt_target, ord="nuc") ** 2
 
-from mGST.utility_functions_comparisons import factorize_psd_truncated
 
 def state_fidelity_from_density_matrices(rho_est:jnp.ndarray, rho_target:jnp.ndarray)->float:
+    from mGST.utility_functions_comparisons import factorize_psd_truncated
     """Compute the fidelity between the estimate and target states.
 
     This implementation uses:
@@ -289,10 +289,10 @@ def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:j
     # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
     optimal_path = [(0, 1), (0, 1), (0, 1)]
 
-    return jnp.einsum_path(
+    return jnp.einsum(
         "...aj, ...bj, ...ak, ...bk->", 
         povm_tensor_target.conj(), povm_tensor_est, 
-        povm_tensor_target, povm_tensor_est.conj(),
+        povm_tensor_target, povm_tensor_est.conj(), optimize=optimal_path
     )
 
 def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
