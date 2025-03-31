@@ -216,6 +216,17 @@ def frobenius_distance_expanded(estimate:jnp.ndarray, target:jnp.ndarray)->float
     """
     return jnp.real(jnp.trace(target.conj().T @ target) + jnp.trace(estimate.conj().T @ estimate) - 2 * jnp.trace(estimate.conj().T @ target).real)
 
+def state_infidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
+    """Compute the infidelity between the estimate and target states.
+    
+    Args:
+        operator_sqrt_est: cholesky factor of the estimation matrix
+        operator_sqrt_target: cholesky factor of the target matrix
+    Returns:
+        The infidelity between the two operators.
+    """
+    return 1 - state_fidelity(operator_sqrt_est, operator_sqrt_target)
+
 def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
     """Compute the fidelity between the estimate and target states.
 
@@ -266,7 +277,19 @@ def entanglement_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.
         "...ajk, ...bjk, ...alm, ...blm->", 
         kraus_tensor_target.conj(), kraus_tensor_est, 
         kraus_tensor_target, kraus_tensor_est.conj(), optimize=optimal_path
-    )
+    ).real
+    
+def entanglement_infidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
+    """Compute the entanglement infidelity between the estimate and target Kraus operators.
+
+    Args:
+        kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
+        kraus_tensor_target: kraus tensor of the target of dimensions (..., kraus_rank, dim_out, dim_in)
+    Returns:
+        The infidelity between the two quantum channels.
+    """
+    num_gates, kraus_rank, dim, dim = kraus_tensor_est.shape
+    return num_gates - entanglement_fidelity(kraus_tensor_est, kraus_tensor_target) / dim**2
     
 def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray)->float:
     """Compute the entanglement fidelity between the estimate and target classical quantum channels arising from the POVM's.
@@ -293,7 +316,21 @@ def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:j
         "...aj, ...bj, ...ak, ...bk->", 
         povm_tensor_target.conj(), povm_tensor_est, 
         povm_tensor_target, povm_tensor_est.conj(), optimize=optimal_path
-    )
+    ).real
+    
+def entanglement_infidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray)->float:
+    """Compute the entanglement infidelity between the estimate and target classical quantum channels arising from the POVM's.
+
+    Args:
+        povm_tensor_est: estimate povm tensor of dimensions (..., povm_rank, dim_in)
+        povm_tensor_target: estimate povm tensor of dimensions (..., povm_rank, dim_in)
+
+    Returns:
+        The infidelity between the classical quantum channels.
+    """
+    # is this the dimension?
+    num_povm = povm_tensor_est.shape[0]
+    return 1 - entanglement_fidelity_povm(povm_tensor_est, povm_tensor_target)/num_povm
 
 def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
                                       povm_psd:jnp.ndarray,
@@ -305,43 +342,66 @@ def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray,
                                       target_state_psd:jnp.ndarray,
                                       num_samples:int,
                                       regularization_parameter: float =  None,
-                                      metric_function:callable = frobenius_distance_expanded,
+                                      metric_function:callable = None,
                                       jit:bool=False,
                                       verbose:bool=True)->jnp.ndarray:
     
-    loss_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit, verbose)
+    loss_value = 0.5 * cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit, verbose)
     
+    regularized_value = compute_regularized_value_all_operators(
+        kraus_tensor_est=kraus_tensor,
+        povm_psd_est=povm_psd,
+        state_psd_est=state_psd,
+        kraus_tensor_target=target_kraus_tensor,
+        povm_psd_target=target_povm_psd,
+        state_psd_target=target_state_psd,
+        metric_function=metric_function
+    )
+    
+    if regularization_parameter is None:
+        regularization_parameter = 10 / num_samples
+    # Adding the 1/2 factor to the regularization term, following Eq. 7 of Sugiyama's paper.
+    return loss_value + 0.5 * regularization_parameter * regularized_value
+
+def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, state_psd_est, kraus_tensor_target, povm_psd_target, state_psd_target, metric_function:callable=None):
+    """_summary_
+
+    Args:
+        kraus_tensor_est: _description_
+        povm_psd: _description_
+        state_psd: _description_
+        kraus_tensor_target: _description_
+        povm_psd_target: _description_
+        state_psd_target: _description_
+    """
     # regularization
     regularized_value = 0
     
     # State
-    state_estimate = state_psd @ state_psd.conj().T
-    state_target = target_state_psd @ target_state_psd.conj().T
-    
-    regularized_value += 0.5 * metric_function(state_estimate, state_target)
+    if metric_function is None:
+        state_metric_function = state_infidelity
+    else:
+        state_metric_function = metric_function
+    regularized_value += state_metric_function(state_psd_est, state_psd_target)
     
     # POVM
-    num_povm = povm_psd.shape[0]
-    povm_estimate = povm_psd.conj().transpose(0, 2, 1) @ povm_psd
-    povm_target = target_povm_psd.conj().transpose(0, 2, 1) @ target_povm_psd
-    
-    for op_estimate, op_target in zip(povm_estimate, povm_target):
-        regularized_value += metric_function(op_estimate, op_target)
-    regularized_value *=  0.5 / num_povm
+
+    if metric_function is None:
+        povm_metric_function = entanglement_infidelity_povm
+    else:
+        povm_metric_function = metric_function    
+    regularized_value += povm_metric_function(povm_psd_est, povm_psd_target)
     
     # Kraus
-    num_gates, _, dim_out, dim_in = kraus_tensor.shape
-    kraus_estimate = jnp.einsum("ijkl, ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
-    kraus_target = jnp.einsum("ijkl, ijnm -> iknlm", target_kraus_tensor, target_kraus_tensor.conj()).reshape((num_gates, dim_out**2, dim_in**2))
+    if metric_function is None:
+        kraus_metric_function = entanglement_infidelity
+    else:
+        kraus_metric_function = metric_function
     
-    for op_estimate, op_target in zip(kraus_estimate, kraus_target):
-        regularized_value += metric_function(op_estimate, op_target)
-    regularized_value /= 2 * dim_in ** 2
+    regularized_value += kraus_metric_function(kraus_tensor_est, kraus_tensor_target)
     
-    if regularization_parameter is None:
-        regularization_parameter = 10 / num_samples
+    return regularized_value
     
-    return loss_value + regularization_parameter * regularized_value
 
 def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=True):
     """Compute the cost function using jax and mps contraction strategy.

@@ -174,7 +174,7 @@ def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus
     num_povm, dim_squared = povm_mgst.shape
     dim = int(jnp.sqrt(dim_squared))
     povm_tensor = jnp.reshape(povm_mgst, shape=(num_povm, dim, dim)) # num_povm, dim_in, dim_in*
-    povm_psd  = factorize_psd_truncated(psd=povm_tensor, max_rank=povm_rank).transpose(0, 2, 1) # num_povm, rank_povm, dim_in
+    povm_psd  = factorize_psd_truncated(psd=povm_tensor, max_rank=povm_rank).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_in
     # STATE
     state = jnp.reshape(state_mgst, shape=(dim, dim)) # dim_out, dim_out*
     state_psd = factorize_psd_truncated(psd=state, max_rank=state_rank) # dim_out, rank_state
@@ -195,7 +195,7 @@ def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     Args:
         superop: Superoperator representation of the quantum
             channel with dimensions (..., dim x dim, dim x dim)
-            This assumes an order: (dim_in x dim_in*, dim_out xdim_out*)
+            This assumes an order: (dim_in x dim_in*, dim_out x dim_out*)
         
     Returns:
         Choi Matrix representation of the quantum channel with dimensions (..., dim^2, dim^2): (..., dim_in x dim_out, dim_in* x dim_out*)
@@ -214,7 +214,7 @@ def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     original_shape = superop.shape
     return superop_tensor.swapaxes(-2, -3).reshape(original_shape) # (..., dim_in x dim_out, dim_in* x dim_out*)
 
-def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
+def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None, return_operators_list:bool = False)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
     """Run a simple gradient descent optimization on the gates using JAX.
 
     Args:
@@ -241,6 +241,11 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
    
     cost_function_history = [] # the cost function will be evaluated in the first step
     
+    if return_operators_list:
+        kraus_list = [kraus_tensor]
+        povm_list = [povm_psd]
+        state_list = [state_psd]
+    
     kraus_i = kraus_tensor
     state_i = state_psd
     povm_i = povm_psd
@@ -255,12 +260,28 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
             cost_function_history.append(cost_i)
             print('cost: ', cost_function_history[-1])
             
+            if return_operators_list:
+                kraus_list.append(kraus_i)
+                povm_list.append(povm_i)
+                state_list.append(state_i)
+            
             if i > 1 and jnp.abs(cost_function_history[-2] - cost_function_history[-1])/cost_function_history[-2] <   target_rel_prec:
                 print('Success threshold reached prematurely.')
                 break
     except KeyboardInterrupt:
         print(f"Optimization was stopped prematurely at iteration: {i}")
+        
+        if return_operators_list:
+            kraus_i = kraus_list
+            povm_i = povm_list
+            state_i = state_list
+            
         return kraus_i, povm_i, state_i, cost_function_history
+    
+    if return_operators_list:
+            kraus_i = kraus_list
+            povm_i = povm_list
+            state_i = state_list
     
     return kraus_i, povm_i, state_i, cost_function_history
 
@@ -343,8 +364,10 @@ def _update_tensor_via_gradient(
     
     if regularized:
         target_kraus, target_povm, target_state = target_operators
-        ambient_gradient = gradient_functions_regularized[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix,
-                                                                         target_kraus, target_povm, target_state, num_samples)    
+        ambient_gradient = gradient_functions_regularized[operator_type](
+            kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix,
+            target_kraus, target_povm, target_state, num_samples
+            )    
     else:
         ambient_gradient = gradient_functions[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     
