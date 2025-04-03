@@ -216,31 +216,49 @@ def frobenius_distance_expanded(estimate:jnp.ndarray, target:jnp.ndarray)->float
     """
     return jnp.real(jnp.trace(target.conj().T @ target) + jnp.trace(estimate.conj().T @ estimate) - 2 * jnp.trace(estimate.conj().T @ target).real)
 
-def state_infidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
+def state_infidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray, pure:bool=False)->float:
     """Compute the infidelity between the estimate and target states.
     
     Args:
-        operator_sqrt_est: cholesky factor of the estimation matrix
-        operator_sqrt_target: cholesky factor of the target matrix
+        operator_sqrt_est: cholesky factor of the estimation matrix of dimensions (dim, rank_state_est)
+        operator_sqrt_target: cholesky factor of the target matrix of dimensions (dim, rank_state_target)
+        pure: If True, the target state is assumed to be a pure state (rank 1).
     Returns:
         The infidelity between the two operators.
     """
-    return 1 - state_fidelity(operator_sqrt_est, operator_sqrt_target)
+    return 1 - state_fidelity(operator_sqrt_est, operator_sqrt_target, pure=pure)
 
-def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
+def state_fidelity(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray, pure:bool=False)->float:
     """Compute the fidelity between the estimate and target states.
 
     This implementation uses:
     f(rho, sigma) = ||sqrt(rho) * sqrt(sigma)||_tr^2
 
     Args:
-        operator_sqrt_est: cholesky factor of the estimation matrix
-        operator_sqrt_target: cholesky factor of the target matrix
+        operator_sqrt_est: cholesky factor of the estimation matrix of dimensions (dim, rank_state_est)
+        operator_sqrt_target: cholesky factor of the target matrix of dimensions (dim, rank_state_target)
+        pure: If True, the target state is assumed to be a pure state (rank 1).
+            A more efficient implementation is used in this case.
 
     Returns:
         The fidelity between the two operators.
     """
+    if pure:
+        return _state_fidelity_pure(operator_sqrt_est, operator_sqrt_target)
     return jnp.linalg.norm(operator_sqrt_est.conj().T @ operator_sqrt_target, ord="nuc") ** 2
+
+def _state_fidelity_pure(operator_sqrt_est:jnp.ndarray, operator_sqrt_target:jnp.ndarray)->float:
+    """Compute the fidelity between the estimate and target state, assuming the target is a pure state (rank 1).
+    
+    Args:
+        operator_sqrt_est: cholesky factor of the estimation matrix of dimensions (dim, rank_state)
+        operator_sqrt_target: cholesky factor of the target matrix of dimensions (dim, 1)
+    Returns:
+        The fidelity between the two operators.
+    """
+    new_state = operator_sqrt_est.conj().T @ operator_sqrt_target
+    return jnp.vdot(new_state, new_state).real    
+    
 
 
 def state_fidelity_from_density_matrices(rho_est:jnp.ndarray, rho_target:jnp.ndarray)->float:
@@ -255,68 +273,135 @@ def state_fidelity_from_density_matrices(rho_est:jnp.ndarray, rho_target:jnp.nda
     return jnp.trace(factorize_psd_truncated(rho_est_sqrt.conj().T @ rho_target @ rho_est_sqrt, unique_srt=True))**2
     
     
-def entanglement_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
-    """Compute the entanglement fidelity between the estimate and target Kraus operators.
+def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray, unitary:bool=True)->float:
+    """Compute the process fidelity between the estimate and target Kraus operators.
     
     With the new implementation using ellipsis, we can use the same function for individual kraus and tensor of 4 dimensions.
+    
     This assumes the first dimension (ommited in the ellipsis) is the number of gates.
+    
+    Notes:
+        * The default behaviour is to assume one of the channels is unitary and return the entanglement fidelity.
+            Namely: F_e(target, estimate) = tr(S(target)^dagger * S(estimate))
+        * if unitary is False, we use the more general expression for the process fidelity.
+            Namely: F_p(target, estimate) = F(Choi(target), Choi(estimate)), with F(rho, sigma) the state fidelity. See ``state_fidelity``.
 
     Args:
         kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
         kraus_tensor_target: kraus tensor of the target of dimensions (..., kraus_rank, dim_out, dim_in)
-
+        unitary: If True, at least one of the quantum channels is assumed to be unitary. 
+            Then, the fidelity can be computed as the Hilbert Schmidt inner product of the superoperators. This is equivalent to calculating the state fidelity for pure states.
+            If False, we instead return the state fidelity between the choi states of the two channels. 
+        
     Returns:
-        The fidelity between the two quantum channels.
+        The process fidelity between the two quantum channels.
+    """
+    dim = kraus_tensor_est.shape[-1]
+    
+    if unitary:
+        # tr(|psi><psi|^dagger * rho) = <psi| rho |psi> 
+        return (hilbert_schmidt_inner_product(kraus_tensor_est, kraus_tensor_target).real) / dim**2
+    
+    # This is equivalent to using the state_fidelity on the individual choi matrices. Namely:
+    # choi_sqrt_est_test = kraus_tensor_est.reshape(rank_kraus, dim**2).T
+    # choi_sqrt_target_test = kraus_tensor_target.reshape(rank_kraus, dim**2).T
+    # state_fidelity(operator_sqrt_est=choi_sqrt_est_test, operator_sqrt_target=choi_sqrt_target_test) / dim**2
+    
+    choi_product = jnp.einsum("...roi, ...qoi -> ...rq", kraus_tensor_est.conj(), kraus_tensor_target)
+    return jnp.linalg.norm(choi_product, ord="nuc", axis=(-2, -1)) **2 / dim**2
+    
+def hilbert_schmidt_inner_product(kraus_tensor_1:jnp.ndarray, kraus_tensor_2:jnp.ndarray)->float:
+    """Compute the Hilbert Schmidt inner product between the estimate and target superoperators defined by the kraus tensors.
+    
+    This is equivalent to the entanglement fidelity when one of the channels is unital.
+    
+    Args:
+        kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
     """
     # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
     # and then contracting these together, scaling of rank_1 * rank_2
     # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
-    optimal_path = [(0, 1), (0, 1), (0, 1)]
-
+    optimal_path_trace = [(0, 1), (0, 1), (0, 1)]
     return jnp.einsum(
         "...ajk, ...bjk, ...alm, ...blm->", 
-        kraus_tensor_target.conj(), kraus_tensor_est, 
-        kraus_tensor_target, kraus_tensor_est.conj(), optimize=optimal_path
-    ).real
-    
-def entanglement_infidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
-    """Compute the entanglement infidelity between the estimate and target Kraus operators.
+        kraus_tensor_2.conj(), kraus_tensor_1, 
+        kraus_tensor_2, kraus_tensor_1.conj(), optimize=optimal_path_trace
+    )
 
+def average_process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray, unital:bool=False)->float:
+    """Compute the average fidelity between the estimate and target Kraus operators.
+    Namely: F_avg(target, estimate) = (1/d * (d+1)) * ( tr(S(target)^dagger * S(estimate)) + <<1|| S(target)^dagger * S(estimate) ||1>>)
+    
+    If the composition target^\dagger * estimate is not trace preserving, this quantity is not guaranteed to be 1 even when target == estimate. Therefore, cannot be used reliably as a distance between the channels and an infidelity measure derived from it might be ill defined.
+    
     Args:
         kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
         kraus_tensor_target: kraus tensor of the target of dimensions (..., kraus_rank, dim_out, dim_in)
-    Returns:
-        The infidelity between the two quantum channels.
+        unital: If True, at least one of the quantum channels is assumed to be unital.  
+            Then, the composition of the channels is trace preserving, and the second term can be simplified to be dim(Hilbert space).
+            If False, we compute all the contractions.
     """
-    num_gates, kraus_rank, dim, dim = kraus_tensor_est.shape
-    return num_gates - entanglement_fidelity(kraus_tensor_est, kraus_tensor_target) / dim**2
+    dim = kraus_tensor_est.shape[-1]
+    if unital:
+        # <<1|| S(target)^dagger * S(estimate) ||1>> = dim
+        # Would also work if S(target)^dagger * S(estimate) is trace preserving.
+        inner_product_identity = dim
+    else:
+        # <<1|| S(target)^dagger * S(estimate) ||1>>
+        optimal_path = [(0, 2), (0, 1), (0, 1)]
+        inner_product_identity = jnp.einsum(
+            "...ajk, ...bjm, ...alk, ...blm->", 
+            kraus_tensor_target.conj(), kraus_tensor_est, 
+            kraus_tensor_target, kraus_tensor_est.conj(),
+            optimize=optimal_path).real
+        
+    return (hilbert_schmidt_inner_product(kraus_tensor_target, kraus_tensor_est).real + inner_product_identity) / (dim * (dim + 1))
+
     
-def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray)->float:
-    """Compute the entanglement fidelity between the estimate and target classical quantum channels arising from the POVM's.
-    
-    This is the ent. fidelity between the quantum channels that map the input state to a diagonal state in the computational basis with amplitudes as the probabilities.
-    
-    We can use the same function for individual POVM's and tensor of 3 dimensions.
-    
-    This assumes the first dimension (ommited in the ellipsis) is the number of povm's.
+def process_infidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray)->float:
+    """Compute the process infidelity between the estimate and target Kraus operators.
+
+    This quantity is always well defined regarldess of whether the channels are unital or not.
+    This is because we are the process fidelity instead of the average process fidelity.
 
     Args:
-        povm_tensor_est: estimate povm tensor of dimensions (..., povm_rank, dim_in)
-        povm_tensor_target: estimate povm tensor of dimensions (..., povm_rank, dim_in)
+        kraus_tensor_est: kraus tensor of the estimate of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        kraus_tensor_target: kraus tensor of the target of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+    Returns:
+        The infidelities between the two arays quantum channels, of dimension (num_gates).
+    """
+    num_gates = kraus_tensor_est.shape[0]
+    return num_gates - process_fidelity(kraus_tensor_est, kraus_tensor_target)
+    
+def entanglement_fidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray, unital:bool=True)->float:
+    """Compute the entanglement fidelity between the estimate and target classical quantum channels arising from the POVM's.
+    
+    This is the process fidelity between the quantum channels that map the input state to a diagonal state in the computational basis with amplitudes as the probabilities tr(F_i * rho) = p(i|rho).
+
+    Args:
+        povm_tensor_est: estimate povm tensor of dimensions (num_povm, povm_rank, dim_in)
+        povm_tensor_target: estimate povm tensor of dimensions (num_povm, povm_rank, dim_in)
+        unital: If True, at least one of the quantum channels is assumed to be unital.
 
     Returns:
         The fidelity between the classical quantum channels.
     """
-    # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
-    # and then contracting these together, scaling of rank_1 * rank_2
-    # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
-    optimal_path = [(0, 1), (0, 1), (0, 1)]
-
-    return jnp.einsum(
-        "...aj, ...bj, ...ak, ...bk->", 
-        povm_tensor_target.conj(), povm_tensor_est, 
-        povm_tensor_target, povm_tensor_est.conj(), optimize=optimal_path
-    ).real
+    num_povm, _, dim = povm_tensor_est.shape
+    
+    if unital:
+        # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
+        # and then contracting these together, scaling of rank_1 * rank_2
+        # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
+        optimal_path = [(0, 1), (0, 1), (0, 1)]
+        return (jnp.einsum(
+            "iaj, ibj, iak, ibk->", 
+            povm_tensor_target.conj(), povm_tensor_est, 
+            povm_tensor_target, povm_tensor_est.conj(), optimize=optimal_path
+        ).real) / num_povm
+    
+    choi_product = jnp.einsum("iaj, ibj -> ab", povm_tensor_target.conj(), povm_tensor_est)
+    return jnp.linalg.norm(choi_product, ord="nuc") **2 / dim**2
+    
     
 def entanglement_infidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target:jnp.ndarray)->float:
     """Compute the entanglement infidelity between the estimate and target classical quantum channels arising from the POVM's.
@@ -328,9 +413,7 @@ def entanglement_infidelity_povm(povm_tensor_est:jnp.ndarray, povm_tensor_target
     Returns:
         The infidelity between the classical quantum channels.
     """
-    # is this the dimension?
-    num_povm = povm_tensor_est.shape[0]
-    return 1 - entanglement_fidelity_povm(povm_tensor_est, povm_tensor_target)/num_povm
+    return 1 - entanglement_fidelity_povm(povm_tensor_est, povm_tensor_target)
 
 def cost_function_jax_mps_regularized(kraus_tensor:jnp.ndarray, 
                                       povm_psd:jnp.ndarray,
@@ -367,19 +450,19 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
     """_summary_
 
     Args:
-        kraus_tensor_est: _description_
-        povm_psd: _description_
-        state_psd: _description_
-        kraus_tensor_target: _description_
-        povm_psd_target: _description_
-        state_psd_target: _description_
+        kraus_tensor_est: kraus tensor estimate of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: cholesky factor of the povm estimate of dimensions (num_povm, rank_povm, dim)
+        state_psd: cholesky factor of the state estimate of dimensions (dim, rank_state)
+        kraus_tensor_target: kraus tensor target of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd_target: cholesky factor of the povm target of dimensions (num_povm, rank_povm, dim)
+        state_psd_target: cholesky factor of the state target of dimensions (dim, rank_state)
     """
     # regularization
     regularized_value = 0
     
     # State
     if metric_function is None:
-        state_metric_function = state_infidelity
+        state_metric_function = lambda a, b: state_infidelity(a, b, pure=True)
     else:
         state_metric_function = metric_function
     regularized_value += state_metric_function(state_psd_est, state_psd_target)
@@ -394,7 +477,7 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
     
     # Kraus
     if metric_function is None:
-        kraus_metric_function = entanglement_infidelity
+        kraus_metric_function = process_infidelity
     else:
         kraus_metric_function = metric_function
     
