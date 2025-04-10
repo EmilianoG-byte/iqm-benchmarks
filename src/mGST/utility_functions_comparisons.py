@@ -185,8 +185,25 @@ def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus
     choi_psd = factorize_psd_truncated(choi_kraus, max_rank=kraus_rank) # num_gates, dim_in x dim_out, rank_kraus
     kraus_tensor = jnp.reshape(choi_psd, shape=(num_gates, dim, dim, kraus_rank)) # num_gates, dim_in, dim_out, rank_kraus
     kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
-    
     return kraus_tensor, povm_psd, state_psd
+
+def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
+    """Get the compressed representation of the MGST operators using cholesky factorization.
+    
+    This is implementation usedin the original mGST code.
+    
+    Args:
+        povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+        state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
+    Returns:
+        A tuple containing the compressed representation of the POVM and State.
+    """
+    num_povm, dim_sqrd =povm_mgst.shape
+    dim = int(jnp.sqrt(dim_sqrd))
+    povm_psd = jnp.array([jnp.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)).T.conj() for k in range(num_povm)])
+    state_mgst_offset = state_mgst + 1e-14 * np.eye(dim).reshape(-1)
+    state_psd = np.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
+    return povm_psd, state_psd
 
 def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     """
@@ -214,7 +231,7 @@ def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     original_shape = superop.shape
     return superop_tensor.swapaxes(-2, -3).reshape(original_shape) # (..., dim_in x dim_out, dim_in* x dim_out*)
 
-def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=True, use_hessian:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None, return_operators_list:bool = False)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
+def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=True, use_hessian:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None, return_operators_list:bool = False, **hessian_kwargs)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
     """Run a simple gradient descent optimization on the gates using JAX.
 
     Args:
@@ -260,7 +277,7 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
         for i in range(max_iter):
             print('iteration: ', i)
             if use_hessian:
-                kraus_i, povm_i, state_i, opt_step_size, cost_i = optimization_step_hessian(kraus_i, povm_i, state_i, indices_list, prob_matrix, initial_step_size=opt_step_size, ls_max_iter=ls_max_iter)
+                kraus_i, povm_i, state_i, opt_step_size, cost_i = optimization_step_hessian(kraus_i, povm_i, state_i, indices_list, prob_matrix, initial_step_size=opt_step_size, ls_max_iter=ls_max_iter, **hessian_kwargs)
             else:
                 kraus_i, povm_i, state_i, opt_step_size, cost_i = gradient_descent_step(kraus_i, povm_i, state_i, indices_list, prob_matrix, ls_max_iter=ls_max_iter, optimize_step=optimize_step, initial_step_size=opt_step_size, use_geodesic=use_geodesic, dmrg_like=dmrg_like, regularized=regularized, target_operators=target_operators, num_samples=num_samples)
                 
@@ -350,7 +367,7 @@ def update_povm_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.nd
     
 
 
-def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, initial_step_size:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, )->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
+def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, initial_step_size:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, which_hessian:list = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
     """Perform a single optimization step on the Kraus, POVM and State operators
     
     Currently, it uses
@@ -372,35 +389,46 @@ def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
             The optimized step size array in the order [step_size_kraus, step_size_povm, step_size_state].
             The cost function evaluated at the intial kraus, povm and state tensors.
     """
-
+    if which_hessian is None:
+        which_hessian = ["povm", "state"]
+        
     # Get the individual step sizes
     initial_step_kraus, initial_step_povm, initial_step_state = initial_step_size
     # Initial cost value
     initial_cost_value = cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
-    # First sweep over the POVM tensor        
-    new_povm_psd = update_povm_via_saddle_free_newton(
-        kraus_tensor=kraus_tensor,
-        povm_psd=povm_psd,
-        state_psd=state_psd,
-        indices_list=indices_list,
-        prob_matrix=prob_matrix,
-    )
+    
+    if "povm" in which_hessian:
+        # First sweep over the POVM tensor        
+        new_povm_psd = update_povm_via_saddle_free_newton(
+            kraus_tensor=kraus_tensor,
+            povm_psd=povm_psd,
+            state_psd=state_psd,
+            indices_list=indices_list,
+            prob_matrix=prob_matrix,
+        )
+    else:
+        new_povm_psd, optimized_step_povm = _update_tensor_via_gradient("povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_povm)        
     
     # Then over the kraus tensor
     new_kraus_tensor, optimized_step_kraus = _update_tensor_via_gradient("kraus", kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_kraus)
         
     # And finally we optimize the state tensor
-    new_state_psd = update_state_via_saddle_free_newton(
-        kraus_tensor=new_kraus_tensor,
-        povm_psd=new_povm_psd,
-        state_psd=state_psd,
-        prob_matrix=prob_matrix,
-        indices_list=indices_list,
-        )
+    if "state" in which_hessian:
+        new_state_psd = update_state_via_saddle_free_newton(
+            kraus_tensor=new_kraus_tensor,
+            povm_psd=new_povm_psd,
+            state_psd=state_psd,
+            prob_matrix=prob_matrix,
+            indices_list=indices_list,
+            )
+    else:
+        new_state_psd, optimized_step_state = _update_tensor_via_gradient("state", new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_state)
+        
         
     # optimized_step = initial_step_size.at[0].set(optimized_step_kraus[0])
+    optimized_step = initial_step_size
     
-    return new_kraus_tensor, new_povm_psd, new_state_psd, initial_step_size, initial_cost_value 
+    return new_kraus_tensor, new_povm_psd, new_state_psd, optimized_step, initial_cost_value 
     
 def gradient_descent_step(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, optimize_step:bool=True, dmrg_like:bool = False, initial_step_size:float|jnp.ndarray=1, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
     """Perform a gradient descent step on the Kraus operators
