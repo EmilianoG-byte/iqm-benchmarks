@@ -602,7 +602,7 @@ def Kraus_rep(X, d, pdim, rK):
     return np.array(K)
 
 
-def sampled_measurements(y, n):
+def sampled_measurements(y:np.ndarray, n:int, seed:int = 42) -> np.ndarray:
     """Compute finite sample estimates of input probabilities
 
     Parameters
@@ -632,7 +632,7 @@ def sampled_measurements(y, n):
                 f"l1-difference to input:%f" % np.sum(np.abs(y_new - y)),
             )
         y = y_new
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(seed=seed)
     y_sampled = np.zeros(y.shape)
     for i in range(m):
         y_sampled[:, i] = rng.multinomial(n, [y[o, i] for o in range(n_povm)]) / n
