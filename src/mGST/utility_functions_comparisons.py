@@ -20,6 +20,8 @@ from qiskit.circuit.library import CZGate, RGate
 
 from scipy.optimize import minimize
 
+from typing_extensions import Literal
+
 import jax.numpy as jnp
 import numpy as np
 import jax
@@ -367,7 +369,7 @@ def update_povm_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.nd
     
 
 
-def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, initial_step_size:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, which_hessian:list = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
+def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, initial_step_size:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, which_hessian:list = None, metric:Literal["canonical", "euclidean"]="canonical")->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
     """Perform a single optimization step on the Kraus, POVM and State operators
     
     Currently, it uses
@@ -407,10 +409,10 @@ def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
             prob_matrix=prob_matrix,
         )
     else:
-        new_povm_psd, optimized_step_povm = _update_tensor_via_gradient("povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_povm)        
+        new_povm_psd, optimized_step_povm = _update_tensor_via_gradient("povm", kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_povm, metric=metric)        
     
     # Then over the kraus tensor
-    new_kraus_tensor, optimized_step_kraus = _update_tensor_via_gradient("kraus", kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_kraus)
+    new_kraus_tensor, optimized_step_kraus = _update_tensor_via_gradient("kraus", kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_kraus, metric=metric)
         
     # And finally we optimize the state tensor
     if "state" in which_hessian:
@@ -422,7 +424,7 @@ def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
             indices_list=indices_list,
             )
     else:
-        new_state_psd, optimized_step_state = _update_tensor_via_gradient("state", new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_state)
+        new_state_psd, optimized_step_state = _update_tensor_via_gradient("state", new_kraus_tensor, new_povm_psd, state_psd, indices_list, prob_matrix, ls_method=ls_method, ls_max_iter=ls_max_iter, initial_step=initial_step_state, metric=metric)
         
         
     # optimized_step = initial_step_size.at[0].set(optimized_step_kraus[0])
@@ -466,7 +468,8 @@ def _update_tensor_via_gradient(
     operator_type: str, kraus_tensor: jnp.ndarray, povm_psd: jnp.ndarray, state_psd: jnp.ndarray,
     indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
     optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True,
-    regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, float]:
+    regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None,
+    metric:Literal["canonical", "euclidean"]="canonical")->tuple[jnp.ndarray, float]:
     """Update a given operator tensor (POVM, Kraus, or State) following the gradient direction.
 
     Args:
@@ -516,8 +519,10 @@ def _update_tensor_via_gradient(
     else:
         ambient_gradient = gradient_functions[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     
-    stiefel_gradient, isometry = euclidean_gradients_to_stiefel(
-        gradient_tensor=ambient_gradient.conj(), operator_tensor=operator_tensors[operator_type], operator_type=operator_type
+    # NOTE: should we divide by 2 to obtain *just* df/dz* instead of 2df/dz*
+    stiefel_gradient_matrix, isometry = euclidean_gradients_to_stiefel(
+        gradient_tensor=ambient_gradient.conj()/2, operator_tensor=operator_tensors[operator_type], operator_type=operator_type, # (..., n, p)
+        metric=metric
     )
     
     previous_shape = operator_tensors[operator_type].shape
@@ -525,7 +530,7 @@ def _update_tensor_via_gradient(
     if optimize_step:
         optimization_result = minimize(
             cost_function_from_updated_operator, initial_step,
-            args=(isometry, stiefel_gradient, previous_shape, operator_type,
+            args=(isometry, stiefel_gradient_matrix, previous_shape, operator_type,
                   kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, use_geodesic),
             method=ls_method, options={"maxiter": ls_max_iter}
         )
@@ -534,7 +539,7 @@ def _update_tensor_via_gradient(
     else:
         optimized_step = initial_step
     
-    return _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient, previous_shape, operator_type, use_geodesic), optimized_step
+    return _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic), optimized_step
 
     
 def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:jnp.ndarray | None = None, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float]:
@@ -657,17 +662,31 @@ def cost_function_from_updated_operator(
     else:
         raise ValueError(f"Unsupported operator_type: {operator_type}")
     
-def _update_isometry_and_back_to_tensor(step_size: float,
-    initial_isometry: jnp.ndarray,
-    riemannian_gradient: jnp.ndarray,
+def _update_isometry_and_back_to_tensor(
+    step_size: float,
+    isometries: jnp.ndarray,
+    riemannian_gradients: jnp.ndarray,
     tensor_shape: tuple[int],
     operator_type: str,
-    use_geodesic: bool = False) -> jnp.ndarray:
-    """Update an operator following gradient direction and return it back to original tensor shape."""
+    use_geodesic: bool = True) -> jnp.ndarray:
+    """Helper function to update tensor of isometries and bring them back to its original tensor shape to be used in the next optimization step.
     
-    updated_isometry = update_single_isometry(
-        isometries=initial_isometry,
-        riemannian_gradients=riemannian_gradient,
+    Args:
+        step_size: The step size of the update.
+        isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
+        riemannian_gradients: The riemannian gradients at the point x on the stiefel manifold. 
+            Must have the same dimensions as isometries.
+        tensor_shape: The shape of the original tensor.
+        operator_type: The type of the input operator ('kraus', 'state', 'povm')
+        use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+    
+    Returns:
+        The updated tensor of the isometries each with `tensor_shape` shape.
+    """
+    
+    updated_isometry = update_isometry_tensors(
+        isometries=isometries,
+        riemannian_gradients=riemannian_gradients,
         step_size=step_size,
         operator_type=operator_type,
         use_geodesic=use_geodesic
@@ -719,11 +738,11 @@ def update_all_isometries(step_sizes: jnp.ndarray | float, stiefel_gradients:tup
         raise ValueError(f"Step size must be a float or a sequence of length 3. Instead got {type(step_sizes)}")
         
     # update kraus tensor
-    kraus_isometries_updated = update_single_isometry(isometries = kraus_isometries, riemannian_gradients = kraus_gradients, step_size = step_kraus, operator_type="kraus", use_geodesic=use_geodesic)        
+    kraus_isometries_updated = update_isometry_tensors(isometries = kraus_isometries, riemannian_gradients = kraus_gradients, step_size = step_kraus, operator_type="kraus", use_geodesic=use_geodesic)        
     # update state
-    state_isometry_updated = update_single_isometry(isometries = state_isometry, riemannian_gradients = state_gradient, step_size = step_povm, operator_type="state", use_geodesic=use_geodesic)
+    state_isometry_updated = update_isometry_tensors(isometries = state_isometry, riemannian_gradients = state_gradient, step_size = step_povm, operator_type="state", use_geodesic=use_geodesic)
     # update povm
-    povm_isometry_updated = update_single_isometry(isometries = povm_isometry, riemannian_gradients = povm_gradient, step_size = step_state, operator_type="povm", use_geodesic=use_geodesic)
+    povm_isometry_updated = update_isometry_tensors(isometries = povm_isometry, riemannian_gradients = povm_gradient, step_size = step_state, operator_type="povm", use_geodesic=use_geodesic)
 
     return kraus_isometries_updated, povm_isometry_updated, state_isometry_updated
 
@@ -802,7 +821,14 @@ def is_isometry(x:jnp.ndarray)->bool:
     return jnp.allclose(x.conj().T @ x, jnp.eye(x.shape[1]))
 
 def is_in_tangent_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
-    "checks if the matrix z is in the tangent space of isometry x"
+    """
+    Checks if the matrix z is in the tangent space of isometry x 
+    
+    Checks tangent space condition x^H z + z^H x = 0
+    Args:
+        x: Stiefel matrix of dimensions (n, p)
+        z: Any matrix of dimensions (n, p)
+    """
     return jnp.allclose(x.conj().T @ z, - z.conj().T @ x)
 
 # Extracted from openTN
@@ -883,6 +909,18 @@ def update_isometry_using_polar_decomposition(x:jnp.ndarray, z:jnp.ndarray, step
     """
     return jax.scipy.linalg.polar(x - step_size * z)[0]
 
+def canonical_gradient(x: jnp.ndarray, z:jnp.ndarray)->jnp.ndarray:
+    """ Compute the riemmanian gradient at the point x on the stiefel manifold using the canonical metric
+
+    Args:
+        x: The base point of the tangent space
+        z: The euclidean gradient at x
+
+    Returns:
+        The riemannian gradient using the canonical metric
+    """
+    return z - x @ z.conj().T @ x
+
 
 def project_onto_tangent_space(x: jnp.ndarray, z: jnp.ndarray)->jnp.ndarray:
     """ Project a matrix z onto the tangent space of the manifold at x
@@ -921,15 +959,17 @@ def tensor_to_isometry(tensor: jnp.ndarray, n:int, p:int)-> jnp.ndarray:
     return jnp.reshape(tensor, shape=(n, p))
 
 
-def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor: jnp.ndarray, operator_type:str="kraus")-> tuple[jnp.ndarray, jnp.ndarray]:
-    """ Project a sequence of tensor of Euclidean gradients onto the Stiefel manifold
+def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor: jnp.ndarray, operator_type:str="kraus", metric:Literal["canonical", "euclidean"] = "canonical")-> tuple[jnp.ndarray, jnp.ndarray]:
+    """ Project a sequence of tensor of Euclidean gradients onto the Tangent space of the Stiefel manifold
 
     Args:
         gradient_tensor: The Euclidean gradient tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
         operator_tensor: The tensor corresponding to either the Kraus, state or POVM operators.
+        operator_type: The type of the input operator ('kraus', 'state', 'povm')
+        metric: The metric to use for the tangent space ('canonical' or 'euclidean')
     Returns:
-        A tuple containing:
-            An array of gradients projected onto the Stiefel manifold
+        A tuple containing matrices of dimensions (n, p) or arrays thereof in the case of Kraus operators:
+            An array of gradients projected onto the Tanget space of the Stiefel manifold
             An array of stiefel isometries
     """
     
@@ -943,7 +983,7 @@ def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor
         
         for gradient, kraus in zip(gradient_tensor, operator_tensor):
             
-            gradient_stiefel, kraus_stiefel = gradient_and_operator_tensors_to_stiefel(gradient = gradient, operator = kraus, n=n, p=p)
+            gradient_stiefel, kraus_stiefel = gradient_and_operator_tensors_to_stiefel(gradient = gradient, operator = kraus, n=n, p=p, metric=metric)
             
             gradients_stiefel.append(gradient_stiefel)
             kraus_isometries.append(kraus_stiefel)
@@ -962,10 +1002,10 @@ def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor
     else:
         raise ValueError(f"Operator name {operator_type} is not recognized. Please use one of the following: 'kraus', 'state', 'povm'")
         
-    return gradient_and_operator_tensors_to_stiefel(gradient = gradient_tensor, operator = operator_tensor, n=n, p=p)
+    return gradient_and_operator_tensors_to_stiefel(gradient = gradient_tensor, operator = operator_tensor, n=n, p=p, metric=metric)
 
         
-def gradient_and_operator_tensors_to_stiefel(gradient:jnp.ndarray, operator:jnp.ndarray, n:int, p:int)->tuple[jnp.ndarray, jnp.ndarray]:
+def gradient_and_operator_tensors_to_stiefel(gradient:jnp.ndarray, operator:jnp.ndarray, n:int, p:int, metric:Literal["canonical", "euclidean"] = "canonical")->tuple[jnp.ndarray, jnp.ndarray]:
     """ Convert a pair of gradient and operator tensors to the Stiefel manifold
 
     We first reshape the operator and gradient tensors into isometries and 
@@ -977,18 +1017,42 @@ def gradient_and_operator_tensors_to_stiefel(gradient:jnp.ndarray, operator:jnp.
     Args:
         gradient: The gradient tensor
         operator: The operator tensor
+        n: The row dimension of stiefel manifold
+        p: The column dimension of the stiefel manifold
+        metric: 
 
     Returns:
-        A tuple containing:
+        A tuple containing matrices of dimensions (n, p):
             The gradient projected onto the Stiefel manifold
             The operator projected onto the Stiefel manifold
     """
     operator_stiefel = tensor_to_isometry(tensor=operator, n=n, p=p)
     gradient_np = tensor_to_isometry(tensor=gradient, n=n, p=p)
     
-    return project_onto_tangent_space(x = operator_stiefel, z = gradient_np), operator_stiefel
+    if metric == "euclidean":
+        gradient_stiefel = project_onto_tangent_space(x = operator_stiefel, z = gradient_np)
+    elif metric == "canonical":
+        gradient_stiefel = canonical_gradient(x = operator_stiefel, z = gradient_np)
+        # gradient_stiefel = project_onto_tangent_space(x = operator_stiefel, z = gradient_stiefel)
+        
+    else:
+        raise ValueError(f"Metric {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'")
+    
+    return gradient_stiefel, operator_stiefel
 
-def update_single_isometry(isometries:jnp.ndarray, riemannian_gradients:jnp.ndarray, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
+def update_isometry_tensors(isometries:jnp.ndarray, riemannian_gradients:jnp.ndarray, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
+    """Update a tensor of isometries in the direction of the tensor of riemannian gradients scaled by step size
+    
+    In order to retract back to the stiefel manifold we either follow the geodesic or use a first order retraction.
+    
+    Args:
+        isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
+        riemannian_gradients: The riemannian gradients at the point x on the stiefel manifold. 
+            Must have the same dimensions as isometries.
+        step_size: The step size of the update.
+        operator_type: The type of the input operator ('kraus', 'state', 'povm')
+        use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
+    """
     
     if operator_type!= "kraus":
         isometries = [isometries] # for povm and state isometries we only have one isometry
@@ -1010,8 +1074,10 @@ def update_single_isometry(isometries:jnp.ndarray, riemannian_gradients:jnp.ndar
     
 
 def update_isometry_using_geodesic(x: jnp.ndarray, z: jnp.ndarray, step_size: float = 1) -> jnp.ndarray:
-    """Compute a new point on the geodesic for a single isometry
+    """Compute a new point following the geodesic for a single isometry
     
+    Source: Eq. 27 of https://arxiv.org/pdf/2112.05176
+
     Args:
         x: Current isometry of dimension (n, p)
         z: Element of the tangent space at x corresponding to the riemannian gradient of the cost function. Dimensions are (n, p)
@@ -1047,4 +1113,62 @@ def eigy_expm_jax(A:jnp.ndarray):
     eigvals, eigvects = jnp.linalg.eig(A)
     return jnp.einsum("...ik, ...k, ...kj -> ...ij", eigvects, jnp.exp(eigvals), jnp.linalg.inv(eigvects))
         
+def povm_from_psd(povm_psd:jnp.ndarray) -> jnp.ndarray:
+    """
+    Get the full POVM tensor from its factorization
+    Args:
+        povm_psd: Factorization of the POVM of shape (num_povm, rank_povm, dim)
+    """
+    return jnp.einsum("irk, irm -> ikm", povm_psd.conj(), povm_psd)
 
+def state_from_psd(state_psd:jnp.ndarray) -> jnp.ndarray:
+    """
+    Get the full state tensor from its factorization
+    Args:
+        state_psd: Factorization of the state of shape (dim, rank_state)
+    """
+    return state_psd @ state_psd.conj().T
+
+def kraus_from_psd(kraus_psd:jnp.ndarray)->jnp.ndarray:
+    """Get the full kraus tensor from its factorization
+
+    Args:
+        kraus_psd: Factorization of the kraus tensor of shape (num_gates, rank_kraus, dim_out, dim_in)
+
+    Returns:
+        Full kraus tensor of shape (num_gates, dim_out, dim_out*, dim_in, dim_in*)
+    """
+    # num_gates, rank_kraus, dim, dim = kraus_psd.shape
+    return jnp.einsum("ijkl,ijnm -> iknlm", kraus_psd, kraus_psd.conj())
+
+def calculate_finite_sampling_error(prob_matrix_exact:jnp.ndarray, prob_matrix_sampled:jnp.ndarray):
+    """ Calculate the finite sampling error between the exact and sampled probability matrices.
+    
+    Args:
+        prob_matrix_exact: Exact probability matrix of shape (num_povm, num_gate_sequences).
+        prob_matrix_sampled: Sampled probability matrix of shape (num_povm, num_gate_sequences).
+    Returns:
+        float: The finite sampling error.
+    """
+    num_povm, num_gate_sequences = prob_matrix_exact.shape
+    return jnp.sum(jnp.abs(prob_matrix_exact - prob_matrix_sampled)**2) / (num_gate_sequences * num_povm)
+
+def riemannian_connection(x:jnp.ndarray, w_x:jnp.ndarray, z:jnp.ndarray, Dw_in_z_at_x:jnp.ndarray, alpha0:float=1, alpha1:float=0.5)-> jnp.ndarray:
+    """
+    General parametrized riemannian connection of tangent spaces
+
+    From equation 5.4 of https://arxiv.org/abs/2009.10159
+    
+    Args:
+        x: Base point isometry of the tangent space
+        w_x: Riemannian vector field evaluated at x.
+        z: Riemannian tangent vector equivalent to the "direction" of the derivative
+        Dw_in_z_at_x: Riemannian derivative of the vector field w in the direction of z evaluated at x
+        alpha0: First parameter of the riemannian connection (see equation 5.4)
+        alpha1: Second parameter of the riemannian connection (see equation 5.4)
+    Returns:
+        The riemannian connection of the vector field w in the direction of z at x
+    """
+    In = jnp.eye(x.shape[0])
+    return Dw_in_z_at_x + 0.5 * x @ (z.conj().T @ w_x + w_x.conj().T @ z) + ((alpha0-alpha1)/alpha0)*(In - x @ x.conj().T) @ (z @ w_x.conj().T + w_x @ z.conj().T) @ x
+    

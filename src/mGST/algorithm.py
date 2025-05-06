@@ -67,28 +67,34 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     nt = n_povm * r
     rho = (B @ B.T.conj()).reshape(-1)
     H = np.zeros((2, nt, 2, nt)).astype(np.complex128)
-    P_T = np.zeros((2, nt, 2, nt)).astype(np.complex128)
-    Fyconjy = np.zeros((n_povm, r, n_povm, r)).astype(np.complex128)
-    Fyy = np.zeros((n_povm, r, n_povm, r)).astype(np.complex128)
+    P_T = np.zeros((2, nt, 2, nt)).astype(np.complex128) # superoperor projection acting on vectorized arbitrary elements and producing vectorized tangent vectors
+    Fyconjy = np.zeros((n_povm, r, n_povm, r)).astype(np.complex128) # second derivative, first by conjugate then by y
+    Fyy = np.zeros((n_povm, r, n_povm, r)).astype(np.complex128) # second derivative, first by y then by y
 
     X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
+    # Euclidean derivatives
     dA_, dMdM, dMconjdM, dconjdA = ddA_derivs(X, A, B, J, y, r, pdim, n_povm)
+    # dA_: first derivative wrt to A
+    # dconjA: second derivative first by A* and then by A
 
     # Second derivatives
     for i in range(n_povm):
+        # sum in equation of derivatives
         Fyconjy[i, :, i, :] = dMconjdM[i] + dconjdA[i]
         Fyy[i, :, i, :] = dMdM[i]
 
     # derivative
-    Fy = dA_.reshape(n, pdim)
-    Y = A.reshape(n, pdim)
-    rGrad = Fy.conj() - Y @ Fy.T @ Y
-    G = np.array([rGrad, rGrad.conj()]).reshape(-1)
+    Fy = dA_.reshape(n, pdim) # converting into isometry
+    Y = A.reshape(n, pdim) # converting into isometry
+    rGrad = Fy.conj() - Y @ Fy.T @ Y # riemannian gradient
+    G = np.array([rGrad, rGrad.conj()]).reshape(-1) # vectorized form of gradient
 
     P = np.eye(n) - Y @ Y.T.conj()
-    T = transp(n, pdim)
+    T = transp(n, pdim) # transpose superoperator
 
     # Hessian assembly
+    # See theorem 1, equation A27
+    # This is already the riemannian hessian elements
     H00 = (
         -(np.kron(Y, Y.T)) @ T @ Fyy.reshape(nt, nt).T
         + Fyconjy.reshape(nt, nt).T.conj()
@@ -102,20 +108,25 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
         + (np.kron(Fy.conj(), Y.T) @ T) / 2
         + (np.kron(Y, Fy.T.conj()) @ T) / 2
     )
-
+    # Full hessian on Z and Z*
+    # See relation in equation A37 of individual hessian submatrices
     H[0, :, 0, :] = H00
     H[0, :, 1, :] = H01
     H[1, :, 0, :] = H01.conj()
     H[1, :, 1, :] = H00.conj()
 
-    P_T[0, :, 0, :] = np.eye(nt) - np.kron(Y @ Y.T.conj(), np.eye(pdim)) / 2
-    P_T[0, :, 1, :] = -np.kron(Y, Y.T) @ T / 2
-    P_T[1, :, 0, :] = P_T[0, :, 1, :].conj()
-    P_T[1, :, 1, :] = P_T[0, :, 0, :].conj()
+    P_T[0, :, 0, :] = np.eye(nt) - np.kron(Y @ Y.T.conj(), np.eye(pdim)) / 2 # projection on x, component x
+    P_T[0, :, 1, :] = -np.kron(Y, Y.T) @ T / 2 # projection on x, component x*
+    P_T[1, :, 0, :] = P_T[0, :, 1, :].conj() # projection on x*, component x
+    P_T[1, :, 1, :] = P_T[0, :, 0, :].conj() # projection on x*, component x*
 
+    # We compose the projection onto the tangent space with the actual riemannian hessian
+    # since we are accepting any input Y
+    # A38
     H = H.reshape(2 * nt, 2 * nt) @ P_T.reshape(2 * nt, 2 * nt)
 
     # saddle free newton method
+    # See equation A39
     H = (H + H.T.conj()) / 2
     evals, U = eigh(H)
 
@@ -127,9 +138,11 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
 
     # Damping all eigenvalues
     H_abs_inv = U @ np.diag(1 / (np.abs(evals) + lam)) @ U.T.conj()
-
+    # At this point we take only the real variable part
+    # since we are updating only A and not A*
     Delta_A = ((H_abs_inv @ G)[:nt]).reshape(n, pdim)
-
+    # numerical accuracy
+    # maybe undoing the symmetrization
     Delta = tangent_proj(A, Delta_A, 1, n_povm)[0]
 
     a = minimize(lineobjf_A_geodesic, 1e-9, args=(Delta, X, A, rho, J, y), method="COBYLA").x
@@ -300,7 +313,7 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
         X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
         dK_ = dK(X, K, E, rho, J, y, d, r, rK)
     else:
-        dK_ = dK_jax( K, E, rho, J, y, d, r)
+        dK_ = dK_jax(K, E, rho, J, y)
         
     if conjugate:
         dK_ = dK_.conj()
@@ -313,7 +326,8 @@ def gd(K, E, rho, y, J, d, r, rK, fixed_gates, ls="COBYLA",
         rGrad = Fy.conj() - Y @ Fy.T @ Y
         Delta[k] = rGrad
 
-    Delta = tangent_proj(K, Delta, d, rK)
+    # Delta = tangent_proj(K, Delta, d, rK)
+    
     if optimize_step:
         res = minimize(lineobjf_isom_geodesic, 1e-8, args=(Delta, K, E, rho, J, y), method=ls, options={"maxiter": 200})
         a = res.x
@@ -636,6 +650,7 @@ def run_mGST(
     fixed_elements=None,
     init=None,
     testing=False,
+    return_operators_list:bool=False,
 ):  # pylint: disable=too-many-branches
     """Main mGST routine
 
@@ -709,11 +724,12 @@ def run_mGST(
         K, E = (init[0], init[1])
         # offset small negative eigenvalues for stability
         rho = init[2] + 1e-14 * np.eye(pdim).reshape(-1)
+        E = np.array([E[k].reshape(pdim, pdim) + 1e-14 * np.eye(pdim) for k in range(n_povm)]).reshape(n_povm, -1)
         max_inits = 0
     else:
         K, _, E, rho = random_gs(d, r, rK, n_povm)
 
-    A = np.array([la.cholesky(E[k].reshape(pdim, pdim) + 1e-14 * np.eye(pdim)).T.conj() for k in range(n_povm)])
+    A = np.array([la.cholesky(E[k].reshape(pdim, pdim)).T.conj() for k in range(n_povm)])
     B = la.cholesky(rho.reshape(pdim, pdim))
     X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
     res_list = [cost_function_jax(X, E, rho, J, y)]
@@ -736,9 +752,20 @@ def run_mGST(
 
     if not success and max_inits > 0:
         print(f"Success threshold not reached, attempting optimization over full data set...")
+        
+    kraus_i = [K]
+    povm_i = [E]
+    state_i = [rho]
+    kraus_full_i = [X]
+        
     for _ in tqdm(range(final_iter), file=sys.stdout):
         K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements)
         res_list.append(cost_function_jax(X, E, rho, J, y))
+        kraus_i.append(K)
+        povm_i.append(E)
+        state_i.append(rho)
+        kraus_full_i.append(X)
+        
         if np.abs(res_list[-2] - res_list[-1]) < delta * target_rel_prec:
             break
     if testing:
@@ -751,4 +778,10 @@ def run_mGST(
         f"\t Final objective {res_list[-1]}",
         f"in time {(time.time() - t0):.2f}s",
     )
+    if return_operators_list:
+        K = kraus_i
+        E = povm_i
+        rho = state_i
+        X = kraus_full_i
+        
     return K, X, E, rho, res_list

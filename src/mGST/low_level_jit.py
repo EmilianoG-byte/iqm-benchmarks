@@ -665,10 +665,16 @@ def gradient_k_numba(K, E, rho, J, y):
     X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((num_gates, dim**2, dim**2))
     return dK(X, K, E, rho, J, y, d=num_gates, r=dim**2, rK=kraus_rank) 
 
-def dK_jax(K, E, rho, J, y, d, r):
+def cost_function_jax_for_gradient(K, E, rho, J, y):
+    num_gates, _, dim, dim = K.shape
+    X = jnp.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((num_gates, dim**2, dim**2))
+    return cost_function_jax(X, E, rho, J, y)
+    
+
+def dK_jax(K, E, rho, J, y):
     "Calculate the Euclidean derivative wrt the Gate tensor K using JAX"
     print('Using JAX power')
-    return jax.grad(fun=cost_function_jax, argnums=0)(K, d, r, E, rho, J, y)
+    return jax.grad(fun=cost_function_jax_for_gradient, argnums=0)(K, E, rho, J, y)
 
 @njit(cache=True)
 def MVE_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm):
@@ -1142,6 +1148,9 @@ def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
         E[k] = (A[k].T.conj() @ A[k]).reshape(-1)
     rho = (B @ B.T.conj()).reshape(-1)
     dA_ = np.zeros((n_povm, pdim, pdim)).astype(np.complex128)
+    # dM: derivative of probability wrt to Z
+    # D_ind: evaluation of probability
+    # dMdM: product of two derivatives in the last line of equation of the derivatives (page 26)
     dM = np.zeros((pdim, pdim)).astype(np.complex128)
     dMdM = np.zeros((n_povm, r, r)).astype(np.complex128)
     dMconjdM = np.zeros((n_povm, r, r)).astype(np.complex128)
