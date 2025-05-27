@@ -149,6 +149,76 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     A_new = update_A_geodesic(A, Delta, a)
     return A_new
 
+def riemannian_hessian_povm(K:np.ndarray, A:np.ndarray, B:np.ndarray, y:np.ndarray, J:list[list[int]], return_gradient:bool=True)-> np.ndarray | tuple[np.ndarray, np.ndarray]:
+    """Compute the Riemannian Hessian of the objective function
+    
+    Args:
+        K: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        A: POVM factorization of dimensions (num_povm, povm_rank, dim)
+        B: State factorization of dimensions (dim, state_rank)
+        y: Measurement outcomes of dimensions (num_povm, num_gate_sequences)
+        J: List of gate sequences, where each sequence is a list of gate indices.
+    """
+    
+    num_povm, dim, dim = A.shape
+    num_gates = K.shape[0]
+    dim_squared = dim ** 2
+    n = num_povm * dim
+    nt = num_povm * dim_squared
+    H = np.zeros((2, nt, 2, nt)).astype(np.complex128)
+    Fyconjy = np.zeros((num_povm, dim_squared, num_povm, dim_squared)).astype(np.complex128) # second derivative, first by conjugate then by y
+    Fyy = np.zeros((num_povm, dim_squared, num_povm, dim_squared)).astype(np.complex128) # second derivative, first by y then by y
+
+    X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((num_gates, dim_squared, dim_squared))
+    # Euclidean derivatives
+    dA_, dMdM, dMconjdM, dconjdA = ddA_derivs(X, A, B, J, y, dim_squared, dim, num_povm)
+    # dA_: first derivative wrt to A
+    # dconjA: second derivative first by A* and then by A
+
+    # Second derivatives
+    for i in range(num_povm):
+        # sum in equation of derivatives
+        Fyconjy[i, :, i, :] = dMconjdM[i] + dconjdA[i]
+        Fyy[i, :, i, :] = dMdM[i]
+
+    # derivative
+    Fy = dA_.reshape(n, dim) # converting into isometry
+    Y = A.reshape(n, dim) # converting into isometry
+
+    P = np.eye(n) - Y @ Y.T.conj()
+    T = transp(n, dim) # transpose superoperator
+
+    # Hessian assembly
+    # See theorem 1, equation A27
+    # This is already the riemannian hessian elements
+    H00 = (
+        -(np.kron(Y, Y.T)) @ T @ Fyy.reshape(nt, nt).T
+        + Fyconjy.reshape(nt, nt).T.conj()
+        - (np.kron(np.eye(n), Y.T @ Fy)) / 2
+        - (np.kron(Y @ Fy.T, np.eye(dim))) / 2
+        - (np.kron(P, Fy.T.conj() @ Y.conj())) / 2
+    )
+    H01 = (
+        Fyy.reshape(nt, nt).T.conj()
+        - np.kron(Y, Y.T) @ T @ Fyconjy.reshape(nt, nt).T
+        + (np.kron(Fy.conj(), Y.T) @ T) / 2
+        + (np.kron(Y, Fy.T.conj()) @ T) / 2
+    )
+    # Full hessian on Z and Z*
+    # See relation in equation A37 of individual hessian submatrices
+    H[0, :, 0, :] = H00
+    H[0, :, 1, :] = H01
+    H[1, :, 0, :] = H01.conj()
+    H[1, :, 1, :] = H00.conj()
+    
+    if return_gradient:
+        # derivative
+        Fy = dA_.reshape(n, dim) # converting into isometry
+        Y = A.reshape(n, dim) # converting into isometry
+        rGrad = Fy.conj() - Y @ Fy.T @ Y # riemannian gradient
+        G = np.array([rGrad, rGrad.conj()]) # vectorized form of gradient
+        return H, G
+    return H
 
 def B_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     """Riemannian saddle free Newton step on the initial state parametrization

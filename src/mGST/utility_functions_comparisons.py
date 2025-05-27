@@ -26,7 +26,8 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 
-from typing import Sequence
+from typing import Sequence, Callable
+import warnings
 
 backend = "iqmfakeapollo"
 
@@ -203,6 +204,24 @@ def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, 
     num_povm, dim_sqrd =povm_mgst.shape
     dim = int(jnp.sqrt(dim_sqrd))
     povm_psd = jnp.array([jnp.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)).T.conj() for k in range(num_povm)])
+    state_mgst_offset = state_mgst + 1e-14 * jnp.eye(dim).reshape(-1)
+    state_psd = jnp.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
+    return povm_psd, state_psd
+
+def get_compressed_rep_mgst_cholesky_numpy(povm_mgst, state_mgst)->tuple[np.ndarray, np.ndarray]:
+    """Get the compressed representation of the MGST operators using cholesky factorization.
+    
+    This is implementation usedin the original mGST code.
+    
+    Args:
+        povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+        state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
+    Returns:
+        A tuple containing the compressed representation of the POVM and State.
+    """
+    num_povm, dim_sqrd =povm_mgst.shape
+    dim = int(np.sqrt(dim_sqrd))
+    povm_psd = np.array([np.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * np.eye(dim)).T.conj() for k in range(num_povm)])
     state_mgst_offset = state_mgst + 1e-14 * np.eye(dim).reshape(-1)
     state_psd = np.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
     return povm_psd, state_psd
@@ -610,7 +629,7 @@ def _gradient_descent_step_no_dmrg(kraus_tensor, povm_psd, state_psd, indices_li
 def cost_function_from_updated_operator(
     step_size: float,
     initial_isometry: jnp.ndarray,
-    riemannian_gradient: jnp.ndarray,
+    update_direction: jnp.ndarray,
     tensor_shape: tuple[int],
     operator_type: str,
     kraus_tensor: jnp.ndarray = None,
@@ -628,7 +647,7 @@ def cost_function_from_updated_operator(
     Args:
         step_size (float): Gradient descent step size to be optimized.
         initial_isometry (jnp.ndarray): Initial operator on the isometry manifold.
-        riemannian_gradient (jnp.ndarray): Riemannian direction to move in.
+        update_direction (jnp.ndarray): Tangent vector corresponding to the update direction.
         tensor_shape (tuple[int]): Original shape of the operator tensor.
         operator_type (str): The name of the operator ('povm', 'state', 'kraus').
         kraus_tensor (jnp.ndarray, optional): Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
@@ -642,7 +661,7 @@ def cost_function_from_updated_operator(
         float: The cost function value at the updated operator tensor.
     """    
     
-    updated_tensor = _update_isometry_and_back_to_tensor(step_size, initial_isometry, riemannian_gradient, tensor_shape, operator_type, use_geodesic)
+    updated_tensor = _update_isometry_and_back_to_tensor(step_size, initial_isometry, update_direction, tensor_shape, operator_type, use_geodesic)
     
     if regularized:
         kraus_target, povm_target, state_target = target_operators
@@ -665,7 +684,7 @@ def cost_function_from_updated_operator(
 def _update_isometry_and_back_to_tensor(
     step_size: float,
     isometries: jnp.ndarray,
-    riemannian_gradients: jnp.ndarray,
+    update_directions: jnp.ndarray,
     tensor_shape: tuple[int],
     operator_type: str,
     use_geodesic: bool = True) -> jnp.ndarray:
@@ -674,7 +693,7 @@ def _update_isometry_and_back_to_tensor(
     Args:
         step_size: The step size of the update.
         isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
-        riemannian_gradients: The riemannian gradients at the point x on the stiefel manifold. 
+        update_directions: The tangent vectors corresponding to the update direction (at point x in manifold). 
             Must have the same dimensions as isometries.
         tensor_shape: The shape of the original tensor.
         operator_type: The type of the input operator ('kraus', 'state', 'povm')
@@ -686,7 +705,7 @@ def _update_isometry_and_back_to_tensor(
     
     updated_isometry = update_isometry_tensors(
         isometries=isometries,
-        riemannian_gradients=riemannian_gradients,
+        update_directions=update_directions,
         step_size=step_size,
         operator_type=operator_type,
         use_geodesic=use_geodesic
@@ -738,11 +757,11 @@ def update_all_isometries(step_sizes: jnp.ndarray | float, stiefel_gradients:tup
         raise ValueError(f"Step size must be a float or a sequence of length 3. Instead got {type(step_sizes)}")
         
     # update kraus tensor
-    kraus_isometries_updated = update_isometry_tensors(isometries = kraus_isometries, riemannian_gradients = kraus_gradients, step_size = step_kraus, operator_type="kraus", use_geodesic=use_geodesic)        
+    kraus_isometries_updated = update_isometry_tensors(isometries = kraus_isometries, update_directions = kraus_gradients, step_size = step_kraus, operator_type="kraus", use_geodesic=use_geodesic)        
     # update state
-    state_isometry_updated = update_isometry_tensors(isometries = state_isometry, riemannian_gradients = state_gradient, step_size = step_povm, operator_type="state", use_geodesic=use_geodesic)
+    state_isometry_updated = update_isometry_tensors(isometries = state_isometry, update_directions = state_gradient, step_size = step_povm, operator_type="state", use_geodesic=use_geodesic)
     # update povm
-    povm_isometry_updated = update_isometry_tensors(isometries = povm_isometry, riemannian_gradients = povm_gradient, step_size = step_state, operator_type="povm", use_geodesic=use_geodesic)
+    povm_isometry_updated = update_isometry_tensors(isometries = povm_isometry, update_directions = povm_gradient, step_size = step_state, operator_type="povm", use_geodesic=use_geodesic)
 
     return kraus_isometries_updated, povm_isometry_updated, state_isometry_updated
 
@@ -898,7 +917,7 @@ def update_isometry_using_polar_decomposition(x:jnp.ndarray, z:jnp.ndarray, step
     
     Args:
         x: The base point of the retraction
-        z: The matrix to retract
+        z: Tangent vector at x, corresponding to the update direction. 
         step_size: The step size of the retraction
     Returns:
         The retracted matrix
@@ -1040,14 +1059,14 @@ def gradient_and_operator_tensors_to_stiefel(gradient:jnp.ndarray, operator:jnp.
     
     return gradient_stiefel, operator_stiefel
 
-def update_isometry_tensors(isometries:jnp.ndarray, riemannian_gradients:jnp.ndarray, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
-    """Update a tensor of isometries in the direction of the tensor of riemannian gradients scaled by step size
+def update_isometry_tensors(isometries:jnp.ndarray, update_directions:jnp.ndarray, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
+    """Update a tensor of isometries in the direction of the tensor of tangent vectors scaled by step size
     
     In order to retract back to the stiefel manifold we either follow the geodesic or use a first order retraction.
     
     Args:
         isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
-        riemannian_gradients: The riemannian gradients at the point x on the stiefel manifold. 
+        tangent_vectors: The tangent vectors at the point x on the stiefel manifold. 
             Must have the same dimensions as isometries.
         step_size: The step size of the update.
         operator_type: The type of the input operator ('kraus', 'state', 'povm')
@@ -1056,14 +1075,14 @@ def update_isometry_tensors(isometries:jnp.ndarray, riemannian_gradients:jnp.nda
     
     if operator_type!= "kraus":
         isometries = [isometries] # for povm and state isometries we only have one isometry
-        riemannian_gradients = [riemannian_gradients]
+        update_directions = [update_directions]
         
     new_isometries = []
-    for isometry, gradient in zip(isometries, riemannian_gradients):
+    for isometry, vector in zip(isometries, update_directions):
         if use_geodesic:
-            new_isometry = update_isometry_using_geodesic(x=isometry, z=gradient, step_size=step_size)
+            new_isometry = update_isometry_using_geodesic(x=isometry, z=vector, step_size=step_size)
         else:
-            new_isometry = update_isometry_using_polar_decomposition(x = isometry, z = gradient, step_size=step_size)
+            new_isometry = update_isometry_using_polar_decomposition(x = isometry, z = vector, step_size=step_size)
             
         new_isometries.append(new_isometry)
         
@@ -1080,7 +1099,8 @@ def update_isometry_using_geodesic(x: jnp.ndarray, z: jnp.ndarray, step_size: fl
 
     Args:
         x: Current isometry of dimension (n, p)
-        z: Element of the tangent space at x corresponding to the riemannian gradient of the cost function. Dimensions are (n, p)
+        z: Element of the tangent space at x corresponding to the update direction.
+            For instance, the riemannian gradient of the cost function. Dimensions are (n, p)
         step_size: Geodesic curve parameter
     Returns:
         x_new: New position given by x_new = g(a) with g(a) being a geodesic with g(0) = x, [dg/dt](0) = z
@@ -1172,3 +1192,294 @@ def riemannian_connection(x:jnp.ndarray, w_x:jnp.ndarray, z:jnp.ndarray, Dw_in_z
     In = jnp.eye(x.shape[0])
     return Dw_in_z_at_x + 0.5 * x @ (z.conj().T @ w_x + w_x.conj().T @ z) + ((alpha0-alpha1)/alpha0)*(In - x @ x.conj().T) @ (z @ w_x.conj().T + w_x @ z.conj().T) @ x
     
+def riemannian_metric(z1:jnp.ndarray, z2:jnp.ndarray, x:jnp.ndarray = None, metric:str = "euclidean")-> jnp.ndarray:
+    """
+    Compute the riemannian metric on the stiefel manifold at the point x for two tangent vectors z1 and z2.
+    
+    Args:
+        z1: First tangent vector of dimensions (n, p)
+        z2: Second tangent vector of dimensions (n, p)
+        x: Point on the stiefel manifold of dimensions (n, p)
+        metric: The type of the metric to use ('euclidean' or 'canonical'). Defaults to 'euclidean'.
+    
+    Returns:
+        The inner product of the two tangent vectors at the point x
+    """
+    n, p = z1.shape
+    if metric == "euclidean":
+        gamma = jnp.eye(n)
+    elif metric == "canonical":
+        if x is None:
+            raise ValueError("To use the canonical metric, the point x on the stiefel manifold must be provided.")
+        gamma = jnp.eye(n) - 0.5 * (x@x.conj().T)
+    else:
+        raise ValueError(f"Metric: {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'")
+    return jnp.trace(z1.conj().T @ gamma @ z2).real
+
+def random_tangent_vector(x:jnp.ndarray, n:int, p:int, seed=42)->jnp.ndarray:
+    """
+    Generate a random tangent vector at the point x on the stiefel manifold.
+    
+    Args:
+        x: Point on the stiefel manifold of dimensions (n, p)
+        n: Row dimension of the tangent vector
+        p: Column dimension of the tangent vector
+    
+    Returns:
+        A random tangent vector of dimensions (n, p) at the point x
+    """
+
+    key = jax.random.PRNGKey(seed)
+    # Split the key to generate independent random parts
+    key_real, key_imag = jax.random.split(key)
+
+    # Generate real and imaginary parts
+    real_part = jax.random.normal(key_real, (n, p))
+    imag_part = jax.random.normal(key_imag, (n, p))
+
+    # Combine into a complex matrix
+    z = real_part + 1j * imag_part
+    return project_onto_tangent_space(x=x, z=z)
+
+def truncated_cg(rgrad:jnp.ndarray, rhess_vect_fn:Callable, radius:float, isometry:jnp.ndarray = None, metric:str = "euclidean", **kwargs):
+    """
+    Truncated CG (tCG) method for the trust-region subproblem:
+        minimize   <grad, z> + 1/2 <z, H z>
+        subject to <z, z> <= radius^2
+        
+    Args:
+        rgrad: Riemannian gradient matrix at the current point
+        rhess_vect_fn: Function that computes the Hessian-vector product and returns a matrix in the tangent space.
+            This should be a function that takes as single input a tangent vector.
+        radius: Trust region radius
+        **kwargs: Additional keyword arguments:
+            maxiter: Maximum number of iterations (default: 2 * len(rgrad))
+            abstol: Absolute tolerance for stopping criterion (default: 1e-8)
+            reltol: Relative tolerance for stopping criterion (default: 1e-6)
+
+    References:
+      - Algorithm 11 in:
+        P.-A. Absil, R. Mahony, Rodolphe Sepulchre
+        Optimization Algorithms on Matrix Manifolds
+        Princeton University Press (2008)
+      - Trond Steihaug
+        The conjugate gradient method and trust regions in large scale optimization
+        SIAM Journal on Numerical Analysis 20, 626-637 (1983)
+    """
+    maxiter = kwargs.get("maxiter", 2 * len(rgrad))
+    abstol  = kwargs.get("abstol", 1e-8)
+    reltol  = kwargs.get("reltol", 1e-6)
+    r_vector = rgrad.copy()
+    
+    rsq = riemannian_metric(r_vector, r_vector, x=isometry, metric=metric)
+    stoptol = max(abstol, reltol * jnp.sqrt(rsq))
+    z_vector = jnp.zeros_like(r_vector)
+    z_vectors = [z_vector]
+    delta_vector = -r_vector
+    for iter in range(1, maxiter+1):
+        Hessian_delta = rhess_vect_fn(delta_vector)
+        # Hessian_delta = hess @ delta_vector
+        delta_Hessian_delta = riemannian_metric(delta_vector, Hessian_delta, x=isometry, metric=metric)
+        t = _move_to_boundary(z_vector, delta_vector, radius, isometry=isometry, metric=metric)
+        alpha = rsq / delta_Hessian_delta
+        if delta_Hessian_delta <= 0 or alpha > t:
+            # return with move to boundary
+            print(f"Finished successfully after iters: {iter} with alpha={alpha}, delta_Hessian_delta={delta_Hessian_delta}, t={t}")
+            z_vector += t * delta_vector
+            z_vectors.append(z_vector)
+            return z_vectors, True
+        # update iterates
+        r_vector += alpha * Hessian_delta
+        z_vector += alpha * delta_vector
+        z_vectors.append(z_vector)
+        rsq_next = riemannian_metric(r_vector, r_vector, x=isometry, metric=metric)
+        if jnp.sqrt(rsq_next) <= stoptol:
+            # early stopping
+            print(f"Finished early after iters: {iter}")
+            return z_vectors, False
+        beta = rsq_next / rsq
+        delta_vector = -r_vector + beta * delta_vector
+        rsq = rsq_next
+    # maxiter reached
+    print(f"Did not converge after max iterations: {maxiter}")
+    return z_vectors, False
+
+def _move_to_boundary(eta_j:jnp.ndarray, delta_j:jnp.ndarray, radius:float, isometry:jnp.ndarray = None, metric:str = "euclidean")-> float:
+    """
+    Move to the unit ball boundary by solving
+    ||eta_sol|| = || eta_j + t * delta_j || == radius
+    for t with t > 0.
+    """
+    dsq = riemannian_metric(delta_j, delta_j, x=isometry, metric=metric)
+    if jnp.allclose(dsq, 0):
+        warnings.warn("input vector 'd' is zero")
+        return 0 # t =0 such that the next iteration is the same eta_j
+    p = riemannian_metric(eta_j, delta_j, x=isometry, metric=metric) / dsq
+    q = (riemannian_metric(eta_j, eta_j, x=isometry, metric=metric) - radius**2) / dsq
+    t = solve_quadratic_equation(p, q)[1]
+    if t < 0:
+        warnings.warn("encountered t < 0")
+    return t
+
+
+def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
+    """
+    Compute the two solutions of the quadratic equation x^2 + 2 p x + q == 0.
+    """
+    if (p**2 - q) < 0:
+        raise ValueError("require non-negative discriminant")
+    if jnp.isclose(p, 0):
+        x = jnp.sqrt(-q)
+        return (-x, x)
+    x1 = -(p + jnp.sign(p)*jnp.sqrt(p**2 - q))
+    x2 = q / x1
+    return tuple(sorted((x1, x2)))
+
+def riemannian_gradient_fn_povm(x:jnp.ndarray, kraus_tensor:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, metric:str = "canonical", )->jnp.ndarray:
+    """Calculate the riemannian gradient of the cost function wrt to the POVM tensor
+    
+    Args:
+        x: The POVM tensor to calculate the gradient at.
+        metric: The metric to use for the gradient calculation. Can be "canonical" or "euclidean".
+    Returns:
+        The riemannian gradient (tensor) of the cost function wrt to the POVM tensor.
+    """
+    gradient_ambient_jax = gradient_povm_mps_jit(
+        kraus_tensor, x, state_psd,
+        indices_list, prob_matrix)
+    
+    gradient_ambient = gradient_ambient_jax.conj()/2
+    gradient_stiefel_matrix, _ = euclidean_gradients_to_stiefel(
+        gradient_tensor=gradient_ambient,
+        operator_tensor=x, operator_type="povm", metric=metric,
+    )
+    return gradient_stiefel_matrix.reshape(x.shape)
+
+def vhp(function:callable, x:jnp.ndarray, z:jnp.ndarray)-> tuple[jnp.ndarray, jnp.ndarray]:
+    function_at_x, vjp_function = jax.vjp(function, x)
+    (vjp_vector, ) = vjp_function(z)
+    return function_at_x, vjp_vector
+
+def hvp(function:callable, x:jnp.ndarray, z:jnp.ndarray)-> tuple[jnp.ndarray, jnp.ndarray]:
+    """Compute the Hessian-vector product using JAX's jvp function.
+    Args:
+        function: The function for which to compute the Hessian-vector product.
+        x: The point at which to evaluate the function and its gradient.
+        z: The vector with which to compute the Hessian-vector product.
+    Returns:
+        A tuple containing the function value at x and the Hessian-vector product.
+    """
+    return jax.jvp(function, (x,), (z,))
+
+def riemannian_hessian_vector_povm_jax(tangent_vector:jnp.ndarray, kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, metric:str="canonical")->jnp.ndarray:
+    """Compute the Riemannian Hessian-vector product for the POVM tensor using JAX.
+    
+    Args:
+        povm_psd: POVM factor tensor of shape (num_povm, povm_rank, dim).
+        tangent_vector: Tangent vector determining direction of covariant derivative of shape (num_povm, povm_rank, dim).
+        metric: The metric to use for the Hessian-vector product. Can be "canonical" or "euclidean".
+    """
+
+    num_povm, povm_rank, dim = povm_psd.shape
+    n = num_povm * povm_rank
+    p = dim
+    riemannian_gradient_function = lambda x: riemannian_gradient_fn_povm(
+        x, kraus_tensor=kraus_tensor, state_psd=state_psd, indices_list=indices_list, prob_matrix=prob_matrix, metric=metric)
+    grad_at_x_tensor, Dgrad_to_z_tensor = hvp(function=riemannian_gradient_function, x=povm_psd, z=tangent_vector)
+    grad_at_x_matrix = tensor_to_isometry(grad_at_x_tensor, n, p)
+    Dgrad_to_z_matrix = tensor_to_isometry(Dgrad_to_z_tensor, n, p)
+    povm_psd_matrix = tensor_to_isometry(povm_psd, n, p)
+    tangent_vector_matrix = tensor_to_isometry(tangent_vector, n, p)
+    
+    if metric == "euclidean":
+        alpha0, alpha1 = 1, 1
+    elif metric == "canonical":
+        alpha0, alpha1 = 1, 0.5
+    else:
+        raise ValueError("Metric must be either 'euclidean' or 'canonical'")
+    return riemannian_connection(x = povm_psd_matrix, w_x=grad_at_x_matrix, z=tangent_vector_matrix, Dw_in_z_at_x=Dgrad_to_z_matrix, alpha0=alpha0, alpha1=alpha1)
+
+def riemannian_trust_region_optimize(f, retract, gradfunc, hessfunc, x_init, save_x=False, check_convergence:bool=False, show_quotient:bool=True, **kwargs):
+    """
+    Optimization via the Riemannian trust-region (RTR) algorithm.
+
+    Reference:
+        Algorithm 10 in:
+        P.-A. Absil, R. Mahony, Rodolphe Sepulchre
+        Optimization Algorithms on Matrix Manifolds
+        Princeton University Press (2008)
+
+    args:
+    ---------
+    f: real valued function representing the optimization problem.
+        it should accept as single input a list of elements of the manifold to optimze over.
+    retract:
+        retraction from tanget space at x to original manifold.
+        signature: x_list:list of elements of manifold, eta: array containing the parametrization of the tangent elements
+
+    returns:
+    ---------
+    x_iter:
+        if `save_x = True`, it is a list with all the x's used in the `niter` iterations (list of lists)
+        else, it returns the last x. Note that the last x is not used to compute f(x).
+    f_iter:
+        evaluation of the cost function across the `niter` iterations
+    g_iter:
+        evaluation of the error function. Not used
+    radius:
+        last radius used in the trust region algorithm
+    """
+    rho_trust   = kwargs.get("rho_trust", 0.125)
+    radius_init = kwargs.get("radius_init", 0.01)
+    maxradius   = kwargs.get("maxradius",   0.1)
+    niter       = kwargs.get("niter", 20)
+    gfunc       = kwargs.get("gfunc", None)
+    tol         = kwargs.get("tol", 1e-10)
+    # transfer keyword arguments for truncated_cg
+    tcg_kwargs = {}
+    for key in ["maxiter", "abstol", "reltol"]:
+        if ("tcg_" + key) in kwargs.keys():
+            tcg_kwargs[key] = kwargs["tcg_" + key]
+    assert 0 <= rho_trust < 0.25
+    x = x_init
+    radius = radius_init
+    f_iter = []
+    g_iter = []
+    x_iter = [x]
+
+    if gfunc is not None:
+        g_iter.append(gfunc(x))
+    try:
+        for k in range(niter):
+            print(f'iteration: {k}')
+            grad = gradfunc(x)
+            hess = hessfunc(x)
+            eta, on_boundary = truncated_cg(grad, hess, radius, **tcg_kwargs)
+            x_next = retract(x, eta)
+            fx = f(x)
+            f_iter.append(fx)
+            print(f'f(x{k}): {fx}')
+            # Eq. (7.7)
+            rho = (f(x_next) - fx) / (np.dot(grad, eta) + 0.5 * np.dot(eta, hess @ eta))
+            if rho < 0.25:
+                # reduce radius
+                radius *= 0.25
+            elif rho > 0.75 and on_boundary:
+                # enlarge radius
+                radius = min(2 * radius, maxradius)
+            if show_quotient:
+                print('rho:', rho, 'updated radius:', radius)
+            if rho > rho_trust:
+                x = x_next
+            if gfunc is not None:
+                g_iter.append(gfunc(x))
+            if save_x or k == (niter - 1): # if save = False, this will save only the last iteration
+                x_iter.append(x)
+            if check_convergence:
+                if np.abs(f_iter[-1]-f_iter[-2])/f_iter[-1] <= tol:
+                    print(f"optimization converged prematurely at iteration: {k}")
+                    break
+        return x_iter, f_iter, radius # x_iter will have 1 more element f_iter
+    except KeyboardInterrupt:
+        print(f"optimization was stopped prematurely at iteration: {k}")
+        return x_iter, f_iter, radius
