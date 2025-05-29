@@ -1312,7 +1312,7 @@ def _move_to_boundary(eta_j:jnp.ndarray, delta_j:jnp.ndarray, radius:float, isom
     """
     dsq = riemannian_metric(delta_j, delta_j, x=isometry, metric=metric)
     if jnp.allclose(dsq, 0):
-        warnings.warn("input vector 'd' is zero")
+        warnings.warn("tangent vector 'delta_j' has norm zero")
         return 0 # t =0 such that the next iteration is the same eta_j
     p = riemannian_metric(eta_j, delta_j, x=isometry, metric=metric) / dsq
     q = (riemannian_metric(eta_j, eta_j, x=isometry, metric=metric) - radius**2) / dsq
@@ -1325,6 +1325,18 @@ def _move_to_boundary(eta_j:jnp.ndarray, delta_j:jnp.ndarray, radius:float, isom
 def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
     """
     Compute the two solutions of the quadratic equation x^2 + 2 p x + q == 0.
+    
+    The solution should be  -p ± sqrt(p**2 - q).
+    
+    Args:
+        p: Coefficient of the linear term (half of the coefficient of x).
+        q: Constant term of the quadratic equation.
+    
+    Returns:
+        A tuple containing the two solutions of the quadratic equation, (negative, positive).
+        
+    Raises:
+        ValueError: If the discriminant is negative, i.e., p**2 - q < 0.
     """
     if (p**2 - q) < 0:
         raise ValueError("require non-negative discriminant")
