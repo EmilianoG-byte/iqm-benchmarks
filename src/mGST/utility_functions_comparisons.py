@@ -389,7 +389,7 @@ def update_povm_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.nd
 
 
 def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, initial_step_size:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, which_hessian:list = None, metric:Literal["canonical", "euclidean"]="canonical")->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
-    """Perform a single optimization step on the Kraus, POVM and State operators
+    """Perform a Hessian optimization step on the Kraus, POVM and State operators
     
     Currently, it uses
     
@@ -785,18 +785,7 @@ def reshape_all_isometries_to_tensors(stiefel_isometries:tuple[jnp.ndarray], sha
         
     return new_kraus_tensor, new_povm_psd, new_state_psd
 
-def isometry_to_tensor(isometry: jnp.ndarray, tensor_shape: tuple[int]) -> jnp.ndarray:
-    """Reshape the updated isometry based on the operator type.
 
-    Args:
-        isometry (jnp.ndarray): The updated isometry tensor.
-        tensor_shape (tuple[int]): The target shape for reshaping.
-
-    Returns:
-        jnp.ndarray: The reshaped tensor.
-    """
-    reshaped_tensor = jnp.reshape(isometry, shape=tensor_shape)
-    return reshaped_tensor
 
 def cost_function_from_updated_isometries_single_step_size(step_size:float, stiefel_gradients:tuple[jnp.ndarray], stiefel_isometries:tuple[jnp.ndarray], indices_list:list[list[int]], prob_matrix:jnp.ndarray, shapes_of_tensors:tuple[tuple[int]], use_geodesic:bool=False)->float:
     """Compute objective function at position on geodesic
@@ -977,6 +966,18 @@ def tensor_to_isometry(tensor: jnp.ndarray, n:int, p:int)-> jnp.ndarray:
     """
     return jnp.reshape(tensor, shape=(n, p))
 
+def isometry_to_tensor(isometry: jnp.ndarray, tensor_shape: tuple[int]) -> jnp.ndarray:
+    """Reshape the updated isometry based on the operator type.
+
+    Args:
+        isometry (jnp.ndarray): The updated isometry tensor.
+        tensor_shape (tuple[int]): The target shape for reshaping.
+
+    Returns:
+        jnp.ndarray: The reshaped tensor.
+    """
+    reshaped_tensor = jnp.reshape(isometry, shape=tensor_shape)
+    return reshaped_tensor
 
 def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor: jnp.ndarray, operator_type:str="kraus", metric:Literal["canonical", "euclidean"] = "canonical")-> tuple[jnp.ndarray, jnp.ndarray]:
     """ Project a sequence of tensor of Euclidean gradients onto the Tangent space of the Stiefel manifold
@@ -1009,7 +1010,7 @@ def euclidean_gradients_to_stiefel(gradient_tensor: jnp.ndarray, operator_tensor
                 
         return jnp.array(gradients_stiefel), jnp.array(kraus_isometries)
     
-    elif operator_type == "state":
+    if operator_type == "state":
         dim, rank_state = operator_tensor.shape # dim, rank_state
         n = dim * rank_state
         p = 1
@@ -1052,8 +1053,6 @@ def gradient_and_operator_tensors_to_stiefel(gradient:jnp.ndarray, operator:jnp.
         gradient_stiefel = project_onto_tangent_space(x = operator_stiefel, z = gradient_np)
     elif metric == "canonical":
         gradient_stiefel = canonical_gradient(x = operator_stiefel, z = gradient_np)
-        # gradient_stiefel = project_onto_tangent_space(x = operator_stiefel, z = gradient_stiefel)
-        
     else:
         raise ValueError(f"Metric {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'")
     
@@ -1358,13 +1357,13 @@ def riemannian_gradient_fn_povm(x:jnp.ndarray, kraus_tensor:jnp.ndarray, state_p
     """
     gradient_ambient_jax = gradient_povm_mps_jit(
         kraus_tensor, x, state_psd,
-        indices_list, prob_matrix)
+        indices_list, prob_matrix) # 2df/dx
     
-    gradient_ambient = gradient_ambient_jax.conj()/2
+    gradient_ambient = gradient_ambient_jax.conj()/2 # df/dx*
     gradient_stiefel_matrix, _ = euclidean_gradients_to_stiefel(
         gradient_tensor=gradient_ambient,
         operator_tensor=x, operator_type="povm", metric=metric,
-    )
+    ) # Riemannian gradient
     return gradient_stiefel_matrix.reshape(x.shape)
 
 def vhp(function:callable, x:jnp.ndarray, z:jnp.ndarray)-> tuple[jnp.ndarray, jnp.ndarray]:
@@ -1396,7 +1395,8 @@ def riemannian_hessian_vector_povm_jax(tangent_vector:jnp.ndarray, kraus_tensor:
     n = num_povm * povm_rank
     p = dim
     riemannian_gradient_function = lambda x: riemannian_gradient_fn_povm(
-        x, kraus_tensor=kraus_tensor, state_psd=state_psd, indices_list=indices_list, prob_matrix=prob_matrix, metric=metric)
+        x, kraus_tensor=kraus_tensor, state_psd=state_psd, indices_list=indices_list, prob_matrix=prob_matrix, metric=metric) # Riemannian gradient (from df/dx*)
+    # NOTE: here, we should use df/dx* as this is the actual gradient. See Corollary 4.0.1. of An introduction to complex differentials and complex differentiability - Hunger.
     grad_at_x_tensor, Dgrad_to_z_tensor = hvp(function=riemannian_gradient_function, x=povm_psd, z=tangent_vector)
     grad_at_x_matrix = tensor_to_isometry(grad_at_x_tensor, n, p)
     Dgrad_to_z_matrix = tensor_to_isometry(Dgrad_to_z_tensor, n, p)
