@@ -6,10 +6,27 @@ import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
 from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, GRADIENT_FUNCTIONS
-from mGST.riemannian import get_isometry_dimensions_from_tensor, riemannian_connection, riemannian_metric
-from mGST.typing import Tensor, Matrix
+from mGST.riemannian import get_isometry_dimensions_from_tensor, riemannian_connection, riemannian_metric, retraction_polar_decomposition
+from mGST.typing import Tensor, Matrix, Scalar
 
 from typing import Callable
+
+
+def retraction_first_order(x:Tensor, z:Tensor, n:int, p:int)-> Tensor:
+    """First order retraction using the polar decomposition.
+    
+    Args:
+        x: Tensor representing the point on the Stiefel manifold.
+        z: Tensor representing the tangent vector at point x.
+        n: The Stiefel n dimension.
+        p: The Stiefel p dimension.
+    
+    Returns:
+        The retracted point on the Stiefel manifold.
+    """
+    x_matrix = tensor_to_isometry(x, n=n, p=p)
+    z_matrix = tensor_to_isometry(z, n=n, p=p)
+    return isometry_to_tensor(retraction_polar_decomposition(x=x_matrix, z=z_matrix, step_size=-1.0), x.shape)
 
 def riemannian_gradient_fn_povm(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, indices_list:list[list[int]], prob_matrix:Matrix, operator_type:str="povm", metric:str = "canonical", )->Tensor:
     """Calculate the riemannian gradient of the cost function wrt to the POVM tensor
@@ -128,6 +145,8 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
 
     x_matrix = tensor_to_isometry(x, n=n, p=p)
 
+    if verbose:
+        print(f"TCG started with radius: {radius} 🚀")
     for iter in range(num_iterations):
         if verbose:
             print(f"Iteration {iter + 1}/{num_iterations}", end="\n")
@@ -212,18 +231,20 @@ def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function
         approximation_value += second_order_term
     return approximation_value
 
-def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Callable, x_next:Tensor, n:int, p:int) -> float:
-    return (cost_function(x_next) - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False)
+def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Callable, x_next:Tensor, n:int, p:int) -> tuple[Scalar, Scalar]:
+    cost_fx_next = cost_function(x_next)
+    return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False), cost_fx_next
 
-def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x_init:Tensor, radius_init:float, num_iterations:int, max_radius:float, quotient_trust:float, operator_type:str,  rgradient_fn:Callable, rhessian_vector_fn:Callable, metric_cg:str, num_iterations_cg:int, verbose_cg:bool=True, verbose:bool=True)->tuple[Tensor, list[Tensor]]:
+def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x_init:Tensor, radius_init:float, num_iterations:int, max_radius:float, quotient_trust:float, operator_type:str,  rgradient_fn:Callable, rhessian_vector_fn:Callable, metric_cg:str, num_iterations_cg:int, verbose_cg:bool=True, verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
     x_k = x_init
     x_k_array = [x_k]
+    cost_fx_array = [cost_function(x_k)]
     radius_k = radius_init
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
     try:
         for idx in range(num_iterations):
             if verbose:
-                print("Iteration:", idx)
+                print("TR Iteration:", idx)
                 
             # Solve the trust region subproblem
             rgradient = rgradient_fn(x_k)
@@ -231,7 +252,7 @@ def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x
             
             # Compute the quality quotient
             x_next = retraction(x_k, update_direction)
-            quality_quotient = compute_quality_quotient(x=x_k, update_direction=update_direction, cost_function=cost_function, x_next=x_next, n=n, p=p)
+            quality_quotient, cost_fx_next = compute_quality_quotient(x=x_k, update_direction=update_direction, cost_function=cost_function, x_next=x_next, n=n, p=p)
             
             if quality_quotient < 0.25:
                 # Reduce the trust region radius
@@ -248,10 +269,13 @@ def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x
                 x_k = x_next
                 # Only store accepted points
                 x_k_array.append(x_k)
+                cost_fx_array.append(cost_fx_next)
             else:
                 # Reject the new point
+                if verbose:
+                    print("Update rejected.")
                 x_k = x_k
 
     except KeyboardInterrupt:
         print(f"Interrupted by user at iteration {idx}.")
-    return x_k, x_k_array
+    return x_k, x_k_array, cost_fx_array

@@ -15,7 +15,7 @@ from mGST.low_level_jit import (
     gradient_k_mps_jit_reg,
     gradient_state_mps_jit_reg)
 
-from mGST.riemannian import riemannian_metric
+from mGST.riemannian import riemannian_metric, update_isometry_tensors
 from mGST.typing import Tensor, Matrix, Scalar
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
@@ -1082,110 +1082,6 @@ def gradient_and_operator_tensors_to_stiefel(gradient:Tensor, operator:Tensor, n
         raise ValueError(f"Metric {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'")
     
     return gradient_stiefel, operator_stiefel
-
-def update_isometry_tensors(isometries:Sequence[Matrix] | Matrix, update_directions:Sequence[Matrix] | Matrix, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
-    """Update a tensor of isometries in the direction of the tensor of tangent vectors scaled by step size
-    
-    In order to retract back to the stiefel manifold we either follow the geodesic or use a first order retraction.
-    
-    Args:
-        isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
-        tangent_vectors: The tangent vectors at the point x on the stiefel manifold. 
-            Must have the same dimensions as isometries.
-        step_size: The step size of the update.
-        operator_type: The type of the input operator ('kraus', 'state', 'povm')
-        use_geodesic: Whether to use the geodesic to compute to the updated Kraus tensor. Defaults to True.
-    """
-    
-    if operator_type!= "kraus":
-        isometries = [isometries] # for povm and state isometries we only have one isometry
-        update_directions = [update_directions]
-        
-    new_isometries = []
-    for isometry, vector in zip(isometries, update_directions):
-        new_isometry = update_isometry_via_retraction(x=isometry, z=vector, step_size=step_size, use_geodesic=use_geodesic)
-                    
-        new_isometries.append(new_isometry)
-        
-    if operator_type != "kraus":
-        return new_isometries[0]
-    
-    # For Kraus operators
-    return jnp.array(new_isometries)
-
-def update_isometry_via_retraction(x:Matrix, z:Matrix, step_size:float = 1, use_geodesic:bool = True)->Matrix:
-    """Update a single isometry in the direction of the tangent vector scaled by step size
-    
-    Args:
-        x: The isometry to be updated. Shape: (n, p)
-        z: The tangent vector at the point x on the stiefel manifold. Shape: (n, p)
-        step_size: The step size of the update.
-        use_geodesic: Whether to use the geodesic as retraction. Defaults to True.
-            Else, uses a first order retraction based on polar decomposition.
-    Returns:
-        The updated isometry of shape (n, p)
-    """
-    if use_geodesic:
-        return retraction_geodesic(x=x, z=z, step_size=step_size)
-    return retraction_polar_decomposition(x=x, z=z, step_size=step_size)
-
-def retraction_polar_decomposition(x:Matrix, z:Matrix, step_size:float = 1)->Matrix:
-    """
-    Retraction based on canonical polar decomposition of scipy. Uses the SVD decomposition to obtain the isometry corresponding to z.
-    
-    Args:
-        x: The base point of the retraction
-        z: Tangent vector at x, corresponding to the update direction. 
-        step_size: The step size of the retraction
-    Returns:
-        The retracted matrix
-
-    References:
-        [1] https://page.math.tu-berlin.de/~mehl/papers/hmt1.pdf
-        [2] https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.polar.html
-    """
-    return jax.scipy.linalg.polar(x - step_size * z)[0]
-
-def retraction_geodesic(x: Matrix, z: Matrix, step_size: float = 1) -> Matrix:
-    """Compute a new point following the geodesic for a single isometry
-    
-    Source: Eq. 27 of https://arxiv.org/pdf/2112.05176
-
-    Args:
-        x: Current isometry of dimension (n, p)
-        z: Element of the tangent space at x corresponding to the update direction.
-            For instance, the riemannian gradient of the cost function. Dimensions are (n, p)
-        step_size: Geodesic curve parameter
-    Returns:
-        x_new: New position given by x_new = g(a) with g(a) being a geodesic with g(0) = x, [dg/dt](0) = z
-    """
-    
-    n, p = x.shape
-    dim = p
-    
-    Q, R = jnp.linalg.qr((jnp.eye(n) - x @ x.T.conj()) @ z)
-    
-    # Construct AR_mat directly using jnp.block
-    AR_mat = jnp.block([
-        [x.T.conj() @ z, -R.T.conj()],
-        [R, jnp.zeros((dim, dim), dtype=jnp.complex128)]
-    ])
-    
-    MN = eigy_expm_jax(-step_size * AR_mat) @ jnp.eye(2 * dim, dim)
-    
-    return x @ MN[:dim, :] + Q @ MN[dim:, :]
-    
-def eigy_expm_jax(A:jnp.ndarray):
-    """Custom Matrix exponential using the eigendecomposition of jax.linalg
-
-    Args:
-        A: Matrix to be exponentiated
-
-    Returns:
-        Matrix exponential of A
-    """
-    eigvals, eigvects = jnp.linalg.eig(A)
-    return jnp.einsum("...ik, ...k, ...kj -> ...ij", eigvects, jnp.exp(eigvals), jnp.linalg.inv(eigvects))
         
 def povm_from_psd(povm_psd:jnp.ndarray) -> jnp.ndarray:
     """
