@@ -605,12 +605,10 @@ def gradient_k_mps_jit_reg(kraus_tensor, povm_psd, state_psd, indices_list, prob
 
 def gradient_povm_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient with respect to the state"
-    print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=1)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=False)
 
 def gradient_povm_mps_jit(kraus, povm_psd, state_psd, indices_list, prob_matrix):
     "Calculate the Euclidean gradient with respect to the state"
-    print('Using JAX power')
     return jax.grad(fun=cost_function_jax_mps, argnums=1)(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit=True)
 
 def gradient_povm_mps_jit_reg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, target_kraus_tensor, target_povm_psd, target_state_psd, num_samples):
