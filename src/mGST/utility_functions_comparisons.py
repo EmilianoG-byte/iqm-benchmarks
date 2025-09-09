@@ -1144,7 +1144,7 @@ def retraction_polar_decomposition(x:Matrix, z:Matrix, step_size:float = 1)->Mat
         [1] https://page.math.tu-berlin.de/~mehl/papers/hmt1.pdf
         [2] https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.polar.html
     """
-    return jax.scipy.linalg.polar(x + step_size * z)[0]
+    return jax.scipy.linalg.polar(x - step_size * z)[0]
 
 def retraction_geodesic(x: Matrix, z: Matrix, step_size: float = 1) -> Matrix:
     """Compute a new point following the geodesic for a single isometry
@@ -1171,7 +1171,7 @@ def retraction_geodesic(x: Matrix, z: Matrix, step_size: float = 1) -> Matrix:
         [R, jnp.zeros((dim, dim), dtype=jnp.complex128)]
     ])
     
-    MN = eigy_expm_jax(step_size * AR_mat) @ jnp.eye(2 * dim, dim)
+    MN = eigy_expm_jax(-step_size * AR_mat) @ jnp.eye(2 * dim, dim)
     
     return x @ MN[:dim, :] + Q @ MN[dim:, :]
     
