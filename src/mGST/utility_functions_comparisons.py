@@ -18,6 +18,9 @@ from mGST.low_level_jit import (
 from mGST.riemannian import riemannian_metric, update_isometry_tensors
 from mGST.typing import Tensor, Matrix, Scalar
 
+from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess
+from mGST.additional_fns import random_gs
+
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
 
@@ -51,7 +54,6 @@ def get_mgst_parameters_from_dataset(dataset, qubit_layout, rK):
 
 
 ## Preparing an initialization (random gate set or target gate set)
-from mGST.additional_fns import random_gs
 
 def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
     d = dataset.attrs["num_gates"]
@@ -234,7 +236,7 @@ def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus
 def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
     
-    This is implementation usedin the original mGST code.
+    This is the implementation used in the original mGST code.
     
     Args:
         povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
@@ -242,7 +244,7 @@ def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, 
     Returns:
         A tuple containing the compressed representation of the POVM and State.
     """
-    num_povm, dim_sqrd =povm_mgst.shape
+    num_povm, dim_sqrd = povm_mgst.shape
     dim = int(jnp.sqrt(dim_sqrd))
     povm_psd = jnp.array([jnp.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)).T.conj() for k in range(num_povm)])
     state_mgst_offset = state_mgst + 1e-14 * jnp.eye(dim).reshape(-1)
@@ -371,8 +373,6 @@ def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.nd
     
     return kraus_i, povm_i, state_i, cost_function_history
 
-from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess
-
 def update_state_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->jnp.ndarray:
     """Update the state tensor using the saddle-free newton method.
     
@@ -493,7 +493,7 @@ def optimization_step_hessian(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
     return new_kraus_tensor, new_povm_psd, new_state_psd, optimized_step, initial_cost_value 
     
 def gradient_descent_step(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, ls_method:str="COBYLA", ls_max_iter:int=200, optimize_step:bool=True, dmrg_like:bool = False, initial_step_size:float|jnp.ndarray=1, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, float, float]:
-    """Perform a gradient descent step on the Kraus operators
+    """Perform a gradient descent step on all operators (Kraus, POVM and State)
 
     Args:
         kraus_tensor: The current Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
@@ -541,7 +541,7 @@ def _update_tensor_via_gradient(
     indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
     optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True,
     regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None,
-    metric:Literal["canonical", "euclidean"]="canonical")->tuple[jnp.ndarray, float]:
+    metric:Literal["canonical", "euclidean"]="canonical", verbose:bool=False)->tuple[jnp.ndarray, float]:
     """Update a given operator tensor (POVM, Kraus, or State) following the gradient direction.
 
     Args:
@@ -580,7 +580,9 @@ def _update_tensor_via_gradient(
     else:
         ambient_gradient = GRADIENT_FUNCTIONS[operator_type](kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix)
     
-    # NOTE: should we divide by 2 to obtain *just* df/dz* instead of 2df/dz*
+    # NOTE: Take the conjugate because jax returns 2df/dx and the gradient is 2df/dx*.
+    # NOTE: No need to divide by 2. This is just for agreement with mGST. 
+    # Correct one has factor of 2x.
     stiefel_gradient_matrix, isometry = euclidean_gradients_to_stiefel(
         gradient_tensor=ambient_gradient.conj()/2, operator_tensor=operator_tensors[operator_type], operator_type=operator_type, # (..., n, p)
         metric=metric
@@ -596,7 +598,8 @@ def _update_tensor_via_gradient(
             method=ls_method, options={"maxiter": ls_max_iter}
         )
         optimized_step = optimization_result.x
-        print(f"Optimized step size for {operator_type.capitalize()}: {optimized_step}")
+        if verbose:
+            print(f"Optimized step size for {operator_type.capitalize()}: {optimized_step}")
     else:
         optimized_step = initial_step
     
