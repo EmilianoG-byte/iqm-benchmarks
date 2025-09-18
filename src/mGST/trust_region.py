@@ -133,7 +133,7 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
     x2 = q / x1
     return tuple(sorted((x1, x2)))
 
-def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable, verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
+def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
     """ This function returns the direction to update x"""
     solution_tensor = jnp.zeros_like(x) # η 
     r_tensor = rgradient # r
@@ -151,7 +151,7 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
     for iter in range(num_iterations):
         solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p)
         # Compute rHessian-tangent-vector product
-        rhessian_delta_tensor = rhessian_vector_fn(x=x, tangent_vector=delta_tensor)
+        rhessian_delta_tensor = rhessian_vector_fn(x=x, z=delta_tensor)
         rhessian_delta_matrix = tensor_to_isometry(rhessian_delta_tensor, n=n, p=p)
         delta_matrix = tensor_to_isometry(delta_tensor, n=n, p=p)
         # Compute curvature
@@ -186,7 +186,7 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         if check_stopping_criteria:
             norm_rk = jnp.sqrt(norm_sqrd_r_next)
             if determine_cg_stopping_criteria(norm_r0, norm_rk, theta=theta, kappa=kappa):
-                reason = "Stopping criteria met 🛑."
+                reason = f"Stopping criteria met 🛑. |r_k| = {norm_rk:.2e}"
                 on_boundary = False
                 break
 
@@ -260,7 +260,7 @@ def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Ca
     return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False), cost_fx_next
 
 def run_trust_region_optimization(
-    cost_function:Callable[[Tensor], Scalar], retraction:Callable[[Tensor, Tensor], Tensor], x_init:Tensor, rgradient_fn:Callable[[Tensor], Tensor], rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor],
+    x_init:Tensor, cost_function:Callable[[Tensor], Scalar], 
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, operator_type:str = "povm",
     metric_cg:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
@@ -269,17 +269,17 @@ def run_trust_region_optimization(
 
     Args:
         cost_function: The cost function to minimize. Should take a tensor as input and return a scalar.
-        retraction: Function computing the next iteration point in the manifold as x_next = R_x(z), where x is the current point and z the update direction.
         x_init: The initial point on the manifold.
         radius_init: The initial trust region radius.
         num_iterations: The maximum number of trust region iterations to perform.
         max_radius: The maximum trust region radius to allow.
         quotient_trust: The lower threshold for accepting a step based on the quality quotient.
         operator_type: The type of the input operator ('kraus', 'state', 'povm')
-        rgradient_fn: Function to compute the Riemannian gradient at a point x as rgrad = rgradient_fn(x).
-        rhessian_vector_fn: Function to compute the Riemannian Hessian-vector product at a point x in the direction z as rhess_vec = rhessian_vector_fn(x, z).
         metric_cg: The metric to use to calculate inner products in the truncated conjugate gradient algorithm. Can be "canonical" or "euclidean".
         num_iterations_cg: The maximum number of iterations to perform in the truncated conjugate gradient algorithm.
+        theta_cg: The theta parameter for the stopping criteria of the truncated conjugate gradient algorithm.
+        kappa_cg: The kappa parameter for the stopping criteria of the truncated conjugate gradient algorithm.
+        tol_grad: The tolerance for the norm of the Riemannian gradient to determine convergence.
         verbose_cg: Whether to print information during the truncated conjugate gradient algorithm.
         verbose: Whether to print information during the trust region outer loop optimization.
         
@@ -295,13 +295,18 @@ def run_trust_region_optimization(
     radius_k = radius_init
     num_rejections = 0
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
-    
-    rgradient = rgradient_fn(x_k)
-    
+
+    # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
+    rgradient_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg)
+    rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg, return_tensor=True)
+    retraction = lambda x, z: retraction_first_order(x, z, n=n, p=p)
+
+    # Compute the initial Riemannian gradient and its norm
+    rgradient = rgradient_fn(x_k)    
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric_cg))
     norm_grad = norm_grad_init
-        
-    print(f"TR started 🚀.")
+
+    print(f"TR started for operator: {operator_type} 🚀.")
     print("=======================================")
     try:
         for idx in range(num_iterations):
