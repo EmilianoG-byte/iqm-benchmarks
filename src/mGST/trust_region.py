@@ -136,7 +136,7 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
     x2 = q / x1
     return tuple(sorted((x1, x2)))
 
-def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable, verbose:bool=True) -> tuple[Tensor, bool]:
+def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable, verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
     """ This function returns the direction to update x"""
     solution_tensor = jnp.zeros_like(x) # η 
     r_tensor = rgradient # r
@@ -144,40 +144,38 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
     on_boundary = False
 
     x_matrix = tensor_to_isometry(x, n=n, p=p)
-
-    if verbose:
-        print(f"TCG started with radius: {radius} 🚀")
+    r_matrix = tensor_to_isometry(r_tensor, n=n, p=p)
+    # Save one computation of the norm of r per iteration by initializing like this
+    norm_sqrd_r = riemannian_metric(r_matrix, r_matrix, x=x_matrix, metric=metric)
+    norm_r0 = jnp.sqrt(norm_sqrd_r)
+    check_stopping_criteria = theta is not None and kappa is not None
+    reason = "Max iterations reached ⏳."
+    
     for iter in range(num_iterations):
-        if verbose:
-            print(f"Iteration {iter + 1}/{num_iterations}", end="\n")
+        solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p)
+        # Compute rHessian-tangent-vector product
         rhessian_delta_tensor = rhessian_vector_fn(x=x, tangent_vector=delta_tensor)
         rhessian_delta_matrix = tensor_to_isometry(rhessian_delta_tensor, n=n, p=p)
         delta_matrix = tensor_to_isometry(delta_tensor, n=n, p=p)
         # Compute curvature
-        curvature = riemannian_metric(delta_matrix, rhessian_delta_matrix, x=x_matrix, metric=metric)
+        curvature = riemannian_metric(delta_matrix, rhessian_delta_matrix, x=x_matrix, metric=metric)        
         # Negative curvature
-        delta_matrix = tensor_to_isometry(delta_tensor, n=n, p=p)
-        solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p) 
-
         if curvature < 0:
-            if verbose:
-                print("Negative curvature encountered.")
+            reason = "Negative curvature encountered 📉."
             step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
             solution_tensor += step * delta_tensor
             on_boundary = True
             break
-        r_matrix = tensor_to_isometry(r_tensor, n=n, p=p)
-        norm_sqrd_r = riemannian_metric(r_matrix, r_matrix, x=x_matrix, metric=metric)
+        
         alpha = norm_sqrd_r / curvature
         solution_tensor += alpha * delta_tensor
         
         solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p) 
         norm_solution = jnp.sqrt(riemannian_metric(solution_matrix, solution_matrix, x_matrix, metric=metric))
         
-        # Exceeds trust region boundary
+        # Check if the solution exceeds the trust region boundary
         if norm_solution >= radius:
-            if verbose:
-                print("Exceeded trust region boundary.")
+            reason = "Exceeded trust region boundary 📈."
             step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
             solution_tensor += step * delta_tensor
             on_boundary = True
@@ -186,10 +184,39 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         r_tensor += alpha * rhessian_delta_tensor
         r_matrix = tensor_to_isometry(r_tensor, n=n, p=p)
         norm_sqrd_r_next = riemannian_metric(r_matrix, r_matrix, x=x_matrix, metric=metric)
+        
+        # Check stopping criteria
+        if check_stopping_criteria:
+            norm_rk = jnp.sqrt(norm_sqrd_r_next)
+            if determine_cg_stopping_criteria(norm_r0, norm_rk, theta=theta, kappa=kappa):
+                reason = "Stopping criteria met 🛑."
+                on_boundary = False
+                break
+
         beta = norm_sqrd_r_next / norm_sqrd_r
         delta_tensor = -r_tensor + beta * delta_tensor
+        norm_sqrd_r = norm_sqrd_r_next
 
+    if verbose:
+            print(f"TCG finished after: {iter + 1}/{num_iterations} iters. \n Reason: {reason}")
+            print("---------------------------------------")
     return solution_tensor, on_boundary
+
+def determine_cg_stopping_criteria(norm_r0:Tensor, norm_rk:Tensor, theta:float = 1, kappa:float = 0.1)->bool:
+    """Determine whether to stop the conjugate gradient inner iteration based on the stopping criteria.
+    
+    References:
+    [1] Absil, P.-A., Mahony, R., & Sepulchre, R. (2004). Optimization Algorithms on Matrix Manifolds. Princeton University Press.
+
+    Stopping criteria from Eq. (7.10) in [1]: |r_{k}| < |r0| min(|r0|**theta, kappa)
+    
+    Args:
+        r0: The initial Riemannian gradient at the start of the trust region iteration.
+        r_k: The current Riemannian r vector at iteration k. 
+        theta: Exponent for the stopping criteria. Typically in (0, 1). Localte rate is min(theta + 1, 2).
+        kappa: Threshold for the stopping criteria. Typically a small positive value.
+    """
+    return norm_rk <= norm_r0 * min(norm_r0**theta, kappa)
 
 def compute_euclidean_inner_product_tensors(tensor_1, tensor_2, adjoint:bool=False)->float:
     if adjoint:
@@ -235,20 +262,57 @@ def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Ca
     cost_fx_next = cost_function(x_next)
     return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False), cost_fx_next
 
-def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x_init:Tensor, radius_init:float, num_iterations:int, max_radius:float, quotient_trust:float, operator_type:str,  rgradient_fn:Callable, rhessian_vector_fn:Callable, metric_cg:str, num_iterations_cg:int, verbose_cg:bool=True, verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
+def run_trust_region_optimization(
+    cost_function:Callable[[Tensor], Scalar], retraction:Callable[[Tensor, Tensor], Tensor], x_init:Tensor, rgradient_fn:Callable[[Tensor], Tensor], rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor],
+    radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, operator_type:str = "povm",
+    metric_cg:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
+    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
+    """
+    Run the trust region optimization algorithm.
+
+    Args:
+        cost_function: The cost function to minimize. Should take a tensor as input and return a scalar.
+        retraction: Function computing the next iteration point in the manifold as x_next = R_x(z), where x is the current point and z the update direction.
+        x_init: The initial point on the manifold.
+        radius_init: The initial trust region radius.
+        num_iterations: The maximum number of trust region iterations to perform.
+        max_radius: The maximum trust region radius to allow.
+        quotient_trust: The lower threshold for accepting a step based on the quality quotient.
+        operator_type: The type of the input operator ('kraus', 'state', 'povm')
+        rgradient_fn: Function to compute the Riemannian gradient at a point x as rgrad = rgradient_fn(x).
+        rhessian_vector_fn: Function to compute the Riemannian Hessian-vector product at a point x in the direction z as rhess_vec = rhessian_vector_fn(x, z).
+        metric_cg: The metric to use to calculate inner products in the truncated conjugate gradient algorithm. Can be "canonical" or "euclidean".
+        num_iterations_cg: The maximum number of iterations to perform in the truncated conjugate gradient algorithm.
+        verbose_cg: Whether to print information during the truncated conjugate gradient algorithm.
+        verbose: Whether to print information during the trust region outer loop optimization.
+        
+    Returns:
+        A tuple containing:
+        - The optimized point on the manifold.
+        - A list of all accepted points during the optimization.
+        - A list of the cost function values at each accepted point.
+    """
     x_k = x_init
     x_k_array = [x_k]
     cost_fx_array = [cost_function(x_k)]
     radius_k = radius_init
+    num_rejections = 0
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
+    
+    rgradient = rgradient_fn(x_k)
+    
+    norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric_cg))
+    norm_grad = norm_grad_init
+        
+    print(f"TR started 🚀.")
+    print("=======================================")
     try:
         for idx in range(num_iterations):
             if verbose:
-                print("TR Iteration:", idx)
-                
+                print(f"TR Iteration: {idx}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}")
+
             # Solve the trust region subproblem
-            rgradient = rgradient_fn(x_k)
-            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k, num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric_cg, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg)
+            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k, num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric_cg, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
             
             # Compute the quality quotient
             x_next = retraction(x_k, update_direction)
@@ -272,10 +336,52 @@ def run_trust_region_optimization(cost_function:Callable, retraction:Callable, x
                 cost_fx_array.append(cost_fx_next)
             else:
                 # Reject the new point
+                num_rejections += 1
                 if verbose:
-                    print("Update rejected.")
+                    print("Update rejected ❌.")
                 x_k = x_k
-
+            # Compute the Riemannian gradient at the new point
+            rgradient = rgradient_fn(x_k)
+            
+            # Determine stopping criteria based on gradient norm
+            norm_grad = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_k, metric=metric_cg))
+            if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
+                if verbose:
+                    print(f"Stopping criteria met. 🛑")
+                break
+                
     except KeyboardInterrupt:
-        print(f"Interrupted by user at iteration {idx}.")
+        print(f"Optimized interrupted by user {idx}.")
+    print("=======================================")
+    print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
     return x_k, x_k_array, cost_fx_array
+
+def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor = None, metric:str = "euclidean")-> float:
+    """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
+
+    Args:
+        z1: The first tensor.
+        z2: The second tensor.
+        x: The point at which to evaluate the metric (optional).
+        metric: The type of metric to use (default is "euclidean").
+
+    Returns:
+        The value of the Riemannian metric.
+    """
+    z1_matrix = tensor_to_isometry(z1, n=n, p=p)
+    z2_matrix = tensor_to_isometry(z2, n=n, p=p)
+    if x is not None:
+        x_matrix = tensor_to_isometry(x, n=n, p=p)
+    return riemannian_metric(z1_matrix, z2_matrix, x=x_matrix, metric=metric)
+
+def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_grad:float = 1e-8)->bool:
+    """Determine whether to stop the trust region optimization based on the gradient norm.
+    
+    References:
+        - ChatGPT
+    
+    Args:
+        norm_grad: The norm of the Riemannian gradient at the current point.
+        tol_grad: The tolerance for the gradient norm. If None, no stopping criteria is applied.
+    """
+    return norm_grad <= tol_grad * max(1.0, norm_grad_init)
