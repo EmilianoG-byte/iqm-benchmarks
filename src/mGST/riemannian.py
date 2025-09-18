@@ -43,7 +43,7 @@ def get_isometry_dimensions_from_tensor(tensor:Tensor, tensor_type:str)->tuple[i
         raise ValueError(f"Tensor name '{tensor_type}' is not recognized. Please use one of the following: 'state', 'povm' or 'kraus'.")
     return n, p
 
-def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_in_z_at_x:Matrix, metric:str = "euclidean", alphas:tuple|None = None)-> Matrix:
+def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_x_to_z:Matrix, metric:str = "euclidean", alphas:tuple|None = None)-> Matrix:
     """
     Riemannian connection ∇w(x)[z] parametrized for different metrics on the stiefel manifold. 
 
@@ -53,7 +53,7 @@ def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_in_z_at_x:Matrix, m
         x: Base point isometry of the tangent space
         w_x: Riemannian vector field evaluated at x.
         z: Riemannian tangent vector equivalent to the "direction" of the derivative
-        Dw_in_z_at_x: Euclidean directional derivative of the vector field w in the direction of z evaluated at x
+        Dw_x_to_z: Euclidean directional derivative of the vector field w in the direction of z evaluated at x
         metric: The type of the Riemannian metric to use ('euclidean' or 'canonical'). Defaults to 'euclidean'.
         alphas: Optional tuple of alpha0 and alpha1 parameters to define a custom metric. If provided, overrides the metric parameter.
     Returns:
@@ -70,7 +70,7 @@ def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_in_z_at_x:Matrix, m
         alpha0, alpha1 = alphas
     
     In = jnp.eye(x.shape[0])
-    return Dw_in_z_at_x + 0.5 * x @ (z.conj().T @ w_x + w_x.conj().T @ z) + ((alpha0-alpha1)/alpha0)*(In - x @ x.conj().T) @ (z @ w_x.conj().T + w_x @ z.conj().T) @ x
+    return Dw_x_to_z + 0.5 * x @ (z.conj().T @ w_x + w_x.conj().T @ z) + ((alpha0-alpha1)/alpha0)*(In - x @ x.conj().T) @ (z @ w_x.conj().T + w_x @ z.conj().T) @ x
 
 def riemannian_metric(z1:Matrix, z2:Matrix, x:Matrix = None, metric:str = "euclidean")-> Scalar:
     """

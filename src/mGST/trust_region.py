@@ -28,65 +28,62 @@ def retraction_first_order(x:Tensor, z:Tensor, n:int, p:int)-> Tensor:
     z_matrix = tensor_to_isometry(z, n=n, p=p)
     return isometry_to_tensor(retraction_polar_decomposition(x=x_matrix, z=z_matrix, step_size=-1.0), x.shape)
 
-def riemannian_gradient_fn_povm(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, indices_list:list[list[int]], prob_matrix:Matrix, operator_type:str="povm", metric:str = "canonical", )->Tensor:
-    """Calculate the riemannian gradient of the cost function wrt to the POVM tensor
-    
-    Args:
-        x: The POVM tensor to calculate the gradient at.
-        metric: The metric to use for the gradient calculation. Can be "canonical" or "euclidean".
-    Returns:
-        The riemannian gradient (tensor) of the cost function wrt to the POVM tensor.
-    """
-    
-    operator_tensors = {
-        "povm": povm_psd,
-        "kraus": kraus_tensor,
-        "state": state_psd
-    }
-    
-    if operator_type != "povm":
-        raise NotImplementedError("Only POVM operators are tested for now.")
+def riemannian_gradient_fn(x:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type: str, metric: str) -> Tensor:
+    """Compute the Riemannian gradient of a cost function at a point x using automatic differentiation.
 
-    gradient_euclidean_jax = GRADIENT_FUNCTIONS[operator_type](
-        kraus_tensor, povm_psd, state_psd,
-        indices_list, prob_matrix) # 2df/dx
-    
+    Args:
+        x: The point at which to evaluate the gradient.
+        cost_fn: The cost function to differentiate.
+
+    Returns:
+        The Riemannian gradient of the cost function at x.
+    """
+    # Compute the Euclidean gradient
+    gradient_euclidean_jax = automatic_gradient(cost_fn)(x) # 2df/dx
+
+    # Take the adjoint due to JAX convention
     gradient_euclidean = gradient_euclidean_jax.conj() # 2df/dx*
-    operator_tensor = operator_tensors[operator_type]
+    # Riemannian gradient based on metric
     gradient_stiefel_matrix, _ = euclidean_gradients_to_stiefel(
         gradient_tensor=gradient_euclidean,
-        operator_tensor=operator_tensor, operator_type=operator_type, metric=metric,
-    ) # Riemannian gradient
-    return isometry_to_tensor(gradient_stiefel_matrix, operator_tensor.shape)
+        operator_tensor=x, operator_type=operator_type, metric=metric,
+    )
+    return isometry_to_tensor(gradient_stiefel_matrix, x.shape)
 
-def riemannian_hessian_vector_povm_jax(tangent_vector:Tensor, kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, indices_list:list[list[int]], prob_matrix:Matrix, metric:str="canonical", return_tensor:bool=True)-> Tensor|Matrix:
-    """Compute the Riemannian Hessian-vector product for the POVM tensor using JAX.
+def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type:str, metric:str="canonical", return_tensor:bool=True)-> Tensor|Matrix:
+    """Compute the Riemannian Hessian-vector product at a point x in the Stiefel manifold using automatic differentiation.
     
     NOTE: For the calculation of the Riemannian Hessian-vector product, we should use df/dx*
-    as the euclidean derivative as this is the actual gradient. 
+    as the euclidean derivative because this is the actual gradient. 
     See:
     - Corollary 4.0.1. of An introduction to complex differentials and complex differentiability - Hunger.
         
     Args:
-        povm_psd: POVM square-root-factor of shape (num_povm, povm_rank, dim).
-        tangent_vector: Tangent vector determining direction of covariant derivative of shape (num_povm, povm_rank, dim).
-        metric: The metric to use for the Hessian-vector product. Can be "canonical" or "euclidean".
+        x: The point on the Stiefel manifold where the Hessian is evaluated.
+        tangent_vector: The tangent vector to multiply the Hessian with. Should be of the same shape as x.
+        cost_fn: The cost function to calculate the Hessian of.
+        operator_type: The type of operator that x corresponds to ('povm', 'kraus', 'state').
+        metric: The metric to use for the Hessian calculation. Can be "canonical" or "euclidean".
+        return_tensor: Whether to return the result as a tensor (True) or as a matrix (False).
+        
+    Returns:
+        The Riemannian Hessian-vector product, either as a tensor or matrix depending on return_tensor.
     """
-    riemannian_gradient_function = lambda x: riemannian_gradient_fn_povm(
-        kraus_tensor=kraus_tensor, povm_psd=x, state_psd=state_psd, indices_list=indices_list, prob_matrix=prob_matrix, operator_type="povm",metric=metric) # Riemannian gradient (from df/dx*)
+    rgrad_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_fn, operator_type=operator_type, metric=metric) # Riemannian gradient (from df/dx*)
 
-    rgrad_at_x_tensor, Drgrad_to_z_tensor = hvp(function=riemannian_gradient_function, x=povm_psd, z=tangent_vector)
+    rgrad_x_tensor, Drgrad_x_to_z_tensor = hvp(function=rgrad_fn, x=x, z=tangent_vector)
 
-    n, p = get_isometry_dimensions_from_tensor(povm_psd, tensor_type="povm")
-    rgrad_at_x_matrix = tensor_to_isometry(rgrad_at_x_tensor, n, p)
-    Drgrad_to_z_matrix = tensor_to_isometry(Drgrad_to_z_tensor, n, p)
-    povm_psd_matrix = tensor_to_isometry(povm_psd, n, p)
+    n, p = get_isometry_dimensions_from_tensor(x, tensor_type=operator_type)
+    
+    rgrad_x_matrix = tensor_to_isometry(rgrad_x_tensor, n, p)
+    Drgrad_to_z_matrix = tensor_to_isometry(Drgrad_x_to_z_tensor, n, p)
+    x_matrix = tensor_to_isometry(x, n, p)
     tangent_vector_matrix = tensor_to_isometry(tangent_vector, n, p)
     
-    rhessian_vector_product_matrix = riemannian_connection(x = povm_psd_matrix, w_x=rgrad_at_x_matrix, z=tangent_vector_matrix, Dw_in_z_at_x=Drgrad_to_z_matrix, metric=metric)
+    rhessian_vector_product_matrix = riemannian_connection(x=x_matrix, w_x=rgrad_x_matrix, z=tangent_vector_matrix, Dw_x_to_z=Drgrad_to_z_matrix, metric=metric)
     
     if return_tensor:
-        return isometry_to_tensor(rhessian_vector_product_matrix, povm_psd.shape)
+        return isometry_to_tensor(rhessian_vector_product_matrix, x.shape)
     return rhessian_vector_product_matrix
 
 
