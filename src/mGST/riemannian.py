@@ -91,11 +91,13 @@ def riemannian_metric(z1:Matrix, z2:Matrix, x:Matrix = None, metric:str = "eucli
     # Take the trace of the last two dimensions and sum over batch dimensions
     return jnp.einsum("...ii->", transpose(z1.conj()) @ gamma @ z2).real
 
-def update_isometry_tensors(isometries:Sequence[Matrix] | Matrix, update_directions:Sequence[Matrix] | Matrix, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
+def update_isometry_tensors(isometries:Sequence[Matrix] | Matrix, update_directions:Sequence[Matrix] | Matrix, step_size:float, operator_type:str, use_geodesic:bool =  True) ->  jnp.ndarray:
     """Update a tensor of isometries in the direction of the tensor of tangent vectors scaled by step size
     
     In order to retract back to the stiefel manifold we either follow the geodesic or use a first order retraction.
-    
+
+    Handles batch dimension explicitly for kraus operators.
+
     Args:
         isometries: The isometries to be updated. Dimensions are (n, p) or (num_gates, n, p) for kraus operators
         tangent_vectors: The tangent vectors at the point x on the stiefel manifold. 

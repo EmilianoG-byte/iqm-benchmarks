@@ -51,6 +51,9 @@ def plot_cost_function(
     if not isinstance(cost_array[0], list):
         labels = [labels] if labels else ["Cost"]
         cost_array = [cost_array]
+        
+    if not len(labels) == len(cost_array):
+        raise ValueError("Length of labels must match number of cost arrays.")
 
     for i, cost in enumerate(cost_array):
         marker = MARKERS[

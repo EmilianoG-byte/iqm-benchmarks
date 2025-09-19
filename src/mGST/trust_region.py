@@ -136,7 +136,25 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
     return tuple(sorted((x1, x2)))
 
 def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
-    """ This function returns the direction to update x"""
+    """ Truncated Conjugate Gradient (TCG) method to approximately solve the trust region subproblem on the Stiefel manifold.
+    
+    Args:
+        x: Current point on the manifold.
+        radius: Trust region radius.
+        num_iterations: Maximum number of iterations to perform.
+        rgradient: Riemannian gradient at point x.
+        metric: The metric to use to calculate inner products in the tangent space. Can be "canonical" or "euclidean".
+        n, p: Dimensions of the Stiefel manifold.
+        rhessian_vector_fn: Function to compute the Riemannian Hessian-vector product.
+        verbose: Whether to print information during the TCG algorithm.
+        theta: The theta parameter for the stopping criteria. If None, stopping criteria is not used.
+        kappa: The kappa parameter for the stopping criteria. If None, stopping criteria is not used.
+    
+    Returns:
+        A tuple containing:
+        - The approximate solution to the trust region subproblem (tangent vector), i.e. the proposed direction to update x.
+        - A boolean indicating whether the solution lies on the boundary of the trust region.
+    """
     solution_tensor = jnp.zeros_like(x) # η 
     r_tensor = rgradient # r
     delta_tensor = -r_tensor # δ
@@ -218,6 +236,17 @@ def determine_cg_stopping_criteria(norm_r0:Tensor, norm_rk:Tensor, theta:float =
     return norm_rk <= norm_r0 * min(norm_r0**theta, kappa)
 
 def compute_euclidean_inner_product_tensors(tensor_1, tensor_2, adjoint:bool=False)->float:
+    """Compute the Euclidean inner product between two tensors.
+    
+    By default this computes the inner product: <tensor_1, tensor_2> = Re(Tr(tensor_1^T tensor_2)) (without adjoint)
+    
+    Handles batch dimensions as all dimensions are summed over.
+    
+    Args:
+        tensor_1: First tensor.
+        tensor_2: Second tensor.
+        adjoint: Whether to take the adjoint of the first tensor before computing the inner product. Defaults to False.
+    """
     if adjoint:
         tensor_1 = tensor_1.conj()
     return jnp.einsum("...,...->", tensor_1, tensor_2).real
@@ -226,7 +255,9 @@ def _compute_first_order_term(z:Tensor, gradient_conjugated:Tensor)->float:
     return compute_euclidean_inner_product_tensors(z, gradient_conjugated, adjoint=False)
 
 def _compute_second_order_term(x:Tensor, z:Tensor, gradient_conjugated:Tensor, hessian_z:Tensor, n:int, p:int)->float:
-    """Compute the second-order term approximation term for the local cost function in the tangent space
+    """Compute the second-order term approximation term for the local cost function in the tangent spac
+
+    Handles batch dimensions since all dimensions are summed over using `compute_euclidean_inner_product_tensors`.
 
     Args:
         x: Current point on the manifold.
@@ -245,6 +276,17 @@ def _compute_second_order_term(x:Tensor, z:Tensor, gradient_conjugated:Tensor, h
     return 0.5 * (compute_euclidean_inner_product_tensors(z, hessian_z - extra_factor_tensor, adjoint=False))
      
 def compute_approx_terms_from_tensors(x:Tensor, z:Tensor, n:int, p:int, cost_function:Callable)->tuple[float, float]:
+    """Helper function to compute the first and second order terms of the model approximation for the local cost function in the tangent space.
+    
+    Handles batch dimensions.
+    
+    Args:
+        x: Current point on the manifold.
+        z: Update direction (tangent vector).
+        n: Dimension of the Stiefel manifold.
+        p: Dimension of the Stiefel manifold.
+        cost_function: The cost function to approximate.
+    """
     # TODO: use grad_and_value to evaluate the cost function when computing the gradient at hvp.
     gradient_function = automatic_gradient(cost_function)
     gradient_conjugated, hessian_z = hvp(function=gradient_function, x=x, z=z) # 2df/dx, 2(Hxx dx + Hx*x dx*)
@@ -253,6 +295,28 @@ def compute_approx_terms_from_tensors(x:Tensor, z:Tensor, n:int, p:int, cost_fun
     return first_order_term, second_order_term
 
 def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function:Callable, n:int, p:int, order:int=2, include_zero:bool=True)->float:
+    """Compute the model approximation up to second order of the local cost function in the tangent space.
+    
+    The implementation here is inspired by the metric-free second-order approximation described in Eq. (31 - 33) of [1]
+    
+    References:
+    [1] Optimization algorithms exploiting unitary constraints, Manton, 2002.
+    
+    Args:
+        x: Current point on the manifold.
+        update_direction: Proposed update direction (tangent vector).
+        cost_function: The cost function to approximate.
+        n: Dimension of the Stiefel manifold.
+        p: Dimension of the Stiefel manifold.
+        order: Order of the approximation (1 or 2).
+        include_zero: Whether to include the cost function value at x in the approximation (zeroth order).
+        
+    Returns:
+        The model approximation value up to the specified order.
+        
+    Raises:
+        ValueError: If the specified order is not 1 or 2.
+    """
     if order not in [1, 2]:
         raise ValueError("Invalid order value. Supported orders are 1 and 2.")
 
@@ -270,12 +334,29 @@ def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function
     return approximation_value
 
 def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Callable, x_next:Tensor, n:int, p:int) -> tuple[Scalar, Scalar]:
+    """
+    Compute the quality quotient for a proposed update direction in the trust region method.
+    
+    Handles batch dimensions.
+    
+    Args:
+        x: Current point on the manifold.
+        update_direction: Proposed update direction (tangent vector).
+        cost_function: The cost function to approximate.
+        x_next: The proposed next point on the manifold after applying the update direction using the retraction.
+        n,p : Dimensions of the Stiefel manifold.
+        
+    Returns:
+        A tuple containing:
+        - The quality quotient (Scalar).
+        - The cost function value at the proposed next point (Scalar).
+    """
     cost_fx_next = cost_function(x_next)
     return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False), cost_fx_next
 
 def run_trust_region_optimization(
-    x_init:Tensor, cost_function:Callable[[Tensor], Scalar], 
-    radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, operator_type:str = "povm",
+    x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
+    radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric_cg:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
     """
