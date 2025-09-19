@@ -383,6 +383,15 @@ def run_trust_region_optimization(
         - The optimized point on the manifold.
         - A list of all accepted points during the optimization.
         - A list of the cost function values at each accepted point.
+
+    See references for details on the choice of the parameters such as the trust region radius [5], tolerances [1, 2, 4], kappa and theta [1, 2, 3].
+
+    References:
+        * [1] https://chatgpt.com/share/68cd51cc-73b8-8009-be12-a7ae8624c73e
+        * [2] https://pymanopt.org/docs/stable/_modules/pymanopt/optimizers/trust_regions.* html#TrustRegions
+        * [3] Absil, P.-A., Mahony, R., & Sepulchre, R. (2004). Optimization Algorithms on Matrix Manifolds. Princeton University Press.
+        * [4] https://github.com/pymanopt/pymanopt/blob/a1f52e74092535cd416ba3ec68252eb74ed53178/src/pymanopt/optimizers/optimizer.py#L45
+        * [5] https://github.com/qc-tum/rqcopt/blob/master/rqcopt/trust_region.py
     """
     x_k = x_init
     x_k_array = [x_k]
