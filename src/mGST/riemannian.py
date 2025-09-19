@@ -7,57 +7,27 @@ import jax
 from typing import Sequence
 
 from mGST.typing import Tensor, Matrix, Scalar
-
-def get_isometry_dimensions_from_tensor(tensor:Tensor, tensor_type:str)->tuple[int, int]:
-    """
-    Get the Stiefel dimensions n and p from the given tensor.
-    
-    Args:
-        tensor: The tensor from where dimensions will be inferred.
-        tensor_type: The type of the tensor. Can be one of the following: 'state', 'povm', 'kraus'.
-            Shape according to the type should be:
-            * POVM: (num_povm, povm_rank, dim)
-            * State: (dim, rank_state)
-            * (single) Kraus: (kraus_rank, dim, dim)
-    Returns:
-        n: The Stiefel n dimension
-        p: The Stiefel p dimension
-        
-    Raises:
-        ValueError: If the tensor_type is not recognized.
-    """
-    if tensor_type == "state":
-        dim, rank_state = tensor.shape # dim, rank_state
-        n = dim * rank_state
-        p = 1
-
-    elif tensor_type == "povm":
-        num_povm, rank_povm, dim = tensor.shape # num_povm, rank_povm, dim
-        n = num_povm * rank_povm
-        p = dim
-    elif tensor_type == "kraus":
-        rank_kraus, dim, _ = tensor.shape # kraus_rank, dim_out, dim_in
-        n = rank_kraus * dim
-        p = dim
-    else:
-        raise ValueError(f"Tensor name '{tensor_type}' is not recognized. Please use one of the following: 'state', 'povm' or 'kraus'.")
-    return n, p
+from mGST.utility_functions_comparisons import transpose
 
 def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_x_to_z:Matrix, metric:str = "euclidean", alphas:tuple|None = None)-> Matrix:
     """
-    Riemannian connection ∇w(x)[z] parametrized for different metrics on the stiefel manifold. 
+    Riemannian connection ∇w(x)[z] parametrized for different metrics on the stiefel manifold.
+    
+    Handles batch dimensions.
 
     From equation 5.4 of https://arxiv.org/abs/2009.10159
     
     Args:
-        x: Base point isometry of the tangent space
-        w_x: Riemannian vector field evaluated at x.
-        z: Riemannian tangent vector equivalent to the "direction" of the derivative
-        Dw_x_to_z: Euclidean directional derivative of the vector field w in the direction of z evaluated at x
+        x: Base point isometry of the tangent space. Shape (..., n, p)
+        w_x: Riemannian vector field evaluated at x. Shape (..., n, p)
+        z: Riemannian tangent vector equivalent to the "direction" of the derivative. Shape (..., n, p)
+        Dw_x_to_z: Euclidean directional derivative of the vector field w in the direction of z evaluated at x. Shape (..., n, p)
         metric: The type of the Riemannian metric to use ('euclidean' or 'canonical'). Defaults to 'euclidean'.
         alphas: Optional tuple of alpha0 and alpha1 parameters to define a custom metric. If provided, overrides the metric parameter.
     Returns:
-        The riemannian connection of the vector field w_x in the direction of z at x.
+        The riemannian connection of the vector field w_x in the direction of z at x. The last two dimensions are (n, p)
+    Raises:
+        ValueError: If the metric is not recognized.
     """
     if metric == "euclidean":
         alpha0, alpha1 = 1, 1
@@ -69,13 +39,35 @@ def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_x_to_z:Matrix, metr
     if alphas is not None:
         alpha0, alpha1 = alphas
     
-    In = jnp.eye(x.shape[0])
-    return Dw_x_to_z + 0.5 * x @ (z.conj().T @ w_x + w_x.conj().T @ z) + ((alpha0-alpha1)/alpha0)*(In - x @ x.conj().T) @ (z @ w_x.conj().T + w_x @ z.conj().T) @ x
+    # Identity with batch broadcast
+    *batch_shape, n, p = x.shape
+    In = jnp.eye(n, dtype=x.dtype)
+    In = jnp.broadcast_to(In, tuple(batch_shape) + (n, n))
+
+    # NOTE @ already handles batched matrix multiplication.
+    # --- term1: 0.5 * x @ (zᴴ w_x + w_xᴴ z)
+    term1 = 0.5 * x @ (transpose(z.conj()) @ w_x + transpose(w_x.conj()) @ z)
+
+    # --- term2: (In - x xᴴ)(z w_xᴴ + w_x zᴴ)x
+    proj = In - x @ transpose(x.conj())
+    middle = z @ transpose(w_x.conj()) + w_x @ transpose(z.conj())
+    term2 = proj @ middle @ x
+
+    return Dw_x_to_z + term1 + ((alpha0 - alpha1) / alpha0) * term2
 
 def riemannian_metric(z1:Matrix, z2:Matrix, x:Matrix = None, metric:str = "euclidean")-> Scalar:
     """
     Compute the riemannian metric on the stiefel manifold at the point x for two tangent vectors z1 and z2.
     
+    Handles batch dimensions. To compute the metric of the isometries in the product manifold, we make use of the following relations:
+
+    * The tangent space of the cartesian product of two manifolds (which is also a manifold) M1 x M2 decomposes as the direct sum of the individual tangent spaces at a point (p1, p2): T_(p1,p2)(M1 x M2) ≅ T_p1(M1) ⊕ T_p2(M2) (natural identification) [1]
+    * Thus, the product metric g = g1 ⊕ g2 is defined as g((u1, u2), (v1, v2)) = g1(u1, v1) + g2(u2, v2) for tangent vectors (u1, u2), (v1, v2) in T_(p1,p2)(M1 x M2) [1, 2]
+
+    References:
+    [1] https://en.wikipedia.org/wiki/Product_metric
+    [2] https://math.stackexchange.com/questions/173159/product-of-riemannian-manifolds
+
     Args:
         z1: First tangent vector of dimensions (n, p)
         z2: Second tangent vector of dimensions (n, p)
@@ -85,16 +77,19 @@ def riemannian_metric(z1:Matrix, z2:Matrix, x:Matrix = None, metric:str = "eucli
     Returns:
         The inner product of the two tangent vectors at the point x
     """
-    n, p = z1.shape
+    *batch_shape, n, p = z1.shape
+    In = jnp.eye(n, dtype=z1.dtype)
+    In = jnp.broadcast_to(In, tuple(batch_shape) + (n, n))
     if metric == "euclidean":
-        gamma = jnp.eye(n)
+        gamma = In
     elif metric == "canonical":
         if x is None:
             raise ValueError("To use the canonical metric, the point x on the stiefel manifold must be provided.")
-        gamma = jnp.eye(n) - 0.5 * (x@x.conj().T)
+        gamma = In - 0.5 * (x @ transpose(x.conj()))
     else:
         raise ValueError(f"Metric: {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'")
-    return jnp.trace(z1.conj().T @ gamma @ z2).real
+    # Take the trace of the last two dimensions and sum over batch dimensions
+    return jnp.einsum("...ii->", transpose(z1.conj()) @ gamma @ z2).real
 
 def update_isometry_tensors(isometries:Sequence[Matrix] | Matrix, update_directions:Sequence[Matrix] | Matrix, step_size:float, operator_type:str = "kraus", use_geodesic:bool =  True) ->  jnp.ndarray:
     """Update a tensor of isometries in the direction of the tensor of tangent vectors scaled by step size
@@ -199,3 +194,18 @@ def eigy_expm_jax(A:jnp.ndarray):
     """
     eigvals, eigvects = jnp.linalg.eig(A)
     return jnp.einsum("...ik, ...k, ...kj -> ...ij", eigvects, jnp.exp(eigvals), jnp.linalg.inv(eigvects))
+
+def is_isometry(x:jnp.ndarray)->bool:
+    "check if `x` belongs to the stiefel manifold"
+    return jnp.allclose(x.conj().T @ x, jnp.eye(x.shape[1]))
+
+def is_in_tangent_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
+    """
+    Checks if the matrix z is in the tangent space of isometry x 
+    
+    Checks tangent space condition x^H z + z^H x = 0
+    Args:
+        x: Stiefel matrix of dimensions (n, p)
+        z: Any matrix of dimensions (n, p)
+    """
+    return jnp.allclose(x.conj().T @ z, - z.conj().T @ x)

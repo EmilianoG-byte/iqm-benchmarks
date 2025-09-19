@@ -5,31 +5,35 @@ Trust Region module for Optimization on the Stiefel Manifold
 import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
-from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, GRADIENT_FUNCTIONS
-from mGST.riemannian import get_isometry_dimensions_from_tensor, riemannian_connection, riemannian_metric, retraction_polar_decomposition
+from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, transpose
+from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
 from mGST.typing import Tensor, Matrix, Scalar
 
 from typing import Callable
 
-
-def retraction_first_order(x:Tensor, z:Tensor, n:int, p:int)-> Tensor:
+def retraction_first_order(x:Tensor, z:Tensor, operator_type:str)-> Tensor:
     """First order retraction using the polar decomposition.
     
     Args:
         x: Tensor representing the point on the Stiefel manifold.
         z: Tensor representing the tangent vector at point x.
-        n: The Stiefel n dimension.
-        p: The Stiefel p dimension.
+        operator_type: The type of the input operator ('kraus', 'state', 'povm')
     
     Returns:
         The retracted point on the Stiefel manifold.
     """
-    x_matrix = tensor_to_isometry(x, n=n, p=p)
-    z_matrix = tensor_to_isometry(z, n=n, p=p)
-    return isometry_to_tensor(retraction_polar_decomposition(x=x_matrix, z=z_matrix, step_size=-1.0), x.shape)
+
+    x_matrices, z_matrices = tensors_to_isometries(x, z, operator_type=operator_type)
+    # Rx(z)
+    new_isometries = update_isometry_tensors(
+        isometries=x_matrices, update_directions=z_matrices, step_size=-1.0, operator_type=operator_type, use_geodesic=False
+    ) 
+    return isometry_to_tensor(new_isometries, x.shape)
 
 def riemannian_gradient_fn(x:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type: str, metric: str) -> Tensor:
     """Compute the Riemannian gradient of a cost function at a point x using automatic differentiation.
+    
+    Handles batch dimensions.
 
     Args:
         x: The point at which to evaluate the gradient.
@@ -58,6 +62,8 @@ def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callab
     See:
     - Corollary 4.0.1. of An introduction to complex differentials and complex differentiability - Hunger.
         
+    Handles batch dimensions.
+        
     Args:
         x: The point on the Stiefel manifold where the Hessian is evaluated.
         tangent_vector: The tangent vector to multiply the Hessian with. Should be of the same shape as x.
@@ -73,14 +79,10 @@ def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callab
 
     rgrad_x_tensor, Drgrad_x_to_z_tensor = hvp(function=rgrad_fn, x=x, z=tangent_vector)
 
-    n, p = get_isometry_dimensions_from_tensor(x, tensor_type=operator_type)
+    x_matrix, tangent_vector_matrix, rgrad_x_matrix, Drgrad_x_to_z_matrix = tensors_to_isometries(
+        x, tangent_vector, rgrad_x_tensor, Drgrad_x_to_z_tensor, operator_type=operator_type)
     
-    rgrad_x_matrix = tensor_to_isometry(rgrad_x_tensor, n, p)
-    Drgrad_to_z_matrix = tensor_to_isometry(Drgrad_x_to_z_tensor, n, p)
-    x_matrix = tensor_to_isometry(x, n, p)
-    tangent_vector_matrix = tensor_to_isometry(tangent_vector, n, p)
-    
-    rhessian_vector_product_matrix = riemannian_connection(x=x_matrix, w_x=rgrad_x_matrix, z=tangent_vector_matrix, Dw_x_to_z=Drgrad_to_z_matrix, metric=metric)
+    rhessian_vector_product_matrix = riemannian_connection(x=x_matrix, w_x=rgrad_x_matrix, z=tangent_vector_matrix, Dw_x_to_z=Drgrad_x_to_z_matrix, metric=metric)
     
     if return_tensor:
         return isometry_to_tensor(rhessian_vector_product_matrix, x.shape)
@@ -223,19 +225,31 @@ def compute_euclidean_inner_product_tensors(tensor_1, tensor_2, adjoint:bool=Fal
 def _compute_first_order_term(z:Tensor, gradient_conjugated:Tensor)->float:
     return compute_euclidean_inner_product_tensors(z, gradient_conjugated, adjoint=False)
 
-def _compute_second_order_term(x:Tensor, z:Tensor, gradient:Tensor, hessian_z:Tensor, n:int, p:int)->float:
-    gradient_mtrx = tensor_to_isometry(gradient, n=n, p=p) # Dx = 2df/dx*
-    x_mtrx = tensor_to_isometry(x, n=n, p=p)
-    z_mtrx = tensor_to_isometry(z, n=n, p=p)
-    extra_factor = jnp.trace(z_mtrx.conj().T @ z_mtrx @ x_mtrx.conj().T @ gradient_mtrx).real
-    return 0.5 * (compute_euclidean_inner_product_tensors(z, hessian_z, adjoint=False) - extra_factor)
+def _compute_second_order_term(x:Tensor, z:Tensor, gradient_conjugated:Tensor, hessian_z:Tensor, n:int, p:int)->float:
+    """Compute the second-order term approximation term for the local cost function in the tangent space
 
+    Args:
+        x: Current point on the manifold.
+        z: Update direction (tangent vector).
+        gradient_conjugated: Conjugate gradient at point x. (2df/dx)
+        hessian_z: Hessian-vector product at point x in the direction z. (2(Hxx dx + Hx*x dx*))
+        n,p : Dimensions of the Stiefel manifold.
+
+    Returns:
+        The second-order term of the model approximation.
+    """
+    gradient_mtrx, x_mtrx, z_mtrx = tensors_to_isometries(gradient_conjugated, x, z, n=n, p=p)  # Dx = 2df/dx
+    extra_factor = z_mtrx.conj() @ transpose(x_mtrx) @ gradient_mtrx
+    extra_factor_tensor = isometry_to_tensor(extra_factor, x.shape)
+    # (1/2)<z, Hx[z] - z* x.T 2df/dx>e with <z1, z2>e = Re(Tr(z1.T z2))
+    return 0.5 * (compute_euclidean_inner_product_tensors(z, hessian_z - extra_factor_tensor, adjoint=False))
+     
 def compute_approx_terms_from_tensors(x:Tensor, z:Tensor, n:int, p:int, cost_function:Callable)->tuple[float, float]:
     # TODO: use grad_and_value to evaluate the cost function when computing the gradient at hvp.
     gradient_function = automatic_gradient(cost_function)
     gradient_conjugated, hessian_z = hvp(function=gradient_function, x=x, z=z) # 2df/dx, 2(Hxx dx + Hx*x dx*)
     first_order_term = _compute_first_order_term(z, gradient_conjugated)
-    second_order_term = _compute_second_order_term(x=x, z=z, gradient=gradient_conjugated.conj(), hessian_z=hessian_z, n=n, p=p)
+    second_order_term = _compute_second_order_term(x=x, z=z, gradient_conjugated=gradient_conjugated, hessian_z=hessian_z, n=n, p=p)
     return first_order_term, second_order_term
 
 def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function:Callable, n:int, p:int, order:int=2, include_zero:bool=True)->float:
@@ -299,7 +313,7 @@ def run_trust_region_optimization(
     # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
     rgradient_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg)
     rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg, return_tensor=True)
-    retraction = lambda x, z: retraction_first_order(x, z, n=n, p=p)
+    retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
 
     # Compute the initial Riemannian gradient and its norm
     rgradient = rgradient_fn(x_k)    
@@ -358,7 +372,7 @@ def run_trust_region_optimization(
     print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
     return x_k, x_k_array, cost_fx_array
 
-def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor = None, metric:str = "euclidean")-> float:
+def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
     """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
 
     Args:
@@ -370,10 +384,8 @@ def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor
     Returns:
         The value of the Riemannian metric.
     """
-    z1_matrix = tensor_to_isometry(z1, n=n, p=p)
-    z2_matrix = tensor_to_isometry(z2, n=n, p=p)
-    if x is not None:
-        x_matrix = tensor_to_isometry(x, n=n, p=p)
+    z1_matrix, z2_matrix, x_matrix = tensors_to_isometries(z1, z2, x, n=n, p=p)
+    
     return riemannian_metric(z1_matrix, z2_matrix, x=x_matrix, metric=metric)
 
 def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_grad:float = 1e-8)->bool:
