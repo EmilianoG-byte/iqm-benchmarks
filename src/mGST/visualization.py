@@ -86,6 +86,8 @@ def plot_bars_with_error(
     title: str = None,
     ylabel: str = None,
     xlabel: str = None,
+    use_log_scale: bool = False,
+    bar_spacing: float = 1.0, 
 ) -> None:
     """
     Plot bar chart of expectation values with error bars.
@@ -95,9 +97,11 @@ def plot_bars_with_error(
         title: Title of the plot.
         ylabel: Y-axis label.
         xlabel: X-axis label.
+        use_log_scale: Whether to use a logarithmic scale for the y-axis.
+        bar_spacing: Relative spacing between bars.
     """
     x_labels = list(data.keys())
-    x_positions = jnp.arange(len(x_labels))
+    x_positions = jnp.arange(len(x_labels)) * bar_spacing
 
     means = [data[x][0] for x in x_labels]
     stds = [data[x][1] for x in x_labels]
@@ -106,6 +110,9 @@ def plot_bars_with_error(
     fig, ax = plt.subplots(figsize=(6, 4), dpi=250)
 
     ax.bar(x_positions, means, yerr=stds, capsize=4, color=colours)
+
+    if use_log_scale:
+        ax.set_yscale('log')
 
     if ylabel:
         ax.set_ylabel(ylabel, fontsize=12)
