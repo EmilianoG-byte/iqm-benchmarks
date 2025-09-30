@@ -31,6 +31,16 @@ MARKERS = [
     "+",
 ]  # Extend as needed
 
+
+def default_cost_function_formatting(title:str):
+    plt.xlabel("Iteration", fontsize=14)
+    plt.ylabel("Cost Value", fontsize=14)
+    plt.title(title, fontsize=16)
+    plt.grid(color="lightgray", linestyle="--", linewidth=0.5)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.show()
+
 def plot_cost_function(
     cost_array: list[float] | list[list[float]],
     title: str = "Cost Function Convergence",
@@ -42,8 +52,8 @@ def plot_cost_function(
     """Plot the cost function values over training iterations.
 
     Args:
-        cost_array (list[float]): List of cost function values at each iteration.
-        title (str): Title of the plot.
+        cost_array: List of cost function values at each iteration.
+        title: Title of the plot.
     """
     plt.figure(figsize=(10, 6), dpi=250)
     plot_function = plt.semilogy if use_semilogy else plt.plot
@@ -72,13 +82,7 @@ def plot_cost_function(
         label = comparison_label if comparison_label else "Comparison Point"
         plt.axhline(y=comparison_yline, color="red", linestyle="--", label=label)
 
-    plt.xlabel("Iteration", fontsize=14)
-    plt.ylabel("Cost Value", fontsize=14)
-    plt.title(title, fontsize=16)
-    plt.grid(color="lightgray", linestyle="--", linewidth=0.5)
-    plt.legend(fontsize=12)
-    plt.tight_layout()
-    plt.show()
+    default_cost_function_formatting(title=title)
     
     
 def plot_bars_with_error(
@@ -156,3 +160,60 @@ def average_and_error_times_scalar(data: tuple[float, float], scalar: float) -> 
     scaled_mean = mean * scalar
     scaled_std = std * abs(scalar)
     return scaled_mean, scaled_std
+
+def plot_alternating_optimization(
+    cost_array: list[float],
+    title: str = "Alternating Optimization Convergence",
+    use_semilogy: bool = True,
+    operator_order: list[str] = ["povm", "kraus", "state"],
+    operator_colors: dict[str, str] = None,
+):
+    """Plot cost function values with different colors/markers for each operator optimization.
+
+    Args:
+        cost_array: List of cost function values at each iteration.
+        title: Title of the plot.
+        use_semilogy: Whether to use semilogy scale.
+        operator_order: List defining the order of operator optimizations.
+        operator_colors: Dictionary mapping operators to colors. If None, uses default colors.
+    """
+    # Default colors and markers if not provided
+    default_colors = {
+        "povm": COLOUR_PALETTE[0],
+        "kraus": COLOUR_PALETTE[1],
+        "state": COLOUR_PALETTE[2]
+    }
+    
+    colors = operator_colors if operator_colors else default_colors
+    operator_order = [op.lower() for op in operator_order]
+
+    plt.figure(figsize=(10, 6), dpi=250)
+    plot_function = plt.semilogy if use_semilogy else plt.plot
+
+    # Plot points for each operator
+    for idx, operator in enumerate(operator_order):
+        indices = range(idx, len(cost_array), len(operator_order))
+        values = [cost_array[i] for i in indices]
+        iterations = [i for i in indices]
+        
+        plot_function(
+            iterations,
+            values,
+            color=colors[operator],
+            marker=MARKERS[0],
+            linestyle='',  # Only markers
+            label=f"{operator.capitalize()}",
+            markersize=8,
+        )
+    
+    # Plot connecting line for all points
+    plot_function(
+        range(len(cost_array)),
+        cost_array,
+        color=COLOUR_PALETTE[0],
+        alpha=0.5,
+        linewidth=2,
+        zorder=0,  # Put line behind markers
+    )
+
+    default_cost_function_formatting(title=title)

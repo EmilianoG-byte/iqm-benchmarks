@@ -17,7 +17,7 @@ from mGST.low_level_jit import (
 
 from mGST.typing import Tensor, Matrix, Scalar
 
-from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess
+from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
 from mGST.additional_fns import random_gs
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
@@ -397,6 +397,38 @@ def update_state_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.n
         n_povm=num_povm,
         lam=1e-3)
     
+def update_kraus_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->jnp.ndarray:
+    """Update the Kraus tensor using the saddle-free newton method.
+    
+    Args:
+        kraus_tensor: The current Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+        indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
+        prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+    Returns:
+        The updated Kraus tensor.
+    """
+    num_gates, kraus_rank, dim, dim = kraus_tensor.shape
+    num_povm = povm_psd.shape[0]
+    
+    rho_mgst = (state_psd @ state_psd.T.conj()).reshape(-1)
+    povm_mgst = (povm_psd.conj().transpose(0, 2, 1) @ povm_psd).reshape(num_povm, -1)
+    
+    updated_kraus_np = SFN_riem_Hess_full(
+        K=np.array(kraus_tensor),
+        E=np.array(povm_mgst),
+        rho=np.array(rho_mgst),
+        y=prob_matrix,
+        J=indices_list,
+        d=num_gates,
+        r=dim**2,
+        rK=kraus_rank,
+        lam=1e-3,
+        ls="COBYLA",
+    )
+    return jnp.array(updated_kraus_np)
+    
 def update_povm_via_saddle_free_newton(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->jnp.ndarray:
     """Update the POVM tensor using the saddle-free newton method.
     
@@ -539,7 +571,7 @@ def _update_tensor_via_gradient(
     indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
     optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True,
     regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None,
-    metric:Literal["canonical", "euclidean"]="canonical", verbose:bool=False)->tuple[jnp.ndarray, float]:
+    metric:Literal["canonical", "euclidean"]="canonical", verbose:bool=False, return_cost_fn_value:bool=False)->tuple[jnp.ndarray, float]:
     """Update a given operator tensor (POVM, Kraus, or State) following the gradient direction.
 
     Args:
@@ -556,8 +588,9 @@ def _update_tensor_via_gradient(
         use_geodesic (bool, optional): Whether to use the geodesic to compute the updated tensor. Defaults to True.
 
     Returns:
-        jnp.ndarray: The updated tensor.
-        float: The optimized step size.
+        * The updated tensor.
+        * The optimized step size.
+        * (optional) The cost function value at the updated tensor.
     """
     
     operator_tensors = {
@@ -596,12 +629,16 @@ def _update_tensor_via_gradient(
             method=ls_method, options={"maxiter": ls_max_iter}
         )
         optimized_step = optimization_result.x
+        cost_fn_value = optimization_result.fun
         if verbose:
             print(f"Optimized step size for {operator_type.capitalize()}: {optimized_step}")
     else:
         optimized_step = initial_step
     
-    return _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic), optimized_step
+    updated_tensor = _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic), optimized_step, cost_fn_value
+    if return_cost_fn_value:
+        return updated_tensor, optimized_step, cost_fn_value
+    return updated_tensor, optimized_step
 
     
 def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:jnp.ndarray | None = None, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float]:

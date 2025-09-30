@@ -9,7 +9,7 @@ from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gra
 from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
 from mGST.typing import Tensor, Matrix, Scalar
 
-from typing import Callable
+from typing import Callable, Any
 
 def retraction_first_order(x:Tensor, z:Tensor, operator_type:str)-> Tensor:
     """First order retraction using the polar decomposition.
@@ -138,6 +138,9 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
 def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
     """ Truncated Conjugate Gradient (TCG) method to approximately solve the trust region subproblem on the Stiefel manifold.
     
+    References:
+    [1] Trust-region methods on Riemannian manifolds, P. A. Absil, C. G. Baker, and K. A. Gallivan, 2006.
+    
     Args:
         x: Current point on the manifold.
         radius: Trust region radius.
@@ -179,7 +182,7 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         # Negative curvature
         if curvature < 0:
             reason = "Negative curvature encountered 📉."
-            step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
+            step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix, metric=metric)
             solution_tensor += step * delta_tensor
             on_boundary = True
             break
@@ -489,3 +492,113 @@ def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_gr
         tol_grad: The tolerance for the gradient norm. If None, no stopping criteria is applied.
     """
     return norm_grad <= tol_grad * max(1.0, norm_grad_init)
+
+
+from mGST.typing import TrustRegionOptions, GradientDescentOptions, OptimizationOptions
+
+def validate_optimization_options(optimization_options:dict[str, OptimizationOptions])->dict[str, str]:
+    """Validate the optimization options dictionary.
+    
+    Args:
+        optimization_options: A map between operator types and their corresponding optimization options.
+            The keys should be "kraus", "povm", and "state".
+    Returns:
+        A validated dictionary with default options if none are provided.
+    Raises:
+        ValueError: If the input is not a dictionary or contains invalid keys or values.
+    """
+    if optimization_options is None:
+        return {
+            "kraus": TrustRegionOptions(),
+            "povm": TrustRegionOptions(),
+            "state": TrustRegionOptions(),
+        }
+
+    if not isinstance(optimization_options, dict):
+        raise ValueError("Optimization schedule must be a dictionary with string keys and OptimizationOptions values.")
+
+    valid_operators = {"kraus", "povm", "state"}
+    provided_operators = set(optimization_options.keys())
+    if provided_operators != valid_operators:
+        raise ValueError(f"Invalid optimization schedule keys: {provided_operators}. Valid keys are: {valid_operators}")
+
+    for key, value in optimization_options.items():
+        if not isinstance(value, OptimizationOptions):
+            raise ValueError(f"Invalid optimization options for {key}: {value}. Valid options are: {OptimizationOptions}")
+
+    return optimization_options
+
+def run_riemannian_optimization(kraus_tensor_init:jnp.ndarray, povm_psd_init:jnp.ndarray, state_psd_init:jnp.ndarray, cost_function:Callable, cost_fn_kwargs:dict[str, Any], num_iterations:int, optimization_options:dict[str, OptimizationOptions] = None):
+    """
+
+    NOTE: This function assumes the optimization order is povm -> kraus -> state.
+    TODO: allow user to specify order.
+
+    """
+    
+    
+    
+    # Validate optimization options
+    optimization_options = validate_optimization_options(optimization_options)
+    povm_options = optimization_options.get("povm")
+    kraus_options = optimization_options.get("kraus")
+    state_options = optimization_options.get("state")
+    
+    kraus_tensor_k = kraus_tensor_init
+    povm_psd_k = povm_psd_init
+    state_psd_k = state_psd_init
+    
+    try:
+        for idx in range(num_iterations):
+            cost_fn_povm = lambda x: cost_function(
+                kraus_tensor=kraus_tensor_k, povm_psd=x, state_psd=state_psd_k, **cost_fn_kwargs)
+            # Optimize POVM
+            
+            povm_psd_k, _, cost_values_povm = run_trust_region_optimization(x_init=povm_psd_k, cost_function=cost_fn_povm, operator_type="povm", **povm_options)
+            # Optimize Kraus
+            cost_fn_kraus = lambda x: cost_function(
+                kraus_tensor=x, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs)
+
+            kraus_tensor_k, _, cost_values_kraus = run_trust_region_optimization(x_init=kraus_tensor_k, cost_function=cost_fn_kraus, operator_type="kraus", **kraus_options)
+
+            # Optimize State
+            cost_fn_state = lambda x: cost_function(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=x, **cost_fn_kwargs)
+
+            state_psd_k, _, cost_values_state = run_trust_region_optimization(x_init=state_psd_k, cost_function=cost_fn_state, operator_type="state", **state_options)
+            
+            
+    except KeyboardInterrupt:
+        print(f"Optimized interrupted by user at outer iteration {idx}.")
+
+
+    return None
+
+from mGST.utility_functions_comparisons import _update_tensor_via_gradient
+
+def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_function:Callable = None, cost_fn_kwargs:dict[str, Any] = None):
+    
+    options_dict = optimization_options.to_dict()
+    if isinstance(optimization_options, TrustRegionOptions):
+        if operator_type == "povm":
+            x_init = povm_psd
+            cost_fn_x = lambda x: cost_function(
+                kraus_tensor=kraus_tensor, povm_psd=x, state_psd=state_psd, **cost_fn_kwargs)
+        elif operator_type == "kraus":
+            x_init = kraus_tensor
+            cost_fn_x = lambda x: cost_function(
+                kraus_tensor=x, povm_psd=povm_psd, state_psd=state_psd, **cost_fn_kwargs)
+        else:
+            x_init = state_psd
+            cost_fn_x = lambda x: cost_function(
+                kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=x, **cost_fn_kwargs)
+            
+        optimized_operator, _, cost_values = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
+        
+    elif isinstance(optimization_options, GradientDescentOptions):
+        gds_options = options_dict | cost_fn_kwargs
+        optimized_operator, _, cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
+    else:
+        raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
+
+    return optimized_operator, cost_value
