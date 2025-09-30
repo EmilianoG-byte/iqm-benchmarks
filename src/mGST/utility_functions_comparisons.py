@@ -635,7 +635,7 @@ def _update_tensor_via_gradient(
     else:
         optimized_step = initial_step
     
-    updated_tensor = _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic), optimized_step, cost_fn_value
+    updated_tensor = _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic)
     if return_cost_fn_value:
         return updated_tensor, optimized_step, cost_fn_value
     return updated_tensor, optimized_step
@@ -1032,13 +1032,15 @@ def tensor_to_isometry(tensor: Tensor, n:int, p:int)-> Matrix:
 
     Args:
         x: tensor to be reshaped
-        row_dim: Row dimension of the new matrix
-        col_dim: Column dimension fo the new matrix
+        n: Row dimension of the new matrix
+        p: Column dimension of the new matrix
 
     Returns:
-        Matrix of dimensions (bath_dim, row_dim, col_dim)
+        Matrix of dimensions (bath_dim, n, p) or (n, p) if no batch dimension.
     """
-    return jnp.reshape(tensor, shape=(-1, n, p)).squeeze()
+    mat = jnp.reshape(tensor, (-1, n, p))
+    # Safe squeeze of axis = 0 only.
+    return mat[0] if mat.shape[0] == 1 else mat
 
 def isometry_to_tensor(isometry: Matrix, tensor_shape: tuple[int]) -> Tensor:
     """Reshape the updated isometry based on the operator type.

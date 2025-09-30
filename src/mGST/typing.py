@@ -15,7 +15,6 @@ from typing import Optional, Any, Literal
 @dataclass
 class BaseOptimizationOptions:
     """Base class for optimization options."""
-    num_iterations: int = 20
     metric: str = "euclidean"
     verbose: bool = False
 
@@ -26,6 +25,7 @@ class BaseOptimizationOptions:
 @dataclass
 class TrustRegionOptions(BaseOptimizationOptions):
     """Options for trust region optimization method."""
+    num_iterations: int = 20
     radius_init: float = 0.1
     max_radius: float = 2.0
     quotient_trust: float = 0.125
@@ -33,17 +33,17 @@ class TrustRegionOptions(BaseOptimizationOptions):
     num_iterations_cg: int = 10
     theta_cg: float | None = None
     kappa_cg: float | None = None
-    verbose_cg: bool = True
+    verbose_cg: bool = False
 
 @dataclass
 class GradientDescentOptions(BaseOptimizationOptions):
     """Options for gradient descent optimization method."""
-    init_step: float = 1.0
+    initial_step: float = 1.0
     optimize_step: bool = True
     use_geodesic: bool = True
     ls_max_iter: int = 200
     ls_method: str = "COBYLA"
-
+    
 # Type alias for optimization options
 OptimizationOptions = TrustRegionOptions | GradientDescentOptions
 

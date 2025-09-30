@@ -5,9 +5,9 @@ Trust Region module for Optimization on the Stiefel Manifold
 import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
-from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, transpose
+from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, transpose, _update_tensor_via_gradient
 from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
-from mGST.typing import Tensor, Matrix, Scalar
+from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions
 
 from typing import Callable, Any
 
@@ -97,13 +97,13 @@ def compute_step_size(z:jnp.ndarray, delta:jnp.ndarray, radius:float, x:jnp.ndar
     """
     metric_delta = riemannian_metric(delta, delta, x=x, metric=metric)
     if jnp.allclose(metric_delta, 0):
-        warnings.warn("tangent vector 'delta' has norm zero")
+        warnings.warn("tangent vector 'delta' has norm zero", UserWarning)
         return 0 # t =0 such that the next iteration is the same z
     p = riemannian_metric(z, delta, x=x, metric=metric) / metric_delta
     q = (riemannian_metric(z, z, x=x, metric=metric) - radius**2) / metric_delta
     t = solve_quadratic_equation(p, q)[1]
     if t < 0:
-        warnings.warn(f"encountered t < 0: {t}", RuntimeWarning)
+        warnings.warn(f"encountered t < 0: {t}", UserWarning)
     return t
 
 
@@ -360,7 +360,7 @@ def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Ca
 def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
-    metric_cg:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
+    metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
     """
     Run the trust region optimization algorithm.
@@ -373,7 +373,7 @@ def run_trust_region_optimization(
         max_radius: The maximum trust region radius to allow.
         quotient_trust: The lower threshold for accepting a step based on the quality quotient.
         operator_type: The type of the input operator ('kraus', 'state', 'povm')
-        metric_cg: The metric to use to calculate inner products in the truncated conjugate gradient algorithm. Can be "canonical" or "euclidean".
+        metric: The metric to use to calculate inner products in the truncated conjugate gradient algorithm. Can be "canonical" or "euclidean".
         num_iterations_cg: The maximum number of iterations to perform in the truncated conjugate gradient algorithm.
         theta_cg: The theta parameter for the stopping criteria of the truncated conjugate gradient algorithm.
         kappa_cg: The kappa parameter for the stopping criteria of the truncated conjugate gradient algorithm.
@@ -404,24 +404,25 @@ def run_trust_region_optimization(
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
 
     # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
-    rgradient_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg)
-    rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric_cg, return_tensor=True)
+    rgradient_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
+    rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric, return_tensor=True)
     retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
 
     # Compute the initial Riemannian gradient and its norm
     rgradient = rgradient_fn(x_k)    
-    norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric_cg))
+    norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
     norm_grad = norm_grad_init
 
     print(f"TR started for operator: {operator_type} 🚀.")
-    print("=======================================")
+    if verbose:
+        print("=======================================")
     try:
         for idx in range(num_iterations):
             if verbose:
                 print(f"TR Iteration: {idx}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}")
 
             # Solve the trust region subproblem
-            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k, num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric_cg, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
+            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k, num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
             
             # Compute the quality quotient
             x_next = retraction(x_k, update_direction)
@@ -453,7 +454,7 @@ def run_trust_region_optimization(
             rgradient = rgradient_fn(x_k)
             
             # Determine stopping criteria based on gradient norm
-            norm_grad = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_k, metric=metric_cg))
+            norm_grad = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_k, metric=metric))
             if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
                 if verbose:
                     print(f"Stopping criteria met. 🛑")
@@ -494,8 +495,6 @@ def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_gr
     return norm_grad <= tol_grad * max(1.0, norm_grad_init)
 
 
-from mGST.typing import TrustRegionOptions, GradientDescentOptions, OptimizationOptions
-
 def validate_optimization_options(optimization_options:dict[str, OptimizationOptions])->dict[str, str]:
     """Validate the optimization options dictionary.
     
@@ -528,56 +527,94 @@ def validate_optimization_options(optimization_options:dict[str, OptimizationOpt
 
     return optimization_options
 
-def run_riemannian_optimization(kraus_tensor_init:jnp.ndarray, povm_psd_init:jnp.ndarray, state_psd_init:jnp.ndarray, cost_function:Callable, cost_fn_kwargs:dict[str, Any], num_iterations:int, optimization_options:dict[str, OptimizationOptions] = None):
+def run_riemannian_optimization(kraus_tensor_init:jnp.ndarray, povm_psd_init:jnp.ndarray, state_psd_init:jnp.ndarray, cost_function:Callable, cost_fn_kwargs:dict[str, Any], num_iterations:int, optimization_options:dict[str, OptimizationOptions] = None, verbose:bool=True)-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
-
+    Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
+    
     NOTE: This function assumes the optimization order is povm -> kraus -> state.
     TODO: allow user to specify order.
-
+    
+    Args:
+        kraus_tensor_init: Initial Kraus operator tensor. Shape: (num_gates, kraus_rank, dim_out, dim_in).
+        povm_psd_init: Initial POVM operator tensor. Shape: (num_povm, rank_povm, dim_in).
+        state_psd_init: Initial State operator tensor. Shape: (rank_state, dim_in).
+        cost_function: The cost function to minimize. Should take kraus_tensor, povm_psd, state_psd as keyword arguments and return a scalar.
+        cost_fn_kwargs: Additional keyword arguments to pass to the cost function.
+        num_iterations: Number of outer iterations to perform (each iteration optimizes all operators once).
+        optimization_options: A dictionary specifying the optimization options for each operator type.
+            The keys should be "kraus", "povm", and "state", and the values should be instances of TrustRegionOptions or GradientDescentOptions.
+            If None, default TrustRegionOptions will be used for all operators.
+        verbose: Whether to print information during the optimization
+        
+    Returns:
+        A tuple containing:
+        - A dictionary with the optimized operators: {"kraus": kraus_tensor, "povm": povm_psd, "state": state_psd}.
+        - A list of the cost function values at each optimization step.
     """
-    
-    
-    
     # Validate optimization options
     optimization_options = validate_optimization_options(optimization_options)
     povm_options = optimization_options.get("povm")
     kraus_options = optimization_options.get("kraus")
     state_options = optimization_options.get("state")
     
+    cost_fn_history = []
     kraus_tensor_k = kraus_tensor_init
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
     
+    optimization_options_print = "\n".join(
+    f"{operator}: {type(option).__name__}"
+    for operator, option in optimization_options.items()
+)
+    
+    print("🔰 Starting Riemannian Optimization 🔰 \n with optimization config: \n"
+          f"{optimization_options_print}")
     try:
         for idx in range(num_iterations):
-            cost_fn_povm = lambda x: cost_function(
-                kraus_tensor=kraus_tensor_k, povm_psd=x, state_psd=state_psd_k, **cost_fn_kwargs)
             # Optimize POVM
-            
-            povm_psd_k, _, cost_values_povm = run_trust_region_optimization(x_init=povm_psd_k, cost_function=cost_fn_povm, operator_type="povm", **povm_options)
+            povm_psd_k, cost_value_povm = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            )
+
+            cost_fn_history.append(cost_value_povm)
             # Optimize Kraus
-            cost_fn_kraus = lambda x: cost_function(
-                kraus_tensor=x, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs)
+            kraus_tensor_k, cost_value_kraus = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            )
 
-            kraus_tensor_k, _, cost_values_kraus = run_trust_region_optimization(x_init=kraus_tensor_k, cost_function=cost_fn_kraus, operator_type="kraus", **kraus_options)
-
+            cost_fn_history.append(cost_value_kraus)
             # Optimize State
-            cost_fn_state = lambda x: cost_function(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=x, **cost_fn_kwargs)
+            state_psd_k, cost_value_state = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            )
+            cost_fn_history.append(cost_value_state)
+            
+            if verbose:
+                print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
 
-            state_psd_k, _, cost_values_state = run_trust_region_optimization(x_init=state_psd_k, cost_function=cost_fn_state, operator_type="state", **state_options)
-            
-            
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user at outer iteration {idx}.")
+        
+    optimized_operators = {
+        "kraus": kraus_tensor_k,
+        "povm": povm_psd_k,
+        "state": state_psd_k,
+    }
+    return optimized_operators, cost_fn_history
 
-
-    return None
-
-from mGST.utility_functions_comparisons import _update_tensor_via_gradient
-
-def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_function:Callable = None, cost_fn_kwargs:dict[str, Any] = None):
+def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None)-> tuple[jnp.ndarray, float]:
+    """
+    Optimize a single operator (Kraus, POVM, or State) using the specified optimization options.
     
+    Args:
+        kraus_tensor: The current Kraus operator tensor.
+        povm_psd: The current POVM operator tensor.
+        state_psd: The current State operator tensor.
+        optimization_options: The optimization options to use (TrustRegionOptions or GradientDescentOptions).
+        operator_type: The type of operator to optimize ('kraus', 'povm', or 'state').
+        cost_function: The cost function to minimize. Needed if using TrustRegionOptions.
+        cost_fn_kwargs: Additional keyword arguments to pass to the cost function. Needed both for TrustRegionOptions and GradientDescentOptions.
+    """
     options_dict = optimization_options.to_dict()
     if isinstance(optimization_options, TrustRegionOptions):
         if operator_type == "povm":
@@ -593,10 +630,16 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
             cost_fn_x = lambda x: cost_function(
                 kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=x, **cost_fn_kwargs)
             
-        optimized_operator, _, cost_values = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
+        # Purposedly supressing warnings since the TR method raises warnings often, e.g. when the gradient is close to zero or t < 0.
+        with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=UserWarning)
+                optimized_operator, _, cost_values = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
+        cost_value = cost_values[-1]
         
     elif isinstance(optimization_options, GradientDescentOptions):
         gds_options = options_dict | cost_fn_kwargs
+        gds_options.pop("jit", None)  # Remove jit option if present, as it's not used in _update_tensor_via_gradient
+        print(f"GDS started for operator: {operator_type} 🚀.")
         optimized_operator, _, cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
     else:
         raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")

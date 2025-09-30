@@ -489,7 +489,7 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
     return regularized_value
     
 
-def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False):
+def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False):
     """Compute the cost function using jax and mps contraction strategy.
     
     Optimized using the most scalable jnp functions.
@@ -514,7 +514,7 @@ def cost_function_jax_mps(kraus, povm_psd, state_psd, indices_list, prob_matrix,
         inner_function = cost_function_mps_single_gate_sequence
     
     for idx, gates_indices in enumerate(indices_list):
-        cost_value += inner_function(kraus, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
+        cost_value += inner_function(kraus_tensor, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
         if jit:
             new_count = cost_function_mps_single_gate_sequence_jit._cache_size()
             if new_count != previous_count:
