@@ -7,7 +7,8 @@ import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
 from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, transpose, _update_tensor_via_gradient
 from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
-from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions
+from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule, OptimizationScheduleItem
+
 
 from typing import Callable, Any
 
@@ -391,7 +392,7 @@ def run_trust_region_optimization(
 
     References:
         * [1] https://chatgpt.com/share/68cd51cc-73b8-8009-be12-a7ae8624c73e
-        * [2] https://pymanopt.org/docs/stable/_modules/pymanopt/optimizers/trust_regions.* html#TrustRegions
+        * [2] https://pymanopt.org/docs/stable/_modules/pymanopt/optimizers/trust_regions.html#TrustRegions
         * [3] Absil, P.-A., Mahony, R., & Sepulchre, R. (2004). Optimization Algorithms on Matrix Manifolds. Princeton University Press.
         * [4] https://github.com/pymanopt/pymanopt/blob/a1f52e74092535cd416ba3ec68252eb74ed53178/src/pymanopt/optimizers/optimizer.py#L45
         * [5] https://github.com/qc-tum/rqcopt/blob/master/rqcopt/trust_region.py
@@ -527,7 +528,35 @@ def validate_optimization_options(optimization_options:dict[str, OptimizationOpt
 
     return optimization_options
 
-def run_riemannian_optimization(kraus_tensor_init:jnp.ndarray, povm_psd_init:jnp.ndarray, state_psd_init:jnp.ndarray, cost_function:Callable, cost_fn_kwargs:dict[str, Any], num_iterations:int, optimization_options:dict[str, OptimizationOptions] = None, verbose:bool=True)-> tuple[dict[str, jnp.ndarray], list[float]]:
+def validate_optimization_schedule(
+    optimization_schedule: dict[str, OperatorSchedule], 
+    num_iterations: int
+) -> dict[str, OperatorSchedule]:
+    """Validate the optimization schedule dictionary."""
+    if optimization_schedule is None:
+        default_schedule = OperatorSchedule.default(num_iterations)
+        return {op: default_schedule for op in ["kraus", "povm", "state"]}
+
+    valid_operators = {"kraus", "povm", "state"}
+    if set(optimization_schedule.keys()) != valid_operators:
+        raise ValueError(f"Invalid operators in schedule. Expected {valid_operators}")
+
+    # Validate each operator's schedule
+    for schedule in optimization_schedule.values():
+        schedule.validate(num_iterations)
+
+    return optimization_schedule
+
+def run_riemannian_optimization(
+    kraus_tensor_init:jnp.ndarray,
+    povm_psd_init:jnp.ndarray,
+    state_psd_init:jnp.ndarray,
+    cost_function:Callable,
+    cost_fn_kwargs:dict[str, Any],
+    num_iterations:int,
+    optimization_schedule:dict[str, OperatorSchedule] = None,
+    verbose:bool=True
+    )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
     
@@ -552,38 +581,38 @@ def run_riemannian_optimization(kraus_tensor_init:jnp.ndarray, povm_psd_init:jnp
         - A list of the cost function values at each optimization step.
     """
     # Validate optimization options
-    optimization_options = validate_optimization_options(optimization_options)
-    povm_options = optimization_options.get("povm")
-    kraus_options = optimization_options.get("kraus")
-    state_options = optimization_options.get("state")
+    optimization_schedule = validate_optimization_schedule(optimization_schedule=optimization_schedule, num_iterations=num_iterations)
     
     cost_fn_history = []
     kraus_tensor_k = kraus_tensor_init
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
     
-    optimization_options_print = "\n".join(
-    f"{operator}: {type(option).__name__}"
-    for operator, option in optimization_options.items()
+    optimization_schedule_print = "\n".join(
+    f"{operator}: {str(option)}"
+    for operator, option in optimization_schedule.items()
 )
     
-    print("🔰 Starting Riemannian Optimization 🔰 \n with optimization config: \n"
-          f"{optimization_options_print}")
+    print("🔰 Starting Riemannian Optimization 🔰 \n with optimization schedule: \n"
+          f"{optimization_schedule_print}")
     try:
         for idx in range(num_iterations):
             # Optimize POVM
+            povm_options = optimization_schedule["povm"].get_options_for_iteration(idx)
             povm_psd_k, cost_value_povm = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
             )
 
             cost_fn_history.append(cost_value_povm)
             # Optimize Kraus
+            kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
             kraus_tensor_k, cost_value_kraus = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
             )
 
             cost_fn_history.append(cost_value_kraus)
             # Optimize State
+            state_options = optimization_schedule["state"].get_options_for_iteration(idx)
             state_psd_k, cost_value_state = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
             )
