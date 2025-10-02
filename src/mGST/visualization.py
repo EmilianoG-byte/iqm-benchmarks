@@ -217,3 +217,84 @@ def plot_alternating_optimization(
     )
 
     default_cost_function_formatting(title=title)
+    
+def plot_wall_time(
+    time_data: dict[str, list[tuple[float, float]]],
+    x_values: list[int | float],
+    title: str = "Wall Time Comparison",
+    xlabel: str = "Number of qubits",
+    ylabel: str = "Wall time [s]",
+    comparison_data: dict[str, tuple[list, list]] = None,
+    logscale: str | None = None,
+) -> None:
+    """Plot wall time against a parameter for different methods/configurations.
+
+    Args:
+        time_data: Dictionary mapping method names to lists of (mean, std) tuples.
+            Each list should have the same length as x_values.
+        x_values: Values for x-axis (e.g. number of qubits).
+        title: Title of the plot.
+        xlabel: Label for x-axis.
+        ylabel: Label for y-axis.
+        logscale: 'x', 'y', 'xy' for logarithmic scale on respective axes, or None for linear scale.
+        labels: Optional list of labels for methods. If None, uses dictionary keys.
+    """
+    plt.figure(figsize=(8, 5), dpi=250)
+    if logscale == "y":
+        plot_function = plt.semilogy
+    elif logscale == "x":
+        plot_function = plt.semilogx
+    elif logscale == "xy":
+        plot_function = plt.loglog
+    else:
+        plot_function = plt.plot
+
+    for i, (method, results) in enumerate(time_data.items()):
+        print("here")
+        if len(results) != len(x_values):
+            raise ValueError(f"Number of timing results for '{method}' doesn't match number of x values")
+        
+        marker = MARKERS[i % len(MARKERS)]
+        color = COLOUR_PALETTE[i]
+        # Extract mean times and std devs
+        means = jnp.array([result[0] for result in results])
+        stds = jnp.array([result[1] for result in results])
+
+        # Plot main line with markers
+        plot_function(
+            x_values,
+            means,
+            label=method,
+            color=color,
+            marker=marker,
+            linestyle="-",
+            linewidth=2,
+            markersize=6,
+        )
+        
+        plt.fill_between(
+            x_values,
+            means - stds,
+            means + stds,
+            color=color,
+            alpha=0.2
+        )
+        
+    if comparison_data is not None:
+        for label, (comp_x, comp_y) in comparison_data.items():
+            plot_function(
+                comp_x,
+                comp_y,
+                linestyle="--",
+                label=label,
+                color="black",
+                linewidth=2,
+            )
+
+    plt.xlabel(xlabel, fontsize=12)
+    plt.ylabel(ylabel, fontsize=12)
+    plt.title(title, fontsize=14)
+    plt.grid(alpha=0.3)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    plt.show()

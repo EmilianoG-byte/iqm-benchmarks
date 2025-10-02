@@ -90,7 +90,7 @@ def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
         
     return K, X, E, rho
 
-def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend, seed:int = 42):
+def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend, seed:int = 42, only_jax_variables:bool = False):
     
     benchmark = CompressiveGST(backend, configuration)
     result = benchmark.run()
@@ -101,9 +101,12 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt = get_mgst_parameters_from_dataset(dataset, qubit_layout=qubit_layout, rK=rK)
     K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True, seed=seed)
     
+    if only_jax_variables:
+        indices_list = [indices[indices != -1] for indices in J]
+        return K, X, E, rho, y, indices_list
     return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, rK
 
-def create_4q_gst_config():
+def create_4q_gst_config(kraus_rank:int=1):
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
 
     Returns:
@@ -143,7 +146,7 @@ def create_4q_gst_config():
         gate_labels=gate_labels,
         num_circuits=2000,
         shots=1000,
-        rank=1,
+        rank=kraus_rank,
     )
 
     return Q4_GST
