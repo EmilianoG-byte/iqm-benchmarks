@@ -250,7 +250,6 @@ def plot_wall_time(
         plot_function = plt.plot
 
     for i, (method, results) in enumerate(time_data.items()):
-        print("here")
         if len(results) != len(x_values):
             raise ValueError(f"Number of timing results for '{method}' doesn't match number of x values")
         
@@ -287,7 +286,7 @@ def plot_wall_time(
                 comp_y,
                 linestyle="--",
                 label=label,
-                color="black",
+                color="#E71D36",
                 linewidth=2,
             )
 
