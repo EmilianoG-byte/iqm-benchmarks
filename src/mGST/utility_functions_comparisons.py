@@ -226,13 +226,28 @@ def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus
     state = jnp.reshape(state_mgst, shape=(dim, dim)) # dim_out, dim_out*
     state_psd = factorize_psd_truncated(psd=state, max_rank=state_rank) # dim_out, rank_state
     # KRAUS
+    kraus_tensor = get_kraus_psd_from_mgst(kraus_mgst, kraus_rank)
+    return kraus_tensor, povm_psd, state_psd
+
+def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
+    """ 
+    Get the PSD representation of the Kraus operators from the MGST output.
+    
+    Args:
+        kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+        rank: Rank of the Kraus operators in the compressed representation.
+    Returns:
+        kraus_tensor: dimensions (num_gates, kraus_rank, dim_out, dim_in)
+    """
+    dim_squared = kraus_mgst.shape[-1]
+    dim = int(jnp.sqrt(dim_squared))
     kraus_mgst_trans = kraus_mgst.transpose(0, 2, 1) # num_gates, dim_in x dim_in*, dim_out x dim_out*
     num_gates, *_ = kraus_mgst_trans.shape
     choi_kraus = superop2choi(kraus_mgst_trans) # num_gates, dim_in x dim_out, dim_in* x dim_out*
-    choi_psd = factorize_psd_truncated(choi_kraus, max_rank=kraus_rank) # num_gates, dim_in x dim_out, rank_kraus
-    kraus_tensor = jnp.reshape(choi_psd, shape=(num_gates, dim, dim, kraus_rank)) # num_gates, dim_in, dim_out, rank_kraus
+    choi_psd = factorize_psd_truncated(choi_kraus, max_rank=rank) # num_gates, dim_in x dim_out, rank_kraus
+    kraus_tensor = jnp.reshape(choi_psd, shape=(num_gates, dim, dim, rank)) # num_gates, dim_in, dim_out, rank_kraus
     kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
-    return kraus_tensor, povm_psd, state_psd
+    return kraus_tensor
 
 def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
