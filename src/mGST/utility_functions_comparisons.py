@@ -18,7 +18,7 @@ from mGST.low_level_jit import (
 from mGST.typing import Tensor, Matrix, Scalar
 
 from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
-from mGST.additional_fns import random_gs
+from mGST.additional_fns import random_gs, perturbed_target_init
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
@@ -249,7 +249,7 @@ def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
     kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
     return kraus_tensor
 
-def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
+def get_compressed_perturbed_rep_from_mgst(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
     
     This is the implementation used in the original mGST code.
@@ -258,7 +258,7 @@ def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, 
         povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
         state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
     Returns:
-        A tuple containing the compressed representation of the POVM and State.
+        A tuple containing the compressed representation of the POVM and State as JAX arrays.
     """
     num_povm, dim_sqrd = povm_mgst.shape
     dim = int(jnp.sqrt(dim_sqrd))
@@ -267,7 +267,7 @@ def get_compressed_rep_mgst_cholesky(povm_mgst, state_mgst)->tuple[jnp.ndarray, 
     state_psd = jnp.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
     return povm_psd, state_psd
 
-def get_compressed_rep_mgst_cholesky_numpy(povm_mgst, state_mgst)->tuple[np.ndarray, np.ndarray]:
+def get_compressed_perturbed_rep_from_mgst_numpy(povm_mgst, state_mgst)->tuple[np.ndarray, np.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
     
     This is implementation usedin the original mGST code.

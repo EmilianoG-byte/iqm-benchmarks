@@ -165,47 +165,78 @@ def plot_alternating_optimization(
     cost_array: list[float],
     title: str = "Alternating Optimization Convergence",
     use_semilogy: bool = True,
-    operator_order: list[str] = ["povm", "kraus", "state"],
+    data_operator_map: list[tuple[str, int]] = None,
     operator_colors: dict[str, str] = None,
 ):
-    """Plot cost function values with different colors/markers for each operator optimization.
+    """
+    Plot cost function values with different colors/markers for each operator optimization.
 
     Args:
         cost_array: List of cost function values at each iteration.
         title: Title of the plot.
         use_semilogy: Whether to use semilogy scale.
-        operator_order: List defining the order of operator optimizations.
+        data_operator_map: List of (operator, n_i) tuples, where n_i is the number of consecutive cost values for that operator (excluding the first "start" value).
         operator_colors: Dictionary mapping operators to colors. If None, uses default colors.
     """
-    # Default colors and markers if not provided
     default_colors = {
+        "start": COLOUR_PALETTE[-1],
         "povm": COLOUR_PALETTE[0],
         "kraus": COLOUR_PALETTE[1],
         "state": COLOUR_PALETTE[2]
     }
-    
     colors = operator_colors if operator_colors else default_colors
-    operator_order = [op.lower() for op in operator_order]
+
+    default_markers = {
+        "start": "X",
+        "povm": MARKERS[0],
+        "kraus": MARKERS[1],
+        "state": MARKERS[2]
+    }
 
     plt.figure(figsize=(10, 6), dpi=250)
     plot_function = plt.semilogy if use_semilogy else plt.plot
 
-    # Plot points for each operator
-    for idx, operator in enumerate(operator_order):
-        indices = range(idx, len(cost_array), len(operator_order))
-        values = [cost_array[i] for i in indices]
-        iterations = [i for i in indices]
-        
+    # Always plot the first point as "start"
+    plot_function(
+        [0],
+        [cost_array[0]],
+        color=colors["start"],
+        marker=default_markers["start"],
+        linestyle='',
+        label="Start",
+        markersize=13,
+        markeredgewidth=0.25,
+    )
+    shown_labels = {"start"}
+
+    # Now plot the rest according to data_operator_map
+    if data_operator_map is None:
+        # fallback to round-robin if not provided
+        operator_order = ["povm", "kraus", "state"]
+        data_operator_map = [(operator_order[i % len(operator_order)], 1) for i in range(len(cost_array) - 1)]
+
+    # Verify the length of the data_operator_map matches cost_array length minus 1
+    total_length = sum(n for _, n in data_operator_map)
+    if total_length != len(cost_array) - 1:
+        raise ValueError("Sum of n_i in data_operator_map must equal len(cost_array) - 1.")
+
+    idx = 1
+    for i, (operator, n_i) in enumerate(data_operator_map):
+        indices = list(range(idx, idx + n_i))
+        values = cost_array[idx:idx + n_i]
+        label = f"{operator.capitalize()}" if operator not in shown_labels else None
         plot_function(
-            iterations,
+            indices,
             values,
-            color=colors[operator],
-            marker=MARKERS[0],
+            color=colors.get(operator, COLOUR_PALETTE[i % len(COLOUR_PALETTE)]),
+            marker=default_markers.get(operator, MARKERS[i % len(MARKERS)]),
             linestyle='',  # Only markers
-            label=f"{operator.capitalize()}",
+            label=label,
             markersize=8,
         )
-    
+        shown_labels.add(operator)
+        idx += n_i
+
     # Plot connecting line for all points
     plot_function(
         range(len(cost_array)),
@@ -217,7 +248,7 @@ def plot_alternating_optimization(
     )
 
     default_cost_function_formatting(title=title)
-    
+        
 def plot_wall_time(
     time_data: dict[str, list[tuple[float, float]]],
     x_values: list[int | float],
