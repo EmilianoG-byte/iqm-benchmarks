@@ -106,8 +106,14 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
         return K, X, E, rho, y, indices_list
     return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, rK
 
-def create_4q_gst_config(kraus_rank:int=1):
+def create_4q_gst_config(kraus_rank:int=1, max_gates_per_batch:int | None = None):
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
+
+    NOTE: Garnet allows for a maximum of 500 circuits per job. Under this configuration, setting 500 gates per batch will create 87 jobs of each 23 circuits (except the last one with 22 circuits).
+
+    Args:
+         kraus_rank: Rank of the Kraus operators in the compressed representation. Defaults to 1.
+         max_gates_per_batch: Maximum number of gates per batch to be sent to the backend. If None, no limit is set. Defaults to None.
 
     Returns:
        The configuration used for 4Q GST
@@ -147,6 +153,7 @@ def create_4q_gst_config(kraus_rank:int=1):
         num_circuits=2000,
         shots=1000,
         rank=kraus_rank,
+        max_gates_per_batch=max_gates_per_batch,
     )
 
     return Q4_GST

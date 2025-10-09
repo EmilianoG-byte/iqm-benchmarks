@@ -555,6 +555,7 @@ def run_riemannian_optimization(
     cost_fn_kwargs:dict[str, Any],
     num_iterations:int,
     optimization_schedule:dict[str, OperatorSchedule] = None,
+    save_intermediate_cost_values:bool=False,
     verbose:bool=True
     )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
@@ -573,6 +574,7 @@ def run_riemannian_optimization(
         optimization_options: A dictionary specifying the optimization options for each operator type.
             The keys should be "kraus", "povm", and "state", and the values should be instances of TrustRegionOptions or GradientDescentOptions.
             If None, default TrustRegionOptions will be used for all operators.
+        save_intermediate_cost_values: Whether to save intermediate cost function values during the optimization of each operator. For now, we can only save all values if using TrustRegionOptions, since the GDS does not return intermediate values.
         verbose: Whether to print information during the optimization
         
     Returns:
@@ -599,24 +601,24 @@ def run_riemannian_optimization(
         for idx in range(num_iterations):
             # Optimize POVM
             povm_options = optimization_schedule["povm"].get_options_for_iteration(idx)
-            povm_psd_k, cost_value_povm = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            povm_psd_k, cost_values_povm = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
 
-            cost_fn_history.append(cost_value_povm)
+            cost_fn_history.extend(cost_values_povm)
             # Optimize Kraus
             kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
-            kraus_tensor_k, cost_value_kraus = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            kraus_tensor_k, cost_values_kraus = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
 
-            cost_fn_history.append(cost_value_kraus)
+            cost_fn_history.extend(cost_values_kraus)
             # Optimize State
             state_options = optimization_schedule["state"].get_options_for_iteration(idx)
-            state_psd_k, cost_value_state = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs
+            state_psd_k, cost_values_state = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
-            cost_fn_history.append(cost_value_state)
+            cost_fn_history.extend(cost_values_state)
             
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
@@ -631,7 +633,7 @@ def run_riemannian_optimization(
     }
     return optimized_operators, cost_fn_history
 
-def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None)-> tuple[jnp.ndarray, float]:
+def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False)-> tuple[jnp.ndarray, list[float]]:
     """
     Optimize a single operator (Kraus, POVM, or State) using the specified optimization options.
     
@@ -643,6 +645,7 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         operator_type: The type of operator to optimize ('kraus', 'povm', or 'state').
         cost_function: The cost function to minimize. Needed if using TrustRegionOptions.
         cost_fn_kwargs: Additional keyword arguments to pass to the cost function. Needed both for TrustRegionOptions and GradientDescentOptions.
+        save_intermediate_cost_values: Whether to save all cost function values during the optimization of the operator. For now, we can only save intermediate values if using TrustRegionOptions, since the GDS does not return intermediate values.
     """
     options_dict = optimization_options.to_dict()
     if isinstance(optimization_options, TrustRegionOptions):
@@ -663,14 +666,19 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
                 optimized_operator, _, cost_values = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
-        cost_value = cost_values[-1]
+        if save_intermediate_cost_values:
+            saved_cost_values = cost_values
+        else:
+            saved_cost_values = [cost_values[-1]]
+        
         
     elif isinstance(optimization_options, GradientDescentOptions):
         gds_options = options_dict | cost_fn_kwargs
         gds_options.pop("jit", None)  # Remove jit option if present, as it's not used in _update_tensor_via_gradient
         print(f"GDS started for operator: {operator_type} 🚀.")
         optimized_operator, _, cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
+        saved_cost_values = [cost_value]
     else:
         raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
 
-    return optimized_operator, cost_value
+    return optimized_operator, saved_cost_values
