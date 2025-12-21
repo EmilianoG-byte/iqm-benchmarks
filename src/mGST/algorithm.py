@@ -149,7 +149,7 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3):
     A_new = update_A_geodesic(A, Delta, a)
     return A_new
 
-def riemannian_hessian_povm(K:np.ndarray, A:np.ndarray, B:np.ndarray, y:np.ndarray, J:list[list[int]], return_gradient:bool=True)-> np.ndarray | tuple[np.ndarray, np.ndarray]:
+def riemannian_hessian_povm(K:np.ndarray, A:np.ndarray, B:np.ndarray, y:np.ndarray, J:list[list[int]], return_gradient:bool=True, euclidean:bool=False, hermitian_order:bool=True)-> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Compute the Riemannian Hessian of the objective function
     
     Args:
@@ -181,11 +181,24 @@ def riemannian_hessian_povm(K:np.ndarray, A:np.ndarray, B:np.ndarray, y:np.ndarr
         Fyconjy[i, :, i, :] = dMconjdM[i] + dconjdA[i]
         Fyy[i, :, i, :] = dMdM[i]
 
+    if euclidean:
+        # NOTE: this is not the same convention as for the riemannian Hessian.
+        # In the riemannian Hessian we have:
+        # [[F_yy, F_yconjy], [F_conjyy, F_conjyconjy]]
+        if hermitian_order:
+            H[0, :, 0, :] = Fyconjy.reshape(nt, nt)
+            H[0, :, 1, :] = Fyy.reshape(nt, nt)
+        else:
+            H[0, :, 0, :] = Fyy.reshape(nt, nt)
+            H[0, :, 1, :] = Fyconjy.reshape(nt, nt)
+        H[1, :, 0, :] = H[0, :, 1, :].conj()
+        H[1, :, 1, :] = H[0, :, 0, :].conj()
+        return H
     # derivative
     Fy = dA_.reshape(n, dim) # converting into isometry
     Y = A.reshape(n, dim) # converting into isometry
 
-    P = np.eye(n) - Y @ Y.T.conj()
+    P = np.eye(n) - Y @ Y.T.conj() # projector onto orthogonal complement of stiefel manifold. I = X X^dag + X_perp X_perp^dag
     T = transp(n, dim) # transpose superoperator
 
     # Hessian assembly
@@ -206,10 +219,14 @@ def riemannian_hessian_povm(K:np.ndarray, A:np.ndarray, B:np.ndarray, y:np.ndarr
     )
     # Full hessian on Z and Z*
     # See relation in equation A37 of individual hessian submatrices
-    H[0, :, 0, :] = H00
-    H[0, :, 1, :] = H01
-    H[1, :, 0, :] = H01.conj()
-    H[1, :, 1, :] = H00.conj()
+    if hermitian_order:
+        H[0, :, 0, :] = H01
+        H[0, :, 1, :] = H00
+    else:
+        H[0, :, 0, :] = H00
+        H[0, :, 1, :] = H01
+    H[1, :, 0, :] = H[0, :, 1, :].conj()
+    H[1, :, 1, :] = H[0, :, 0, :].conj()
     
     if return_gradient:
         # derivative
@@ -571,15 +588,24 @@ def SFN_riem_Hess_full(K, E, rho, y, J, d, r, rK, lam=1e-3, ls="COBYLA"):
     Fyy = dM10.reshape(d, nt, d, nt) + np.einsum("ijklmnop->ikmojlnp", dd).reshape((d, nt, d, nt))
 
     for k in range(d):
+        # Reshaping into isometry
         Fy = dK_[k].reshape((n, pdim))
         Y = K[k].reshape((n, pdim))
+        # riemannian gradient under canonical metric
         rGrad = Fy.conj() - Y @ Fy.T @ Y
 
+        # saving rgrad for gate k as a vector
         G[0, k, :] = rGrad.reshape(-1)
+        # saving (rgrad)* for gate k as a vector
         G[1, k, :] = rGrad.conj().reshape(-1)
 
+        # projector onto orthogonal complement of stiefel manifold. I = X X^dag + X_perp X_perp^dag
         P = np.eye(n) - Y @ Y.T.conj()
+        # transpose superoperator
         T = transp(n, pdim)
+        # Hessian assembly
+        # See theorem 1, equation A27
+        # This is already the riemannian hessian elements
         H00 = (
             -(np.kron(Y, Y.T)) @ T @ Fyy[k, :, k, :].T
             + Fyconjy[k, :, k, :].T.conj()
@@ -594,6 +620,8 @@ def SFN_riem_Hess_full(K, E, rho, y, J, d, r, rK, lam=1e-3, ls="COBYLA"):
             + (np.kron(Y, Fy.T.conj()) @ T) / 2
         )
 
+        # Full hessian on Z and Z*
+        # See relation in equation A37 of individual hessian submatrices
         # Riemannian Hessian with correction terms
         H[0, k, :, 0, k, :] = H00
         H[0, k, :, 1, k, :] = H01
@@ -606,6 +634,7 @@ def SFN_riem_Hess_full(K, E, rho, y, J, d, r, rK, lam=1e-3, ls="COBYLA"):
         P_T[1, k, :, 0, k, :] = P_T[0, k, :, 1, k, :].conj()
         P_T[1, k, :, 1, k, :] = P_T[0, k, :, 0, k, :].conj()
 
+        # These are the cross terms of the Hessian between different gates.
         for k2 in range(d):
             if k2 != k:
                 Yk2 = K[k2].reshape(n, pdim)

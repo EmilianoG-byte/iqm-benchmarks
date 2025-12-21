@@ -91,7 +91,11 @@ def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
     return K, X, E, rho
 
 def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend, seed:int = 42, only_jax_variables:bool = False):
+    """
+    Get the full set of parameters required to run mGST from a given configuration.
     
+    Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
+    """
     benchmark = CompressiveGST(backend, configuration)
     result = benchmark.run()
     
@@ -1289,3 +1293,66 @@ def riemannian_hessian_vector_mgst(rhessian_tensor:Tensor, vector:Matrix)->Matri
     vector_and_conjugate = jnp.vstack((vector, vector.conj())).reshape(-1)
     rhessian_vector = rhessian_matrix @ vector_and_conjugate
     return rhessian_vector[:np].reshape(vector.shape)
+
+from mGST.low_level_jit import dK_dMdM, ddM
+
+def compute_euclidean_hessian_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->jnp.ndarray:
+    """Compute the Euclidean Hessian tensor for the Kraus operators.
+    
+    Args:
+        kraus_tensor: Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
+        povm_mgst: POVM tensor of shape (num_povm, dim^2).
+        state_mgst: State tensor of shape (dim^2).
+        indices_list: List of indices corresponding to gate sequences.
+        prob_matrix: Probability matrix of shape (num_povm, num_gate_sequences).
+        
+    Returns:
+        Hessian 
+    """
+    # making sure we are using numpy for the hessian calculation
+    kraus_tensor = np.array(kraus_tensor)
+    povm_mgst = np.array(povm_mgst)
+    state_mgst = np.array(state_mgst)
+    prob_matrix = np.array(prob_matrix)
+    
+    num_gates = kraus_tensor.shape[0]
+    kraus_rank = kraus_tensor.shape[1]
+    dim = kraus_tensor.shape[2]
+    dim_sqrd = dim**2
+    # vectorized dimension
+    n = num_gates * kraus_rank * dim_sqrd
+    H = np.zeros((2 * n, 2 * n)).astype(np.complex128)
+    kraus_mgst = np.einsum("ijkl,ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_sqrd, dim_sqrd))
+
+
+    _, dM10, dM11 = dK_dMdM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
+    dd, dconjd = ddM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
+
+    # Based on the mGST implementation we see that actually here we use the hermitian order.
+    A00 = dM11.reshape(n, n) + jnp.einsum("ijklmnop->ikmojlnp", dconjd).reshape(n, n)
+    A10 = dM10.reshape(n, n) + jnp.einsum("ijklmnop->ikmojlnp", dd).reshape(n, n)
+    A11 = A00.conj()
+    A01 = A10.conj()
+
+    H[:n, :n] = A00
+    H[:n, n:] = A01
+    H[n:, :n] = A10
+    H[n:, n:] = A11
+    return H
+
+def compute_euclidean_derivatives_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray):
+    
+    # making sure we are using numpy for the hessian calculation
+    kraus_tensor = np.array(kraus_tensor)
+    povm_mgst = np.array(povm_mgst)
+    state_mgst = np.array(state_mgst)
+    prob_matrix = np.array(prob_matrix)
+    
+    num_gates, kraus_rank, dim, dim = kraus_tensor.shape
+    dim_sqrd = dim**2
+    # vectorized dimension
+    kraus_mgst = np.einsum("ijkl,ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_sqrd, dim_sqrd))
+    
+    dK_, dM10, dM11 = dK_dMdM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
+    dd, dconjd = ddM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
+    return {"dK_": dK_, "dM10": dM10, "dM11": dM11, "dd": dd, "dconjd": dconjd}
