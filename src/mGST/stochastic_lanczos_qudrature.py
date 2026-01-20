@@ -1,0 +1,212 @@
+""""
+SLQ method for approximating the spectral density of the Riemannian Hessian.
+"""
+
+import jax.numpy as jnp
+from jax import random
+import jax
+
+jax.config.update("jax_enable_x64", True)
+
+from typing import Callable
+
+def complex_normalized_vector(key: jax.Array, dim: int) -> jnp.ndarray:
+    """
+    Complex Gaussian random unit vector.
+    """
+    key_r, key_i = random.split(key)
+    v = (random.normal(key_r, (dim,))
+         + 1j * random.normal(key_i, (dim,))) / jnp.sqrt(2.0)
+    v = v / jnp.linalg.norm(v)
+    return v
+
+def lanczos_from_vector(
+    hvp: Callable[[jnp.ndarray], jnp.ndarray],
+    v0: jnp.ndarray,
+    order_m: int,
+    reorth: bool = True
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """
+    m-step Lanczos algorithm for a Hermitian operator accessed via HVP.
+
+    Args:
+        hvp: function that computes Hessian-vector product
+        v0: initial vector of shape (dim,)
+        order_m: number of Lanczos steps
+        reorth: whether to use reorthogonalization
+
+    Returns:
+        alphas: shape (m,)
+        betas:  shape (m-1,)
+    """
+
+    q = v0
+    q_prev = jnp.zeros_like(q)
+
+    alphas = []
+    betas = []
+
+    if reorth:
+        lanczos_vectors = [q]
+
+    beta = 0.0
+
+    for k in range(order_m):
+      print(f"Lanczos step {k+1}/{order_m}")
+      w = hvp(q)
+      alpha = jnp.real(jnp.vdot(q, w))
+      alphas.append(alpha)
+
+      r = w - alpha * q
+      if k > 0:
+          r = r - beta * q_prev
+
+      if reorth:
+          for qi in lanczos_vectors:
+              r = r - jnp.vdot(qi, r) * qi
+
+      beta = jnp.linalg.norm(r)
+
+      if k < order_m - 1:
+          betas.append(beta)
+          q_prev = q
+          q = r / beta
+          if reorth:
+              lanczos_vectors.append(q)
+
+    alphas = jnp.array(alphas)
+    betas = jnp.array(betas)
+    if alphas.shape != betas.shape != (order_m, ):
+      raise ValueError(f"Wrong shape for alphas and/or betas. Expected: ({order_m},). Got: {alphas.shape} and {betas.shape}")
+    
+    return alphas, betas
+
+def nodes_and_weights_from_lanczos(alphas:jnp.ndarray, betas:jnp.ndarray)->tuple[jnp.ndarray, jnp.ndarray]:
+  """Compute the nodes li and the weights wi for the quadrature approximation using the alphas and betas returned by Lanczos.
+
+  Args:
+    alphas: 1D array containing the alphas (main diagonal) from the Lanczos algorithm. Must have shape lanczos_steps.
+    betas: 1D array containing the betas (k=1 and k=-1 main diagonals) from the Lanczos algorithm. Must have shape lanczos_steps.
+  Returns:
+    A tuple containing the nodes and weights for the quadrature approximation.
+  """
+  k = alphas.shape[0]
+
+  # Build tridiagonal T
+  T = jnp.diag(alphas)
+  if k > 1:
+      T = T + jnp.diag(betas, 1) + jnp.diag(betas, -1)
+
+  # Eigen-decomposition of T
+  eigvals, eigvecs = jnp.linalg.eigh(T)
+  # Quadrature weights
+  weights = jnp.real(eigvecs[0, :] ** 2)
+  
+  # Do we need this?
+  # weights = jnp.maximum(weights, 0.0)
+  # weights = weights / jnp.sum(weights)
+  
+  # Sort them
+  indices_sort = jnp.argsort(eigvals)
+  nodes = eigvals[indices_sort]
+  weights = weights[indices_sort]
+  
+  return nodes, weights
+
+def slq_spectral_density(
+    hvp: Callable[[jnp.ndarray], jnp.ndarray],
+    dim: int,
+    key: jax.Array,
+    num_probes_k: int = 20,
+    lanczos_order_m: int = 80,
+    num_points_grid: int = 400,
+    sigma: float = 1e-2,
+    min_eigval: float | None = None,
+    max_eigval: float | None = None,
+    reorth: bool = True,
+):
+    """
+    Stochastic Lanczos Quadrature for spectral density estimation.
+
+    Args:
+        hvp: function that computes Hessian-vector product
+        n: dimension of the Hessian
+        key: jax PRNG key
+        num_probes_k: number of random probe vectors
+        lanczos_order_m: number of Lanczos steps per probe
+        num_points: number of points in the eigenvalue grid
+        sigma: Gaussian smoothing parameter
+        min_eigval: minimum eigenvalue for the grid (if None, determined from data)
+        max_eigval: maximum eigenvalue for the grid (if None, determined from data)
+        reorth: whether to use reorthogonalization in Lanczos steps
+
+    Returns:
+        grid: eigenvalue grid
+        spectral_density: estimated density
+    """
+    nodes_all_samples = []
+    weights_all_samples = []
+
+    for i in range(num_probes_k):
+      print(f"SLQ probe {i+1}/{num_probes_k}")
+      key, subkey = random.split(key)
+      v0 = complex_normalized_vector(subkey, dim)
+
+      alphas, betas = lanczos_from_vector(
+          hvp, v0, lanczos_order_m, reorth=reorth
+      )
+
+      nodes, weights = nodes_and_weights_from_lanczos(alphas=alphas, betas=betas) # (lanczos_steps_m, ), (lanczos_steps_m, )
+      
+      nodes_all_samples.append(nodes)
+      weights_all_samples.append(weights)
+
+    nodes_all_samples = jnp.concatenate(nodes_all_samples) # (num_probes_k, lanczos_steps_m)
+    weights_all_samples = jnp.concatenate(weights_all_samples) # (num_probes_k, lanczos_steps_m)
+    
+    return smoothened_density_from_nodes_and_weights(
+      nodes_all_samples=nodes_all_samples,
+      weights_all_samples=weights_all_samples,
+      num_points_grid=num_points_grid,
+      sigma=sigma,
+      min_eigval=min_eigval,
+      max_eigval=max_eigval,
+    )
+  
+def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None,)->tuple[jnp.ndarray, jnp.ndarray]:
+  # Determine spectral window
+  if min_eigval is None:
+      min_eigval = jnp.min(nodes_all_samples) # do we need to take average min/max over probes?
+  if max_eigval is None:
+      max_eigval = jnp.max(nodes_all_samples)
+
+  grid = jnp.linspace(min_eigval, max_eigval, num_points_grid) # (num_points_grid)
+  spectral_density = jnp.zeros_like(grid) # (num_points_grid)
+
+  # Rescaling. Suggested in https://github.com/google/spectral-density/blob/master/jax/density.py#L81
+  if sigma is None:
+    sigma = 10 ** -5 * max(1, (max_eigval - min_eigval))
+  else:
+    sigma = sigma**2 * max(1, (max_eigval - min_eigval))
+
+  # Gaussian convolution
+  norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
+
+  for nodes_m, weights_m in zip(nodes_all_samples, weights_all_samples):
+      spectral_density = spectral_density + weights_m * norm_const * jnp.exp(
+          -0.5 * ((grid - nodes_m) / sigma) ** 2
+      )
+
+  num_probes_k = nodes_all_samples.shape[0]
+  # Divide by number of probes (since the values were just added before)
+  spectral_density /= num_probes_k
+  # Normalize
+  dx = grid[1] - grid[0]
+  spectral_density /= (dx * jnp.sum(spectral_density))
+  return grid, spectral_density
+
+def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray):
+  
+  norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
+  f_t = norm_const * jnp.exp(-(t - nodes) ** 2 / (2 * sigma**2)) # (lanczos_steps_m)
+  return sum(weights * f_t) # phi_k_t
