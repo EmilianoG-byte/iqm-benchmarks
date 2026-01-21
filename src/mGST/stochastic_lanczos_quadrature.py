@@ -127,6 +127,7 @@ def slq_spectral_density(
     min_eigval: float | None = None,
     max_eigval: float | None = None,
     reorth: bool = True,
+    normalize_spectral_density: bool = True,
 ):
     """
     Stochastic Lanczos Quadrature for spectral density estimation.
@@ -145,6 +146,8 @@ def slq_spectral_density(
         min_eigval: minimum eigenvalue for the grid (if None, determined from data)
         max_eigval: maximum eigenvalue for the grid (if None, determined from data)
         reorth: whether to use reorthogonalization in Lanczos steps
+        normalize_spectral_density: Whether to normalize the spectral density to integrate over all grid to be 1.
+          Namely:  \int rho(x) dx = 1
 
     Returns:
         grid: eigenvalue grid
@@ -177,9 +180,10 @@ def slq_spectral_density(
       sigma=sigma,
       min_eigval=min_eigval,
       max_eigval=max_eigval,
+      normalize=normalize_spectral_density,
     )
   
-def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None,)->tuple[jnp.ndarray, jnp.ndarray, float]:
+def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None, normalize:bool=True)->tuple[jnp.ndarray, jnp.ndarray, float]:
   """Generate the smoothened spectral density convoluted with a Gaussian function using the nodes and weights from the Gaussian Quadrature using Lanczos.
 
   Args:
@@ -223,8 +227,9 @@ def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, wei
   spectral_density /= num_probes_k
 
   # Normalize to integrate up to 1 \int rho(x) dx = 1
-  dx = grid[1] - grid[0]
-  spectral_density /= (dx * jnp.sum(spectral_density))
+  if normalize:
+    dx = grid[1] - grid[0]
+    spectral_density /= (dx * jnp.sum(spectral_density))
   return grid, spectral_density, sigma
 
 def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray)->float:
