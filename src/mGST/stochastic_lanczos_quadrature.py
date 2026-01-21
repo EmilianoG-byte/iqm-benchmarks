@@ -40,8 +40,8 @@ def lanczos_from_vector(
         betas:  shape (m-1,)
     """
 
-    q = v0
-    q_prev = jnp.zeros_like(q)
+    q = v0 # (dim, )
+    q_prev = jnp.zeros_like(q) # (dim, )
 
     alphas = []
     betas = []
@@ -52,31 +52,34 @@ def lanczos_from_vector(
     beta = 0.0
 
     for k in range(order_m):
-      print(f"Lanczos step {k+1}/{order_m}")
-      w = hvp(q)
-      alpha = jnp.real(jnp.vdot(q, w))
+      # print(f"Lanczos step {k+1}/{order_m}")
+      w = hvp(q) # (dim, )
+      alpha = jnp.real(jnp.vdot(q, w)) # (1,)
       alphas.append(alpha)
 
-      r = w - alpha * q
+      r = w - alpha * q # (dim,)
       if k > 0:
-          r = r - beta * q_prev
+          r = r - beta * q_prev # (dim,)
 
       if reorth:
           for qi in lanczos_vectors:
-              r = r - jnp.vdot(qi, r) * qi
+              r = r - jnp.vdot(qi, r) * qi # (dim,)
 
-      beta = jnp.linalg.norm(r)
+      beta = jnp.linalg.norm(r) # (1,)
+      
+      if beta <= 1e-6:
+        raise ValueError("Beta < 1e-6 was found. This means the lanczos vectors are linearly dependent.")
 
       if k < order_m - 1:
           betas.append(beta)
-          q_prev = q
-          q = r / beta
+          q_prev = q # (dim,)
+          q = r / beta # (dim,)
           if reorth:
               lanczos_vectors.append(q)
 
-    alphas = jnp.array(alphas)
-    betas = jnp.array(betas)
-    if alphas.shape != betas.shape != (order_m, ):
+    alphas = jnp.array(alphas) # (order_m,)
+    betas = jnp.array(betas) # (order_m - 1,)
+    if len(alphas) != len(betas) + 1 != order_m:
       raise ValueError(f"Wrong shape for alphas and/or betas. Expected: ({order_m},). Got: {alphas.shape} and {betas.shape}")
     
     return alphas, betas
@@ -129,8 +132,11 @@ def slq_spectral_density(
     Stochastic Lanczos Quadrature for spectral density estimation.
 
     Args:
-        hvp: function that computes Hessian-vector product
-        n: dimension of the Hessian
+        hvp: function that computes Hessian-vector product. It is expected to receive a vector of dimension
+          (dim,) and also output a vector of dimension (dim,). Namely: hvp: v -> w : C^dim -> C^dim.
+        dim: This determines the dimension of the random vector to use as probe.
+          In theory this is also the dimension of the Hessian (dim x dim), but since we are using wirtinger 
+          formalis, we actually have a hessian of (2dim x 2dim) and the input vector for the hvp becomes (z, z*). 
         key: jax PRNG key
         num_probes_k: number of random probe vectors
         lanczos_order_m: number of Lanczos steps per probe
@@ -150,7 +156,7 @@ def slq_spectral_density(
     for i in range(num_probes_k):
       print(f"SLQ probe {i+1}/{num_probes_k}")
       key, subkey = random.split(key)
-      v0 = complex_normalized_vector(subkey, dim)
+      v0 = complex_normalized_vector(subkey, dim) # (dim,)
 
       alphas, betas = lanczos_from_vector(
           hvp, v0, lanczos_order_m, reorth=reorth
@@ -173,7 +179,22 @@ def slq_spectral_density(
       max_eigval=max_eigval,
     )
   
-def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None,)->tuple[jnp.ndarray, jnp.ndarray]:
+def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None,)->tuple[jnp.ndarray, jnp.ndarray, float]:
+  """Generate the smoothened spectral density convoluted with a Gaussian function using the nodes and weights from the Gaussian Quadrature using Lanczos.
+
+  Args:
+      nodes_all_samples: _description_
+      weights_all_samples: _description_
+      num_points_grid: _description_
+      sigma: _description_. Defaults to 1e-2.
+      min_eigval: _description_. Defaults to None.
+      max_eigval: _description_. Defaults to None.
+
+  Returns:
+      The grid used to evaluate the spectral density. These are the t's in the f(t) formula.
+      The spectral density evaluated at every t in the grid.
+      The actual sigma used in the Gaussian formula.
+  """
   # Determine spectral window
   if min_eigval is None:
       min_eigval = jnp.min(nodes_all_samples) # do we need to take average min/max over probes?
@@ -188,25 +209,57 @@ def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, wei
     sigma = 10 ** -5 * max(1, (max_eigval - min_eigval))
   else:
     sigma = sigma**2 * max(1, (max_eigval - min_eigval))
-
+  
   # Gaussian convolution
   norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
 
   for nodes_m, weights_m in zip(nodes_all_samples, weights_all_samples):
-      spectral_density = spectral_density + weights_m * norm_const * jnp.exp(
-          -0.5 * ((grid - nodes_m) / sigma) ** 2
-      )
+    spectral_density = spectral_density + weights_m * norm_const * jnp.exp(
+        -0.5 * ((grid - nodes_m) / sigma) ** 2
+    )
 
   num_probes_k = nodes_all_samples.shape[0]
   # Divide by number of probes (since the values were just added before)
   spectral_density /= num_probes_k
-  # Normalize
+
+  # Normalize to integrate up to 1 \int rho(x) dx = 1
   dx = grid[1] - grid[0]
   spectral_density /= (dx * jnp.sum(spectral_density))
-  return grid, spectral_density
+  return grid, spectral_density, sigma
 
-def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray):
-  
+def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray)->float:
+  """Compute the spectral density convoluted a Gaussian function for a single probe vector and single point t.
+
+  Args:
+      t: Point in the grid where to compute the spectral density / f(t)
+      sigma: Square root of variance in Gaussian model
+      nodes: All (lanczos_steps_m,) eigenvalues where to compute the spectral density / Gaussian convolution on.
+      weights All (lanczos_steps_m,) weights where to compute the spectral density / Gaussian convolution on.
+
+  Returns:
+      Phi_k_t: the estimation for a single probe vector of the spectral density convoluted with Gaussian around a point t.
+  """
   norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
-  f_t = norm_const * jnp.exp(-(t - nodes) ** 2 / (2 * sigma**2)) # (lanczos_steps_m)
-  return sum(weights * f_t) # phi_k_t
+  f_t = norm_const * jnp.exp(-(t - nodes) ** 2 / (2 * sigma**2)) # (lanczos_steps_m, )
+  return jnp.sum(weights * f_t) # phi_k_t
+
+def exact_gaussian_spectral_density(
+    eigenvals: jnp.ndarray,
+    grid_xs: jnp.ndarray,
+    sigma: float
+):
+    """
+    Exact Gaussian-smoothed spectral density from full eigenvalues.
+    
+    Args:
+      eigenvals: The exact eigenvalues from the Hermitian operator
+      grid_xs: The values of t where to evaluate the spectral density.
+    """
+    dim = eigenvals.shape[0]
+    norm = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
+
+    diffs = grid_xs[None, :] - eigenvals[:, None]   # (dim, num_points_grid)
+    rho = norm * jnp.exp(-0.5 * (diffs / sigma) ** 2) # (dim, num_points_grid)
+    rho = jnp.sum(rho, axis=0) / dim # (num_points_grid)
+
+    return rho
