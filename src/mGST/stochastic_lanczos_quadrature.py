@@ -128,6 +128,7 @@ def slq_spectral_density(
     max_eigval: float | None = None,
     reorth: bool = True,
     normalize_spectral_density: bool = True,
+    verbose: bool = True,
 ):
     """
     Stochastic Lanczos Quadrature for spectral density estimation.
@@ -153,29 +154,11 @@ def slq_spectral_density(
         grid: eigenvalue grid
         spectral_density: estimated density
     """
-    nodes_all_samples = []
-    weights_all_samples = []
-
-    for i in range(num_probes_k):
-      print(f"SLQ probe {i+1}/{num_probes_k}")
-      key, subkey = random.split(key)
-      v0 = complex_normalized_vector(subkey, dim) # (dim,)
-
-      alphas, betas = lanczos_from_vector(
-          hvp, v0, lanczos_order_m, reorth=reorth
-      )
-
-      nodes, weights = nodes_and_weights_from_lanczos(alphas=alphas, betas=betas) # (lanczos_steps_m, ), (lanczos_steps_m, )
-      
-      nodes_all_samples.append(nodes)
-      weights_all_samples.append(weights)
-
-    nodes_all_samples = jnp.concatenate(nodes_all_samples) # (num_probes_k, lanczos_steps_m)
-    weights_all_samples = jnp.concatenate(weights_all_samples) # (num_probes_k, lanczos_steps_m)
+    nodes_all_probes, weights_all_probes = generate_nodes_and_weights_for_all_probes(hvp=hvp, dim=dim, key=key, num_probes_k=num_probes_k, lanczos_order_m=lanczos_order_m, reorth=reorth, verbose=verbose)
     
     return smoothened_density_from_nodes_and_weights(
-      nodes_all_samples=nodes_all_samples,
-      weights_all_samples=weights_all_samples,
+      nodes_all_probes=nodes_all_probes,
+      weights_all_probes=weights_all_probes,
       num_points_grid=num_points_grid,
       sigma=sigma,
       min_eigval=min_eigval,
@@ -183,12 +166,104 @@ def slq_spectral_density(
       normalize=normalize_spectral_density,
     )
   
-def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, weights_all_samples:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None, normalize:bool=True)->tuple[jnp.ndarray, jnp.ndarray, float]:
+  
+def slq_rank(
+  hvp: Callable[[jnp.ndarray], jnp.ndarray],
+  dim: int,
+  key: jax.Array,
+  eps: float,
+  num_probes_k: int = 20,
+  lanczos_order_m: int = 80,
+  reorth: bool = True,
+  verbose: bool = True,
+  use_nullity: bool = True,
+):
+  
+  nodes_all_probes, weights_all_probes = generate_nodes_and_weights_for_all_probes(hvp=hvp, dim=dim, key=key, num_probes_k=num_probes_k, lanczos_order_m=lanczos_order_m, reorth=reorth, verbose=verbose)
+  
+  if use_nullity:
+    nullity_mean, nullity_std, mean_frac, std_frac = nullity_from_ritz(nodes_all_probes=nodes_all_probes, weights_all_probes=weights_all_probes, eps=eps, dim=dim)
+    
+    rank_mean = dim - nullity_mean
+    rank_std = nullity_std
+  
+  else:
+    rank_mean, rank_std, mean_frac, std_frac = rank_from_ritz(nodes_all_probes=nodes_all_probes, weights_all_probes=weights_all_probes, eps=eps, dim=dim)
+    
+    nullity_mean = dim - rank_mean
+    nullity_std = rank_std
+  
+  return {
+    "rank": (rank_mean, rank_std),
+    "nullity": (nullity_mean, nullity_std)
+  }
+  
+def nullity_from_ritz(nodes_all_probes:jnp.ndarray, weights_all_probes:jnp.ndarray, eps: float, dim: int):
+  per_probe_fractions = []
+  for nodes, weights in zip(nodes_all_probes, weights_all_probes):
+    # Determine the nodes (eigvals) that are within eps of zero: |λi| <= ε
+    mask = (nodes >= -eps) & (nodes <= eps)
+    # sum the weights for these nodes: ∑ω
+    per_probe_fractions.append(jnp.sum(weights[mask]))
+  per_probe_fractions = jnp.stack(per_probe_fractions)
+  # Compute the mean and standard deviation across all probes
+  mean_frac = jnp.mean(per_probe_fractions)
+  std_frac  = jnp.std(per_probe_fractions)
+  nullity_mean = dim * mean_frac
+  nullity_std  = dim * std_frac
+  return nullity_mean, nullity_std, mean_frac, std_frac
+
+def rank_from_ritz(nodes_all_probes:jnp.ndarray, weights_all_probes:jnp.ndarray, eps: float, dim: int):
+  per_probe_fractions = []
+  for nodes, weights in zip(nodes_all_probes, weights_all_probes):
+    # Determine the nodes (eigvals) that are within eps of zero: |λi| <= ε
+    mask = jnp.abs(nodes) >= eps
+    # sum the weights for these nodes: ∑ω
+    per_probe_fractions.append(jnp.sum(weights[mask]))
+  per_probe_fractions = jnp.stack(per_probe_fractions)
+  # Compute the mean and standard deviation across all probes
+  mean_frac = jnp.mean(per_probe_fractions)
+  std_frac  = jnp.std(per_probe_fractions)
+  rank_mean = dim * mean_frac
+  rank_std  = dim * std_frac
+  return rank_mean, rank_std, mean_frac, std_frac
+
+def generate_nodes_and_weights_for_all_probes(
+  hvp: Callable[[jnp.ndarray], jnp.ndarray],
+  dim: int,
+  key: jax.Array,
+  num_probes_k: int = 20,
+  lanczos_order_m: int = 80,
+  reorth: bool = True,
+  verbose: bool = True
+  ):
+  
+  nodes_all_samples = []
+  weights_all_samples = []
+
+  for i in range(num_probes_k):
+    if verbose:
+      print(f"SLQ probe {i+1}/{num_probes_k}")
+    key, subkey = random.split(key)
+    v0 = complex_normalized_vector(subkey, dim) # (dim,)
+
+    alphas, betas = lanczos_from_vector(
+        hvp, v0, lanczos_order_m, reorth=reorth
+    )
+
+    nodes, weights = nodes_and_weights_from_lanczos(alphas=alphas, betas=betas) # (lanczos_steps_m, ), (lanczos_steps_m, )
+    
+    nodes_all_samples.append(nodes)
+    weights_all_samples.append(weights)
+    
+  return jnp.array(nodes_all_samples), jnp.array(weights_all_samples) # (num_probes_k, lanczos_steps_m)
+  
+def smoothened_density_from_nodes_and_weights(nodes_all_probes:jnp.ndarray, weights_all_probes:jnp.ndarray, num_points_grid:int, sigma: float = 1e-2, min_eigval: float | None = None, max_eigval: float | None = None, normalize:bool=True)->tuple[jnp.ndarray, jnp.ndarray, float]:
   """Generate the smoothened spectral density convoluted with a Gaussian function using the nodes and weights from the Gaussian Quadrature using Lanczos.
 
   Args:
-      nodes_all_samples: _description_
-      weights_all_samples: _description_
+      nodes_all_probes: (num_probes_k, lanczos_steps_m)
+      weights_all_probes: (num_probes_k, lanczos_steps_m)
       num_points_grid: _description_
       sigma: _description_. Defaults to 1e-2.
       min_eigval: _description_. Defaults to None.
@@ -201,9 +276,9 @@ def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, wei
   """
   # Determine spectral window
   if min_eigval is None:
-      min_eigval = jnp.min(nodes_all_samples) # do we need to take average min/max over probes?
+      min_eigval = jnp.min(nodes_all_probes) # do we need to take average min/max over probes?
   if max_eigval is None:
-      max_eigval = jnp.max(nodes_all_samples)
+      max_eigval = jnp.max(nodes_all_probes)
 
   grid = jnp.linspace(min_eigval, max_eigval, num_points_grid) # (num_points_grid)
   spectral_density = jnp.zeros_like(grid) # (num_points_grid)
@@ -214,15 +289,21 @@ def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, wei
   else:
     sigma = sigma**2 * max(1, (max_eigval - min_eigval))
   
+  print(f"σ used: {sigma:.2e}")
   # Gaussian convolution
   norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
 
-  for nodes_m, weights_m in zip(nodes_all_samples, weights_all_samples):
+  # Put all the nodes and weights in a single 1D array. Is this correct?
+  nodes_all_probes = jnp.concatenate(nodes_all_probes) # (num_probes_k x lanczos_steps_m)
+  weights_all_probes = jnp.concatenate(weights_all_probes) # (num_probes_k x lanczos_steps_m)
+  
+  for nodes_m, weights_m in zip(nodes_all_probes, weights_all_probes):
     spectral_density = spectral_density + weights_m * norm_const * jnp.exp(
         -0.5 * ((grid - nodes_m) / sigma) ** 2
     )
 
-  num_probes_k = nodes_all_samples.shape[0]
+  # Is this needed based on how we are doing the computations?
+  num_probes_k = nodes_all_probes.shape[0]
   # Divide by number of probes (since the values were just added before)
   spectral_density /= num_probes_k
 
@@ -231,6 +312,20 @@ def smoothened_density_from_nodes_and_weights(nodes_all_samples:jnp.ndarray, wei
     dx = grid[1] - grid[0]
     spectral_density /= (dx * jnp.sum(spectral_density))
   return grid, spectral_density, sigma
+
+def nullity_from_density(grid: jnp.ndarray, spectral_density: jnp.ndarray, eps: float, dim: int)->tuple[float, float]:
+    dx = grid[1] - grid[0]
+    mask = (grid >= -eps) & (grid <= eps)
+    null_frac = jnp.sum(spectral_density[mask]) * dx   # fraction of eigenvalues inside [-eps,eps]
+    nullity_est = dim * null_frac
+    return nullity_est, null_frac
+
+def rank_from_density(grid: jnp.ndarray, spectral_density: jnp.ndarray, eps: float, dim: int)->tuple[float, float]:
+    nullity, _ = nullity_from_density(grid=grid, spectral_density=spectral_density, eps=eps, dim=dim)
+    return dim - nullity, nullity
+
+def compute_spectral_resolution(min_eigval:float, max_eigval:float, lanczos_num_steps:int)->float:
+    return (max_eigval - min_eigval)/lanczos_num_steps
 
 def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray)->float:
   """Compute the spectral density convoluted a Gaussian function for a single probe vector and single point t.
