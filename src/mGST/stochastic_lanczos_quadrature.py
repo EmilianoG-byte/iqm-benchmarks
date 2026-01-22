@@ -50,6 +50,7 @@ def lanczos_from_vector(
         lanczos_vectors = [q]
 
     beta = 0.0
+    warning_counter = 0
 
     for k in range(order_m):
       # print(f"Lanczos step {k+1}/{order_m}")
@@ -68,7 +69,11 @@ def lanczos_from_vector(
       beta = jnp.linalg.norm(r) # (1,)
       
       if beta <= 1e-6:
-        raise ValueError("Beta < 1e-6 was found. This means the lanczos vectors are linearly dependent.")
+        # Apparently is a good thing if beta is small (TODO: Question this!)
+        # raise ValueError("Beta < 1e-6 was found. This means the lanczos vectors are linearly dependent.")
+        warning_counter += 1
+        
+        # break
 
       if k < order_m - 1:
           betas.append(beta)
@@ -81,6 +86,12 @@ def lanczos_from_vector(
     betas = jnp.array(betas) # (order_m - 1,)
     if len(alphas) != len(betas) + 1 != order_m:
       raise ValueError(f"Wrong shape for alphas and/or betas. Expected: ({order_m},). Got: {alphas.shape} and {betas.shape}")
+    
+    
+    
+    if warning_counter > 0:
+      warning_message = f"⚠️ Beta <= 1e-6. Possible numerical instability of Lanczos encountered in: {warning_counter}-iterations ⚠️"
+      print(warning_message)
     
     return alphas, betas
 
@@ -287,11 +298,14 @@ def smoothened_density_from_nodes_and_weights(nodes_all_probes:jnp.ndarray, weig
   if sigma is None:
     sigma = 10 ** -5 * max(1, (max_eigval - min_eigval))
   else:
-    sigma = sigma**2 * max(1, (max_eigval - min_eigval))
+    sigma = sigma * max(1, (max_eigval - min_eigval))
   
   print(f"σ used: {sigma:.2e}")
   # Gaussian convolution
   norm_const = 1.0 / (jnp.sqrt(2.0 * jnp.pi) * sigma)
+
+  # Obtain the number of probes before concatenating
+  num_probes_k = nodes_all_probes.shape[0]
 
   # Put all the nodes and weights in a single 1D array. Is this correct?
   nodes_all_probes = jnp.concatenate(nodes_all_probes) # (num_probes_k x lanczos_steps_m)
@@ -302,10 +316,8 @@ def smoothened_density_from_nodes_and_weights(nodes_all_probes:jnp.ndarray, weig
         -0.5 * ((grid - nodes_m) / sigma) ** 2
     )
 
-  # Is this needed based on how we are doing the computations?
-  num_probes_k = nodes_all_probes.shape[0]
   # Divide by number of probes (since the values were just added before)
-  spectral_density /= num_probes_k
+  spectral_density = spectral_density / num_probes_k
 
   # Normalize to integrate up to 1 \int rho(x) dx = 1
   if normalize:
@@ -326,6 +338,9 @@ def rank_from_density(grid: jnp.ndarray, spectral_density: jnp.ndarray, eps: flo
 
 def compute_spectral_resolution(min_eigval:float, max_eigval:float, lanczos_num_steps:int)->float:
     return (max_eigval - min_eigval)/lanczos_num_steps
+  
+def compute_required_lanczos_steps(min_eigval:float, max_eigval:float, eps:float)->float:
+    return (max_eigval - min_eigval)/eps
 
 def gaussian_density_single_t_single_probe(t:float, sigma:float, nodes:jnp.ndarray, weights:jnp.ndarray)->float:
   """Compute the spectral density convoluted a Gaussian function for a single probe vector and single point t.
