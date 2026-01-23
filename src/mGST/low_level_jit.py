@@ -543,7 +543,6 @@ def cost_function_jax(kraus_contracted, povm_matrix, state_vector, indices_list,
     cost_value = 0
     num_gate_sequences = len(indices_list)
     num_povm = povm_matrix.shape[0]
-    dim = int(jnp.sqrt(kraus_contracted.shape[-1]))
         
     for idx, gates_indices in enumerate(indices_list):
         

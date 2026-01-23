@@ -1,4 +1,5 @@
 # Needs iqm-benchmarks from the github repo to access all the mGST functions: https://github.com/iqm-finland/iqm-benchmarks
+from cvxpy import PSD
 from mGST import additional_fns
 from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, CompressiveGST
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
@@ -201,6 +202,10 @@ def create_2q_emerald_gst_config():
     return Q2_GST_EMERALD
 
 def get_x_from_k(k, depth=None, dim_squared=None):
+    """Get the superoperator representation from the Kraus operators.
+    
+    DEPRECATED: use kraus_tensor_to_mgst instead.
+    """
     if not depth or not dim_squared:
         depth = k.shape[0]
         dim_squared = k.shape[-1]**2
@@ -239,6 +244,62 @@ def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus
     # KRAUS
     kraus_tensor = get_kraus_psd_from_mgst(kraus_mgst, kraus_rank)
     return kraus_tensor, povm_psd, state_psd
+
+def povm_psd_to_mgst(povm_psd:jnp.ndarray)->jnp.ndarray:
+    """Convert the POVM from its PSD representation to the MGST representation.
+    
+    Args:
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+    Returns:
+        povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+    """
+    num_povm, rank_povm, dim_in = povm_psd.shape
+    return (povm_psd.conj().transpose(0, 2, 1) @ povm_psd).reshape(num_povm, dim_in**2) # (num_povm, dim_out, dim_out*)
+
+def state_psd_to_mgst(state_psd:jnp.ndarray)->jnp.ndarray:
+    """Convert the State from its PSD representation to the MGST representation.
+    
+    Args:
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+    Returns:
+        state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
+    """
+    return (state_psd @ state_psd.conj().T).reshape(-1) # (dim_in * dim_in*)
+
+def kraus_tensor_to_mgst(kraus_tensor:jnp.ndarray)->jnp.ndarray:
+    """Convert the Kraus operators from their PSD representation to the MGST representation.
+    
+    Args:
+        kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+    Returns:
+        kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+    """
+    num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape
+    return jnp.einsum("ijkl,ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_in**2, dim_in**2))
+
+def get_mgst_tensors_from_psd_representation(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray)->tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Get the MGST representation of the operators from their PSD representation.
+    
+    Args:
+        kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+    Returns:
+        A tuple containing the MGST representation of the Kraus, POVM, and State.
+            * kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+            * povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+            * state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)    
+    """
+    # POVM
+    povm_mgst = povm_psd_to_mgst(povm_psd) # (num_povm, dim_out, dim_out*)
+    
+    # Kraus
+    kraus_superop_mgst = kraus_tensor_to_mgst(kraus_tensor) # (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+
+    # State
+    state_vect_mgst = state_psd_to_mgst(state_psd) # (dim_in * dim_in*)
+
+    return {"kraus": np.array(kraus_superop_mgst), "povm": np.array(povm_mgst), "state": np.array(state_vect_mgst)}
 
 def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
     """ 
@@ -1356,3 +1417,99 @@ def compute_euclidean_derivatives_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.
     dK_, dM10, dM11 = dK_dMdM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
     dd, dconjd = ddM(X=kraus_mgst, K=kraus_tensor, E=povm_mgst, rho=state_mgst, J=indices_list, y=prob_matrix, d=num_gates, r=dim_sqrd, rK=kraus_rank)
     return {"dK_": dK_, "dM10": dM10, "dM11": dM11, "dd": dd, "dconjd": dconjd}
+
+from mGST.additional_fns import transp
+
+def compute_riemannian_hessian_kraus(kraus_tensor_mgst:jnp.ndarray, povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->tuple[jnp.ndarray, dict]:
+    """ Compute the Riemannian Hessian tensor for the Kraus operators under the canonical metric.
+    
+    Args:
+        kraus_tensor_mgst: Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
+        povm_mgst: POVM tensor of shape (num_povm, dim^2).
+        state_mgst: State tensor of shape (dim^2).
+        indices_list: List of indices corresponding to gate sequences.
+        prob_matrix: Probability matrix of shape (num_povm, num_gate_sequences).
+    Returns:
+        * Riemannian Hessian tensor of shape (2, num_gates, vect_dim, 2, num_gates, vect_dim) where vect_dim = kraus_rank * dim_out * dim_in.
+        * Dictionary containing Euclidean derivatives used in the computation.
+    """
+    # Euclidean derivatives
+    print("Computing 1st and 2nd order Euclidean derivatives ⏳")
+    derivatives_kraus = compute_euclidean_derivatives_kraus(
+        kraus_tensor=kraus_tensor_mgst,
+        povm_mgst=povm_mgst,
+        state_mgst=state_mgst,
+        indices_list=indices_list,
+        prob_matrix=prob_matrix,
+    )
+    
+    print("Computing Riemannian Hessian ⏳")
+    dM11 = derivatives_kraus['dM11']
+    dM10 = derivatives_kraus['dM10']
+    dd = derivatives_kraus['dd']
+    dconjd = derivatives_kraus['dconjd']
+    dK_ = derivatives_kraus['dK_']
+    
+    num_gates, kraus_rank, dim, dim =  kraus_tensor_mgst.shape
+    n = kraus_rank * dim
+    p = dim
+    vect_dim = n * p
+
+    # Reshaping second derivatives
+    Fyconjy = dM11.reshape(num_gates, vect_dim, num_gates, vect_dim) + np.einsum("ijklmnop->ikmojlnp", dconjd).reshape((num_gates, vect_dim, num_gates, vect_dim))
+    Fyy = dM10.reshape(num_gates, vect_dim, num_gates, vect_dim) + np.einsum("ijklmnop->ikmojlnp", dd).reshape((num_gates, vect_dim, num_gates, vect_dim))
+    
+    rhessian_kraus_mgst = np.zeros((2, num_gates, vect_dim, 2, num_gates, vect_dim)).astype(np.complex128)
+    G = np.zeros((2, num_gates, vect_dim)).astype(np.complex128)
+
+    for k in range(num_gates):
+    # Reshaping into isometry
+        Fy = dK_[k].reshape((n, dim))
+        Y = kraus_tensor_mgst[k].reshape((n, dim))
+        # riemannian gradient under canonical metric
+        rGrad = Fy.conj() - Y @ Fy.T @ Y
+
+        # saving rgrad for gate k as a vector
+        G[0, k, :] = rGrad.reshape(-1)
+        # saving (rgrad)* for gate k as a vector
+        G[1, k, :] = rGrad.conj().reshape(-1)
+
+        # projector onto orthogonal complement of stiefel manifold. I = X X^dag + X_perp X_perp^dag
+        P = np.eye(n) - Y @ Y.T.conj()
+        # transpose superoperator
+        T = transp(n, dim)
+        # Hessian assembly
+        # See theorem 1, equation A27
+        # This is already the riemannian hessian elements
+        H00 = (
+            -(np.kron(Y, Y.T)) @ T @ Fyy[k, :, k, :].T
+            + Fyconjy[k, :, k, :].T.conj()
+            - (np.kron(np.eye(n), Y.T @ Fy)) / 2
+            - (np.kron(Y @ Fy.T, np.eye(dim))) / 2
+            - (np.kron(P, Fy.T.conj() @ Y.conj())) / 2
+        )
+        H01 = (
+            Fyy[k, :, k, :].T.conj()
+            - np.kron(Y, Y.T) @ T @ Fyconjy[k, :, k, :].T
+            + (np.kron(Fy.conj(), Y.T) @ T) / 2
+            + (np.kron(Y, Fy.T.conj()) @ T) / 2
+        )
+
+        # Full hessian on Z and Z*
+        # See relation in equation A37 of individual hessian submatrices
+        # Riemannian Hessian with correction terms
+        rhessian_kraus_mgst[0, k, :, 0, k, :] = H00
+        rhessian_kraus_mgst[0, k, :, 1, k, :] = H01 
+        rhessian_kraus_mgst[1, k, :, 0, k, :] = H01.conj()
+        rhessian_kraus_mgst[1, k, :, 1, k, :] = H00.conj()
+        
+        # These are the cross terms of the Hessian between different gates.
+        for k2 in range(num_gates):
+            if k2 != k:
+                Yk2 = kraus_tensor_mgst[k2].reshape(n, p)
+                rhessian_kraus_mgst[0, k2, :, 0, k, :] = Fyconjy[k, :, k2, :].T.conj() - np.kron(Yk2, Yk2.T) @ T @ Fyy[k, :, k2, :].T
+                rhessian_kraus_mgst[0, k2, :, 1, k, :] = Fyy[k, :, k2, :].T.conj() - np.kron(Yk2, Yk2.T) @ T @ Fyconjy[k, :, k2, :].T
+                rhessian_kraus_mgst[1, k2, :, 0, k, :] = rhessian_kraus_mgst[0, k2, :, 1, k, :].conj()
+                rhessian_kraus_mgst[1, k2, :, 1, k, :] = rhessian_kraus_mgst[0, k2, :, 0, k, :].conj()
+                
+    return rhessian_kraus_mgst, derivatives_kraus
