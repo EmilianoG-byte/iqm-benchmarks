@@ -5,6 +5,7 @@ SLQ method for approximating the spectral density of the Riemannian Hessian.
 import jax.numpy as jnp
 from jax import random
 import jax
+from scipy.linalg import sqrtm
 
 jax.config.update("jax_enable_x64", True)
 
@@ -72,7 +73,7 @@ def lanczos_from_vector(
         # Apparently is a good thing if beta is small (TODO: Question this!)
         # raise ValueError("Beta < 1e-6 was found. This means the lanczos vectors are linearly dependent.")
         warning_counter += 1
-        
+        # warning_counter = k
         # break
 
       if k < order_m - 1:
@@ -189,7 +190,23 @@ def slq_rank(
   verbose: bool = True,
   use_nullity: bool = True,
 ):
+  """Compute the rank estimation using SLQ directly using an indicator function on the nodes (eigenvalues).
   
+  Namely, we use $\frac{1}{k}\sum_{i=1}^{k} \sum_{j=1}^m w_{i,j} f(\lambda_{i,j})$. Where f is the indicator function that is 1 if |λ| >= eps and 0 otherwise for rank estimation.
+  
+  Args:
+    hvp: function that computes Hessian-vector product
+    dim: dimension of the operator (Hessian)
+    key: jax PRNG key
+    eps: threshold for determining nullity/rank
+    num_probes_k: number of random probe vectors
+    lanczos_order_m: number of Lanczos steps per probe
+    reorth: whether to use reorthogonalization in Lanczos steps
+    verbose: whether to print progress
+    use_nullity: whether to compute nullity first and then get rank as dim - nullity
+  Returns:
+    A dictionary with the estimated rank and nullity means and standard deviations.
+  """
   nodes_all_probes, weights_all_probes = generate_nodes_and_weights_for_all_probes(hvp=hvp, dim=dim, key=key, num_probes_k=num_probes_k, lanczos_order_m=lanczos_order_m, reorth=reorth, verbose=verbose)
   
   if use_nullity:
@@ -225,6 +242,19 @@ def nullity_from_ritz(nodes_all_probes:jnp.ndarray, weights_all_probes:jnp.ndarr
   return nullity_mean, nullity_std, mean_frac, std_frac
 
 def rank_from_ritz(nodes_all_probes:jnp.ndarray, weights_all_probes:jnp.ndarray, eps: float, dim: int):
+  """Get the rank estimation from the nodes and weights obtained from SLQ.
+  
+  Args:
+      nodes_all_probes: (num_probes_k, lanczos_steps_m)
+      weights_all_probes: (num_probes_k, lanczos_steps_m)
+      eps: threshold for determining nullity/rank
+      dim: dimension of the operator (Hessian)
+  Returns:
+      rank_mean: Estimated rank mean
+      rank_std: Estimated rank standard deviation
+      mean_frac: Mean fraction of eigenvalues above eps
+      std_frac: Standard deviation of fraction of eigenvalues above eps
+  """
   per_probe_fractions = []
   for nodes, weights in zip(nodes_all_probes, weights_all_probes):
     # Determine the nodes (eigvals) that are within eps of zero: |λi| <= ε
@@ -378,3 +408,58 @@ def exact_gaussian_spectral_density(
     rho = jnp.sum(rho, axis=0) / dim # (num_points_grid)
 
     return rho
+  
+def get_metric_lambda(x, alpha0, alpha1):
+  """Get the lambda matrix corresponding to the action of the riemannian metric"""
+  n, _ = x.shape
+  Id = jnp.eye(n)
+  lambd_matrix = alpha0 * (Id - x @ x.conj().T) + alpha1 * x @ x.conj().T
+  return lambd_matrix
+
+def get_gx_matrix(x, alpha0, alpha1, prefactor=1/2):
+  """Get the matrix representation of the riemannian metric on the vectorized space with wirtinger formalism."""
+  _, p = x.shape
+  lambd_matrix = get_metric_lambda(x, alpha0, alpha1)
+  Id_vect = jnp.eye(p) # this is the identity acting on the vectorized leg of the input vector
+  G00 = jnp.kron(lambd_matrix, Id_vect)
+  G11 = jnp.kron(lambd_matrix.conj(), Id_vect)
+  zero_mtrx = jnp.zeros_like(G00)
+  Gx = prefactor * jnp.block([[G00, zero_mtrx],
+                  [zero_mtrx, G11]])
+  return Gx
+
+# Construct the projection superoperator acting on Z and Z* (vectorized)
+from mGST.additional_fns import transp
+from jax.scipy.linalg import sqrtm
+
+def construct_tangent_space_projector_superop(x):
+  """Construct the tangent space projector superoperator in wirtinger formalism acting on vectorized Z and Z*."""
+  n_kraus, p_kraus = x.shape
+  vect_size = n_kraus * p_kraus
+  
+  trans_superop = transp(n_kraus, p_kraus)
+  Pt_00 = jnp.eye(vect_size) - jnp.kron(x @ x.T.conj(), jnp.eye(p_kraus)) / 2 # I ⊗ I - 0.5 (XX^†) ⊗ I
+  Pt_01 = -jnp.kron(x, x.T) @ trans_superop / 2 # -0.5 X ⊗ X^T * T
+  return jnp.block([[Pt_00, Pt_01],
+                  [Pt_01.conj(), Pt_00.conj()]])
+  
+def perform_similarity_transform_on_hessian(hessian:jnp.ndarray, x:jnp.ndarray, alpha0:float, alpha1:float)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+  """Perform the similarity transform on the Hessian using the metric Gx and its inverse.
+
+  Args:
+      hessian: The Hessian matrix in wirtinger formalism (2dim x 2dim)
+      x: The current point (n_kraus, p_kraus)
+      alpha0: Metric parameter alpha0
+      alpha1: Metric parameter alpha1
+  Returns:
+      A tuple containing the transformed Hessian matrix, the metric matrix Gx, and the projection operator Pt.
+  """
+  Gx = get_gx_matrix(x, alpha0, alpha1) # (2dim, 2dim)
+  Pt = construct_tangent_space_projector_superop(x) # (2dim, 2dim)
+  Gt = Pt @ Gx @ Pt # (2dim, 2dim)
+  Ht = Pt @ hessian @ Pt # (2dim, 2dim)
+  
+  Gt_half = sqrtm(Gt + 1e-8 * jnp.eye(Gt.shape[0]))
+  Gt_half_inv = jnp.linalg.inv(Gt_half)
+  hessian_similarity = Gt_half @ Ht @ Gt_half_inv.conj().T
+  return hessian_similarity, Gx, Pt

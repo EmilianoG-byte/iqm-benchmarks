@@ -1401,8 +1401,18 @@ def compute_euclidean_hessian_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.ndar
     H[n:, n:] = A11
     return H
 
-def compute_euclidean_derivatives_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray):
+def compute_euclidean_derivatives_kraus(kraus_tensor:jnp.ndarray, povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray)->dict:
+    """Compute the first and second order Euclidean derivatives for the Kraus operators.
     
+    Args:
+        kraus_tensor: Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in).
+        povm_mgst: POVM tensor of shape (num_povm, dim^2).
+        state_mgst: State tensor of shape (dim^2).
+        indices_list: List of indices corresponding to gate sequences.
+        prob_matrix: Probability matrix of shape (num_povm, num_gate_sequences).
+    Returns:
+        Dictionary containing first and second order Euclidean derivatives.
+    """
     # making sure we are using numpy for the hessian calculation
     kraus_tensor = np.array(kraus_tensor)
     povm_mgst = np.array(povm_mgst)
