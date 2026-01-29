@@ -386,7 +386,6 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         self.shots,
                         self.calset_id,
                         self.max_gates_per_batch,
-                        self.configuration.max_circuits_per_batch,
                     )
                 )
                 all_rb_jobs["interleaved"].append(
@@ -398,7 +397,6 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         self.shots,
                         self.calset_id,
                         self.max_gates_per_batch,
-                        self.configuration.max_circuits_per_batch,
                     )
                 )
                 qcvv_logger.info(f"Both jobs for sequence length {seq_length} submitted successfully!")
@@ -494,8 +492,6 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         backend,
                         self.calset_id,
                         max_gates_per_batch=self.max_gates_per_batch,
-                        max_circuits_per_batch=self.configuration.max_circuits_per_batch,
-                        circuit_compilation_options=self.circuit_compilation_options,
                     )
                 )
                 all_rb_jobs["interleaved"].extend(
@@ -506,8 +502,6 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         backend,
                         self.calset_id,
                         max_gates_per_batch=self.max_gates_per_batch,
-                        max_circuits_per_batch=self.configuration.max_circuits_per_batch,
-                        circuit_compilation_options=self.circuit_compilation_options,
                     )
                 )
                 qcvv_logger.info(

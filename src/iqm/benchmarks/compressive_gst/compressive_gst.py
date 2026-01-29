@@ -196,40 +196,21 @@ class CompressiveGST(Benchmark):
         self.generate_meas_circuits()
 
         # Submit all
-        if self.configuration.parallel_execution:
-            transpiled_circuit_dict = {
-                tuple(range(self.backend.num_qubits)): self.transpiled_circuits[str(self.qubit_layouts[0])].circuits
-            }
-            all_jobs_parallel, _ = submit_execute(
+        all_jobs: Dict = {}
+        for qubit_layout in self.qubit_layouts:
+            transpiled_circuit_dict = {tuple(qubit_layout): self.transpiled_circuits[str(qubit_layout)].circuits}
+            all_jobs[str(qubit_layout)], _ = submit_execute(
                 transpiled_circuit_dict,
                 backend,
                 self.configuration.shots,
                 self.calset_id,
                 max_gates_per_batch=self.configuration.max_gates_per_batch,
-                max_circuits_per_batch=self.configuration.max_circuits_per_batch,
-                circuit_compilation_options=self.circuit_compilation_options,
             )
-            # Retrieve
-            qcvv_logger.info(f"Now executing the corresponding circuit batch")
-            counts, _ = retrieve_all_counts(all_jobs_parallel)
-            dataset, _ = add_counts_to_dataset(counts, f"parallel_results", dataset)
-        else:
-            all_jobs: Dict = {}
-            for qubit_layout in self.qubit_layouts:
-                transpiled_circuit_dict = {tuple(qubit_layout): self.transpiled_circuits[str(qubit_layout)].circuits}
-                all_jobs[str(qubit_layout)], _ = submit_execute(
-                    transpiled_circuit_dict,
-                    backend,
-                    self.configuration.shots,
-                    self.calset_id,
-                    max_gates_per_batch=self.configuration.max_gates_per_batch,
-                    max_circuits_per_batch=self.configuration.max_circuits_per_batch,
-                )
-            # Retrieve all
-            qcvv_logger.info(f"Now executing the corresponding circuit batch")
-            for qubit_layout in self.qubit_layouts:
-                counts, _ = retrieve_all_counts(all_jobs[str(qubit_layout)])
-                dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
+        # Retrieve all
+        qcvv_logger.info(f"Now executing the corresponding circuit batch")
+        for qubit_layout in self.qubit_layouts:
+            counts, _ = retrieve_all_counts(all_jobs[str(qubit_layout)])
+            dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
 
         self.add_configuration_to_dataset(dataset)
         self.circuits.benchmark_circuits = [self.transpiled_circuits, self.untranspiled_circuits]
