@@ -460,7 +460,7 @@ def parse_gate_set(
         "3QXYCZ",
     ]:
         raise ValueError(
-            "No gate set of the specified name is implemented, please choose among "
+            f"No gate set of the specified name is implemented: {configuration.gate_set}, please choose among "
             "1QXYI, 2QXYICZ, 2QXYCZ_extended, 3QXYCZ."
         )
     if configuration.gate_set in ["1QXYI", "2QXYICZ", "2QXYCZ_extended", "3QXYCZ"]:
