@@ -7,6 +7,7 @@ __pycache__/
 *.png
 *.jpg
 *.jpeg
+*.pkl
 
 # Package files
 *.eggs/
@@ -31,7 +32,7 @@ version.txt
 
 /Outputs/
 /tests/Outputs/
-/examples/Outputs/*
+docs/examples/Outputs/*
 
 # Exceptions
 !logo.png

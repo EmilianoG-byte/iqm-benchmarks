@@ -15,39 +15,49 @@
 """
 General utility functions
 """
-
 from collections import defaultdict
 from functools import wraps
+import itertools
 from math import floor
+import os
+import random
 from time import time
-from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, Iterable, List, Literal, Optional, Sequence, Set, Tuple, Union, cast
+import warnings
 
 from more_itertools import chunked
 from mthree.utils import final_measurement_mapping
+import networkx as nx
 import numpy as np
+from numpy.random import Generator
 from qiskit import ClassicalRegister, transpile
 from qiskit.converters import circuit_to_dag
+from qiskit.quantum_info import Pauli
 from qiskit.transpiler import CouplingMap
+import requests
 import xarray as xr
 
 from iqm.benchmarks.logging_config import qcvv_logger
+from iqm.iqm_client.models import CircuitCompilationOptions
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
-from iqm.qiskit_iqm import transpile_to_IQM
+from iqm.qiskit_iqm import IQMFakeDeneb, optimize_single_qubit_gates, transpile_to_IQM
 from iqm.qiskit_iqm.fake_backends.fake_adonis import IQMFakeAdonis
 from iqm.qiskit_iqm.fake_backends.fake_apollo import IQMFakeApollo
 from iqm.qiskit_iqm.iqm_backend import IQMBackendBase
 from iqm.qiskit_iqm.iqm_job import IQMJob
 from iqm.qiskit_iqm.iqm_provider import IQMProvider
-from iqm.qiskit_iqm.iqm_transpilation import optimize_single_qubit_gates
+
+
+# pylint: disable=too-many-lines
 
 
 def timeit(f):
-    """Calculates the amount of time a function takes to execute
+    """Calculates the amount of time a function takes to execute.
 
     Args:
-        f: The function to add the timing attribute to
+        f: The function to add the timing attribute to.
     Returns:
-        The decorated function execution with logger statement of elapsed time in execution
+        The decorated function execution with logger statement of elapsed time in execution.
     """
 
     @wraps(f)
@@ -63,6 +73,54 @@ def timeit(f):
         return result, elapsed
 
     return wrap
+
+
+def bootstrap_counts(
+    original_counts: Dict[str, int],
+    num_bootstrap_samples: int = 100,
+    rgen: Optional[Generator] = None,
+    include_original_counts: bool = False,
+) -> List[Dict[str, int]]:
+    """Returns num_bootstrap_samples resampled copies of the original_counts.
+
+    Args:
+        original_counts (Dict[str, int]): The original dictionary of counts to bootstrap from.
+        num_bootstrap_samples (int): The number of bootstrapping samples to generate.
+            * Default is 100.
+        rgen (Optional[Generator]): The random number generator.
+            * Default is None: assigns numpy's default_rng().
+        include_original_counts (bool): Whether to include the original counts in the returned bootstrapped count samples.
+            * Default is False.
+    Returns:
+        List[Dict[str, int]]: A list of bootstrapped counts.
+    """
+    if rgen is None:
+        rgen = np.random.default_rng()
+
+    keys = list(original_counts.keys())
+    values = list(original_counts.values())
+    tot_shots = int(sum(values))
+
+    # Pre-calculate cumulative sum and create bins
+    cumulative_sum = np.cumsum(values)
+    bins = np.insert(cumulative_sum, 0, 0)
+
+    if include_original_counts:
+        bs_counts_fast = [original_counts]
+    else:
+        bs_counts_fast = []
+
+    for _ in range(num_bootstrap_samples):
+        # Generate random integers
+        random_integers = rgen.integers(low=0, high=tot_shots, size=tot_shots)
+        # Bin the random integers
+        binned_integers = np.digitize(random_integers, bins) - 1
+        # Count occurrences in each bin
+        occurrences = np.bincount(binned_integers, minlength=len(keys))
+        # Create dictionary mapping keys to occurrence counts
+        bs_counts_fast.append(dict(zip(keys, occurrences)))
+
+    return bs_counts_fast
 
 
 @timeit
@@ -114,6 +172,9 @@ def count_native_gates(
         backend = backend_arg
 
     native_operations = backend.operation_names
+
+    if backend.has_resonators():
+        native_operations.append("move")
     # Some backends may not include "barrier" in the operation_names attribute
     if "barrier" not in native_operations:
         native_operations.append("barrier")
@@ -139,6 +200,197 @@ def count_native_gates(
     return avg_native_operations
 
 
+@timeit
+def generate_state_tomography_circuits(
+    qc: QuantumCircuit,
+    active_qubits: Sequence[int],
+    measure_other: Optional[Sequence[int]] = None,
+    measure_other_name: Optional[str] = None,
+    native: bool = True,
+) -> Dict[str, QuantumCircuit]:
+    """Generate all quantum circuits required for a quantum state tomography experiment.
+
+    Args:
+        qc (QuantumCircuit): The quantum circuit.
+        active_qubits (Sequence[int]): The qubits to perform tomograhy on.
+        measure_other (Optional[Sequence[int]]): Whether to measure other qubits in the qc QuantumCircuit.
+            * Default is None.
+        measure_other_name (Optional[str]): Name of the classical register to assign measure_other.
+        native (bool): Whether circuits are prepared using IQM-native gates.
+            * Default is True.
+    Returns:
+        Dict[str, QuantumCircuit]: A dictionary with keys being Pauli (measurement) strings and values the respective circuit.
+            * Pauli strings are ordered for qubit labels in increasing order, e.g., "XY" for active_qubits 4, 1 corresponds to "X" measurement on qubit 1 and "Y" measurement on qubit 4.
+    """
+    num_qubits = len(active_qubits)
+
+    # Organize all Pauli measurements as circuits
+    aux_circ = QuantumCircuit(1)
+    sqg_pauli_strings = ("Z", "X", "Y")
+    pauli_measurements = {p: aux_circ.copy() for p in sqg_pauli_strings}
+
+    # Avoid transpilation, generate either directly in native basis or in H, S
+    if native:
+        # Z measurement
+        pauli_measurements["Z"].r(0, 0, 0)
+        # X measurement
+        pauli_measurements["X"].r(np.pi / 2, np.pi / 2, 0)
+        pauli_measurements["X"].r(np.pi, 0, 0)
+        # Y measurement
+        pauli_measurements["Y"].r(-np.pi / 2, 0, 0)
+        pauli_measurements["Y"].r(np.pi, np.pi / 4, 0)
+    else:
+        # Z measurement
+        pauli_measurements["Z"].id(0)
+        # X measurement
+        pauli_measurements["X"].h(0)
+        # Y measurement
+        pauli_measurements["Y"].sdg(0)
+        pauli_measurements["Y"].h(0)
+
+    all_pauli_labels = ["".join(x) for x in itertools.product(sqg_pauli_strings, repeat=num_qubits)]
+    all_circuits = {P_n: qc.copy() for P_n in all_pauli_labels}
+    for P_n in all_pauli_labels:
+        all_circuits[P_n].barrier()
+        for q_idx, q_active in enumerate(sorted(active_qubits)):
+            all_circuits[P_n].compose(pauli_measurements[P_n[q_idx]], qubits=q_active, inplace=True)
+
+        all_circuits[P_n].barrier()
+
+        register_tomo = ClassicalRegister(len(active_qubits), "tomo_qubits")
+        all_circuits[P_n].add_register(register_tomo)
+        all_circuits[P_n].measure(active_qubits, register_tomo)
+
+        if measure_other is not None:
+            if measure_other_name is None:
+                measure_other_name = "non_tomo_qubits"
+            register_neighbors = ClassicalRegister(len(measure_other), measure_other_name)
+            all_circuits[P_n].add_register(register_neighbors)
+            all_circuits[P_n].measure(measure_other, register_neighbors)
+
+    return all_circuits
+
+
+def get_active_qubits(qc: QuantumCircuit) -> List[int]:
+    """Extract active qubits from a quantum circuit.
+
+    Args:
+        qc (QuantumCircuit): The quantum circuit to extract active qubits from.
+    Returns:
+        List[int]: A list of active qubits.
+    """
+    active_qubits = set()
+    for instruction in qc.data:
+        for qubit in instruction.qubits:
+            active_qubits.add(qc.find_bit(qubit).index)
+    return list(active_qubits)
+
+
+def extract_fidelities(cal_url: str, all_metrics: bool = False) -> Union[
+    Tuple[List[List[int]], List[float], str, Dict[int, int]],
+    Tuple[List[List[int]], List[float], str, Dict[int, int], Dict[str, Dict[Union[int, Tuple[int, int]], float]]],
+]:
+    """Returns couplings and CZ-fidelities from calibration data URL
+
+    Args:
+        cal_url: str
+            The url under which the calibration data for the backend can be found
+        all_metrics: bool
+            If True, returns a dictionary with all metrics from the calibration data
+            Default is False
+    Returns:
+        list_couplings: List[List[int]]
+            A list of pairs, each of which is a qubit coupling for which the calibration
+            data contains a fidelity.
+        list_fids: List[float]
+            A list of CZ fidelities from the calibration url, ordered in the same way as list_couplings
+        topology: str
+            Name of the chip topology layout, currently either "star" or "crystal"
+        qubit_mapping: Dict[int, int]
+            Enumerating all calibrated qubits starting from 0. For instance if on a 5 qubit chip the qubits 2, 3 are calibrated,
+            the mapping will be {2: 0, 3: 1}.
+        metrics_dict: Dict
+            Dictionary of all metrics (returned only if all_metrics=True)
+            Format: {metric_name: {qubit: value}} for single qubit metrics
+            Format: {metric_name: {(qubit_1, qubit_2): value}} for two qubit metrics
+    """
+    headers = {"Accept": "application/json", "Authorization": "Bearer " + os.environ["IQM_TOKEN"]}
+    r = requests.get(cal_url, headers=headers, timeout=60)
+    calibration = r.json()
+    cal_keys = {
+        el2["key"]: (i, j) for i, el1 in enumerate(calibration["calibrations"]) for j, el2 in enumerate(el1["metrics"])
+    }
+    resonator_names = ["COMPR", "COMP_R", "MPR1", "MPR_1"]
+    list_couplings = []
+    list_fids = []
+    if "double_move_gate_fidelity" in cal_keys.keys():
+        i, j = cal_keys["double_move_gate_fidelity"]
+        topology = "star"
+    else:
+        i, j = cal_keys["cz_gate_fidelity"]
+        topology = "crystal"
+    for item in calibration["calibrations"][i]["metrics"][j]["metrics"]:
+        qb1 = (
+            int(item["locus"][0][2:])
+            if not any(resonator in item["locus"][0] for resonator in resonator_names)
+            else 0
+        )
+        qb2 = (
+            int(item["locus"][1][2:])
+            if not any(resonator in item["locus"][1] for resonator in resonator_names)
+            else 0
+        )
+        list_couplings.append([qb1, qb2])
+        list_fids.append(float(item["value"]))
+    calibrated_qubits = set(np.array(list_couplings).reshape(-1))
+
+    # Process all metrics if all_metrics is True
+    metrics_dict: Dict[str, Dict[Union[int, Tuple[int, int]], float]] = {}
+    for metric_key, (i, j) in cal_keys.items():
+        metric_data = calibration["calibrations"][i]["metrics"][j]["metrics"]
+        metrics_dict[metric_key] = {}
+
+        for item in metric_data:
+            # Determine if it's a single or two-qubit metric
+            if "component" in item:
+                # Single qubit metric
+                component = item["component"]
+                if not any(resonator in component for resonator in resonator_names):
+                    qb = int(component[2:])
+                    metrics_dict[metric_key][qb] = float(item["value"])
+                    calibrated_qubits.add(qb) # Add qubits that have a single qubit metric
+            if "locus" in item and len(item["locus"]) == 2:
+                # Two qubit metric
+                locus = item["locus"]
+                if not (any(resonator in locus[0] for resonator in resonator_names) or any(resonator in locus[1] for resonator in resonator_names)):
+                    qb1 = int(locus[0][2:])
+                    qb2 = int(locus[1][2:])
+                    metrics_dict[metric_key][(qb1, qb2)] = float(item["value"])
+
+    # Enumerate all calibrated qubits starting from 0
+    qubit_mapping = {qubit: idx for idx, qubit in enumerate(calibrated_qubits)}
+    list_couplings = [[qubit_mapping[edge[0]], qubit_mapping[edge[1]]] for edge in list_couplings]
+
+    # Apply the qubit mapping to metrics_dict
+    remapped_metrics_dict = {}
+    for metric_key, metric_values in metrics_dict.items():
+        remapped_metrics_dict[metric_key] = {}
+        for key, value in metric_values.items():
+            if isinstance(key, tuple):
+                # Two-qubit metric
+                remapped_metrics_dict[metric_key][(qubit_mapping[key[0]], qubit_mapping[key[1]])] = value
+            else:
+                # Single-qubit metric
+                remapped_metrics_dict[metric_key][qubit_mapping[key]] = value
+    metrics_dict = remapped_metrics_dict
+
+    # If all_metrics is False, only return everything related to CZ fidelites
+    if not all_metrics:
+        return list_couplings, list_fids, topology, qubit_mapping
+
+    return list_couplings, list_fids, topology, qubit_mapping, metrics_dict
+
+
 # pylint: disable=too-many-branches
 def get_iqm_backend(backend_label: str) -> IQMBackendBase:
     """Get the IQM backend object from a backend name (str).
@@ -149,8 +401,13 @@ def get_iqm_backend(backend_label: str) -> IQMBackendBase:
         IQMBackendBase.
     """
     # ****** 5Q star ******
+    # Pyrite
+    if backend_label.lower() == "pyrite":
+        iqm_server_url = "https://cocos.resonance.meetiqm.com/pyrite"
+        provider = IQMProvider(iqm_server_url)
+        backend_object = provider.get_backend()
     # FakeAdonis
-    if backend_label.lower() in ("iqmfakeadonis", "fakeadonis"):
+    elif backend_label.lower() in ("iqmfakeadonis", "fakeadonis"):
         backend_object = IQMFakeAdonis()
 
     # ****** 20Q grid ******
@@ -169,32 +426,173 @@ def get_iqm_backend(backend_label: str) -> IQMBackendBase:
         iqm_server_url = "https://cocos.resonance.meetiqm.com/deneb"
         provider = IQMProvider(iqm_server_url)
         backend_object = provider.get_backend()
+    # FakeDeneb
+    elif backend_label.lower() in ("iqmfakedeneb", "fakedeneb"):
+        backend_object = IQMFakeDeneb()
+
+    # ****** 16Q Resonator Star ******
+    # Sirius
+    elif backend_label.lower() == "sirius":
+        iqm_server_url = "https://cocos.resonance.meetiqm.com/sirius"
+        provider = IQMProvider(iqm_server_url)
+        backend_object = provider.get_backend()
+    # FakeSirius
+    # elif backend_label.lower() in ("iqmfakesirius", "fakesirius"):
+    #     backend_object = IQMFakeSirius()
 
     else:
-        raise ValueError(f"Backend {backend_label} not supported. Try 'garnet', 'deneb', 'fakeadonis' or 'fakeapollo'.")
+        raise ValueError(
+            f"Backend {backend_label} not supported. Try 'garnet', 'deneb', 'sirius', 'fakeadonis' or 'fakeapollo'."
+        )
 
     return backend_object
 
 
-def marginal_distribution(prob_dist: Dict[str, float], indices: Iterable[int]) -> Dict[str, float]:
-    """Compute the marginal distribution over specified bits (indices)
+def get_measurement_mapping(circuit: QuantumCircuit) -> Dict[int, int]:
+    """
+    Extracts the final measurement mapping (qubits to bits) of a quantum circuit.
+
+    Parameters:
+        circuit (QuantumCircuit): The quantum circuit to extract the measurement mapping from.
+
+    Returns:
+        dict: A dictionary where keys are qubits and values are classical bits.
+    """
+    mapping = {}
+    for instruction, qargs, cargs in circuit.data:
+        if instruction.name == "measure":
+            qubit = circuit.find_bit(qargs[0]).registers[0][1]
+            cbit = circuit.find_bit(cargs[0]).registers[0][1]
+            mapping[qubit] = cbit
+    return mapping
+
+
+def get_neighbors_of_edges(edges: Sequence[Sequence[int]], graph: Sequence[Sequence[int]]) -> Set[int]:
+    """Given a Sequence of edges and a graph, return all neighboring nodes of the edges.
+
+    Args:
+        edges (Sequence[Sequence[int]]): A sequence of pairs of integers, representing edges of a graph.
+        graph (Sequence[Sequence[int]]): The input graph specified as a sequence of edges (Sequence[int]).
+    Returns:
+        Sequence[int]: list of all neighboring nodes of the input edges.
+    """
+    neighboring_nodes = set()
+    nodes_in_edges = set()
+
+    for u, v in edges:
+        nodes_in_edges.add(u)
+        nodes_in_edges.add(v)
+
+    for x, y in graph:
+        if x in nodes_in_edges:
+            neighboring_nodes.add(y)
+        if y in nodes_in_edges:
+            neighboring_nodes.add(x)
+    neighboring_nodes -= nodes_in_edges
+
+    return neighboring_nodes
+
+
+def get_Pauli_expectation(counts: Dict[str, int], pauli_label: Literal["I", "X", "Y", "Z"]) -> float:
+    """Gets an estimate of a Pauli expectation value for a given set of counts and a Pauli measurement label.
+
+    Args:
+        counts (Dict[str, int]): A dictionary of counts.
+            * NB: keys are assumed to have a single bitstring, i.e., coming from a single classical register.
+        pauli_label (str): A Pauli measurement label, specified as a string of I, X, Y, Z characters.
+
+    Raises:
+        ValueError: If Pauli labels are not specified in terms of I, X, Y, Z characters.
+    Returns:
+        float: The estimate of the Pauli expectation value.
+    """
+    num_qubits = len(list(counts.keys())[0])
+    sqg_pauli_strings = ("I", "Z", "X", "Y")
+    all_pauli_labels = ["".join(x) for x in itertools.product(sqg_pauli_strings, repeat=num_qubits)]
+
+    if pauli_label not in all_pauli_labels:
+        raise ValueError("pauli_label must be specified as a string made up of characters 'I', 'X', 'Y', or 'Z'.")
+
+    expect = 0
+    if "I" not in pauli_label:
+        for b, count_b in counts.items():
+            if b.count("1") % 2 == 0:
+                expect += count_b
+            else:
+                expect -= count_b
+        return expect / sum(counts.values())
+
+    non_I_indices = [idx for idx, P in enumerate(pauli_label) if P != "I"]
+    for b, count_b in counts.items():
+        b_Z_parity = [1 if b[i] == "1" else 0 for i in non_I_indices]
+        if sum(b_Z_parity) % 2 == 0:
+            expect += count_b
+        else:
+            expect -= count_b
+    return expect / sum(counts.values())
+
+
+def get_tomography_matrix(pauli_expectations: Dict[str, float]) -> np.ndarray:
+    """Reconstructs a density matrix from given Pauli expectations.
+
+    Args:
+        pauli_expectations (Dict[str, float]): A dictionary of Pauli expectations, with keys being Pauli strings.
+    Raises:
+        ValueError: If not all 4**n Pauli expectations are specified.
+    Returns:
+        np.ndarray: A tomographically reconstructed density matrix.
+    """
+    num_qubits = len(list(pauli_expectations.keys())[0])
+    sqg_pauli_strings = ("I", "Z", "X", "Y")
+    all_pauli_labels = ["".join(x) for x in itertools.product(sqg_pauli_strings, repeat=num_qubits)]
+    if set(list(pauli_expectations.keys())) != set(all_pauli_labels):
+        raise ValueError(
+            f"Pauli expectations are incomplete ({len(list(pauli_expectations.keys()))} out of {len(all_pauli_labels)} expectations)"
+        )
+
+    rho = np.zeros([2**num_qubits, 2**num_qubits], dtype=complex)
+    for pauli_string, pauli_expectation in pauli_expectations.items():
+        rho += 2 ** (-num_qubits) * pauli_expectation * Pauli(pauli_string).to_matrix()
+    return rho
+
+
+def marginal_distribution(prob_dist_or_counts: Dict[str, float | int], indices: Iterable[int]) -> Dict[str, float]:
+    """Compute the marginal distribution over specified bits (indices).
 
     Params:
-    - prob_dist (dict): A dictionary with keys being bitstrings and values are their probabilities
-    - indices (list): List of bit indices to marginalize over
+    - prob_dist (Dict[str, float | int]): A dictionary with keys being bitstrings and values are either probabilities or counts
+    - indices (Iterable[int]): List of bit indices to marginalize over
 
     Returns:
     - dict: A dictionary representing the marginal distribution over the specified bits.
     """
     marginal_dist: Dict[str, float] = defaultdict(float)
 
-    for bitstring, prob in prob_dist.items():
+    for bitstring, prob in prob_dist_or_counts.items():
         # Extract the bits at the specified indices and form the marginalized bitstring
-        marginalized_bitstring = "".join(bitstring[i] for i in indices)
+        marginalized_bitstring = "".join(bitstring[i] for i in sorted(indices))
         # Sum up probabilities for each marginalized bitstring
         marginal_dist[marginalized_bitstring] += prob
 
     return dict(marginal_dist)
+
+
+def median_with_uncertainty(observations: Sequence[float]) -> Dict[str, float]:
+    """Computes the median of a Sequence of float observations and returns value and propagated uncertainty.
+    Reference: https://mathworld.wolfram.com/StatisticalMedian.html
+
+    Args:
+        observations (Sequence[float]): a Sequence of floating-point numbers.
+
+    Returns:
+        Dict[str, float]: a dictionary with keys "value" and "uncertainty" for the median of the input Sequence.
+    """
+    median = np.median(observations)
+    N = len(observations)
+    error_from_mean = np.std(observations) / np.sqrt(N)
+    median_uncertainty = error_from_mean * np.sqrt(np.pi * N / (2 * (N - 1)))
+
+    return {"value": float(median), "uncertainty": float(median_uncertainty)}
 
 
 @timeit
@@ -203,7 +601,7 @@ def perform_backend_transpilation(
     backend: IQMBackendBase,
     qubits: Sequence[int],
     coupling_map: List[List[int]],
-    basis_gates: Tuple[str, ...] = ("r", "cz"),
+    basis_gates: Sequence[str] = ("r", "cz"),
     qiskit_optim_level: int = 1,
     optimize_sqg: bool = False,
     drop_final_rz: bool = True,
@@ -225,70 +623,124 @@ def perform_backend_transpilation(
 
     Returns:
         List[QuantumCircuit]: A list of transpiled quantum circuits.
+
+    Raises:
+        ValueError: if Star topology and label 0 is in qubit layout.
     """
 
     # Helper function considering whether optimize_sqg is done,
     # and whether the coupling map is reduced (whether final physical layout must be fixed onto an auxiliary QC)
     def transpile_and_optimize(qc, aux_qc=None):
-        transpiled = transpile(
-            qc,
-            basis_gates=basis_gates,
-            coupling_map=coupling_map,
-            optimization_level=qiskit_optim_level,
-            initial_layout=qubits if aux_qc is None else None,
-            routing_method=routing_method,
-        )
-        if optimize_sqg:
-            transpiled = optimize_single_qubit_gates(transpiled, drop_final_rz=drop_final_rz)
-        if backend.name == "IQMNdonisBackend":
-            transpiled = transpile_to_IQM(
-                transpiled, backend=backend, optimize_single_qubits=optimize_sqg, remove_final_rzs=drop_final_rz
+        if backend.has_resonators():
+            coupling_map_red = (
+                backend.coupling_map.reduce(qubits[: qc.num_qubits]) if aux_qc is not None else coupling_map
             )
-        if aux_qc is not None:
-            if backend.name == "IQMNdonisBackend":
-                transpiled = reduce_to_active_qubits(transpiled, backend.name)
-                transpiled = aux_qc.compose(transpiled, qubits=[0] + qubits, clbits=list(range(qc.num_clbits)))
-            else:
+            transpiled = transpile_to_IQM(
+                qc,
+                backend=backend,
+                optimize_single_qubits=optimize_sqg,
+                remove_final_rzs=drop_final_rz,
+                coupling_map=coupling_map_red,
+                # initial_layout=qubits if aux_qc is None else None,
+            )
+        else:
+            transpiled = transpile(
+                qc,
+                basis_gates=basis_gates,
+                coupling_map=coupling_map,
+                optimization_level=qiskit_optim_level,
+                initial_layout=qubits if aux_qc is None else None,
+                routing_method=routing_method,
+            )
+            if aux_qc is not None:
                 transpiled = aux_qc.compose(transpiled, qubits=qubits, clbits=list(range(qc.num_clbits)))
-
+            if optimize_sqg:
+                transpiled = optimize_single_qubit_gates(transpiled, drop_final_rz=drop_final_rz)
         return transpiled
 
     qcvv_logger.info(
         f"Transpiling for backend {backend.name} with optimization level {qiskit_optim_level}, "
-        f"{routing_method} routing method{' and SQG optimization' if optimize_sqg else ''} all circuits"
+        f"{routing_method} routing method{' including SQG optimization' if qiskit_optim_level>0 else ''} all circuits"
     )
 
     if coupling_map == backend.coupling_map:
         transpiled_qc_list = [transpile_and_optimize(qc) for qc in qc_list]
     else:  # The coupling map will be reduced if the physical layout is to be fixed
-        aux_qc_list = [QuantumCircuit(backend.num_qubits, q.num_clbits) for q in qc_list]
+        if backend.has_resonators():
+            aux_qc_list = [QuantumCircuit(backend.num_qubits, q.num_clbits) for q in qc_list]
+        else:
+            aux_qc_list = [QuantumCircuit(backend.num_qubits, q.num_clbits) for q in qc_list]
         transpiled_qc_list = [transpile_and_optimize(qc, aux_qc=aux_qc_list[idx]) for idx, qc in enumerate(qc_list)]
 
     return transpiled_qc_list
 
 
-def reduce_to_active_qubits(circuit: QuantumCircuit, backend_name: Optional[str] = None) -> QuantumCircuit:
+def random_hamiltonian_path(G: nx.Graph, N: int) -> List[Tuple[int, int]]:
+    """
+    Generates a random Hamiltonian path with N vertices from a given NetworkX graph.
+
+    Args:
+        G (networkx.Graph): The input graph.
+        N (int): The desired number of vertices in the Hamiltonian path.
+
+    Returns:
+        list: A list of edges (tuples of nodes) representing the Hamiltonian path, or an empty list if not possible.
+    """
+    if N > len(G):
+        raise ValueError(
+            f"The number of vertices in the Hamiltonian path ({N}) cannot be greater than the number of nodes in the graph ({len(G)})"
+        )
+
+    nodes = list(G.nodes)
+    random.shuffle(nodes)  # Shuffle nodes to introduce randomness
+
+    for start in nodes:
+        path = [start]
+        visited = set(path)
+        edges = []
+
+        while len(path) < N:
+            neighbors = [n for n in G.neighbors(path[-1]) if n not in visited]
+
+            if not neighbors:
+                break  # Dead end, stop trying this path
+
+            next_node = random.choice(neighbors)
+            edges.append((int(path[-1]), int(next_node)))
+            path.append(next_node)
+            visited.add(next_node)
+
+        if len(path) == N:
+            return edges  # Successfully found a Hamiltonian path of length N
+
+    return []  # No valid path found
+
+
+def reduce_to_active_qubits(
+    circuit: QuantumCircuit, backend_topology: Optional[str] = None, backend_num_qubits=None
+) -> QuantumCircuit:
     """
     Reduces a quantum circuit to only its active qubits.
 
     Args:
-        backend_name (Optional[str]): The backend name, if any, in which the circuits are defined.
+        backend_topology (Optional[str]): The backend topology to execute the benchmark on.
         circuit (QuantumCircuit): The original quantum circuit.
+        backend_num_qubits (int): The number of qubits in the backend.
 
     Returns:
         QuantumCircuit: A new quantum circuit containing only active qubits.
     """
     # Identify active qubits
-    active_qubits = set()
+    active_qubits: list | set = set()
     for instruction in circuit.data:
         for qubit in instruction.qubits:
-            active_qubits.add(circuit.find_bit(qubit).index)
-    if backend_name is not None and backend_name == "IQMNdonisBackend" and 0 not in active_qubits:
+            cast(set, active_qubits).add(circuit.find_bit(qubit).index)
+    if backend_topology == "star" and backend_num_qubits not in active_qubits:
         # For star systems, the resonator must always be there, regardless of whether it MOVE gates on it or not
-        active_qubits.add(0)
+        cast(set, active_qubits).add(backend_num_qubits)
 
     # Create a mapping from old qubits to new qubits
-    active_qubits = set(sorted(active_qubits))
+    active_qubits = list(set(sorted(active_qubits)))
     qubit_map = {old_idx: new_idx for new_idx, old_idx in enumerate(active_qubits)}
 
     # Create a new quantum circuit with the reduced number of qubits
@@ -306,6 +758,18 @@ def reduce_to_active_qubits(circuit: QuantumCircuit, backend_name: Optional[str]
         reduced_circuit.append(instruction.operation, new_qubits, new_clbits)
 
     return reduced_circuit
+
+
+def remove_directed_duplicates_to_list(cp_map: CouplingMap) -> List[List[int]]:
+    """Remove duplicate edges from a coupling map and returns as a list of edges (as a list of pairs of vertices).
+
+    Args:
+        cp_map (CouplingMap): A list of pairs of integers, representing a coupling map.
+    Returns:
+        List[List[int]]: the edges of the coupling map.
+    """
+    sorted_cp = [sorted(x) for x in list(cp_map)]
+    return [list(x) for x in set(map(tuple, sorted_cp))]
 
 
 @timeit
@@ -377,16 +841,77 @@ def set_coupling_map(
                 - "fixed" sets a coupling map restricted to the input qubits -> results will be constrained to measure those qubits.
                 - "batching" sets the coupling map of the backend -> results in a benchmark will be "batched" according to final layouts.
                 * Default is "fixed".
+    Raises:
+        ValueError: if the physical layout is not "fixed" or "batching".
     Returns:
         A coupling map according to the specified physical layout.
+
+    Raises:
+        ValueError: if Star topology and label 0 is in qubit layout.
+        ValueError: if the physical layout is not "fixed" or "batching".
     """
     if physical_layout == "fixed":
-        if backend.name == "IQMNdonisBackend":
-            return backend.coupling_map.reduce(mapping=[0] + list(qubits))
+        # if "move" in backend.architecture.gates:
+        #     if 0 in qubits:
+        #         raise ValueError(
+        #             "Label 0 is reserved for Resonator - Please specify computational qubit labels (1,2,...)"
+        #         )
+        #     return backend.coupling_map.reduce(mapping=[0] + list(qubits))
         return backend.coupling_map.reduce(mapping=qubits)
     if physical_layout == "batching":
         return backend.coupling_map
     raise ValueError('physical_layout must either be "fixed" or "batching"')
+
+
+def split_sequence_in_chunks(sequence_in: Sequence[Any], split_size: int) -> List[Sequence[Any]]:
+    """Split a given Sequence into chunks of a given split size, return as a List of Sequences.
+
+    Args:
+        sequence_in (Sequence[Any]): The input list.
+        split_size (int): The split size.
+
+    Returns:
+        List[Sequence[Any]]: A List of Sequences.
+    """
+    if split_size > len(sequence_in):
+        raise ValueError("The split size should be smaller or equal than the list length")
+    if len(sequence_in) % split_size != 0 and (split_size != 1 and split_size != len(sequence_in)):
+        qcvv_logger.debug(
+            f"Since len(input_list) = {len(sequence_in)} and split_size = {split_size}, the input list will be split into chunks of uneven size!"
+        )
+        warnings.warn(
+            f"Since len(input_list) = {len(sequence_in)} and split_size = {split_size}, the input list will be split into chunks of uneven size!"
+        )
+
+    return [sequence_in[i : i + split_size] for i in range(0, len(sequence_in), split_size)]
+
+
+def split_into_disjoint_pairs(pairs: Sequence[Tuple[int, int]]) -> List[List[Tuple[int, int]]]:
+    """
+    Split a Sequence of pairs of integers into a List of a minimal number of Lists of disjoint pairs.
+    Example: input [(0,3), (2,3), (3,8), (8,13), (13,17), (17,18)] gives
+    output [[(0, 3), (8, 13), (17, 18)], [(2, 3), (13, 17)], [(3, 8)]].
+
+    # TODO: enable specifying a max split size of Lists of disjoint pairs. # pylint: disable=fixme
+
+    Args:
+        pairs (Sequence[Tuple[int, int]]): The input list of pairs of integers.
+    Returns:
+        List[List[Tuple[int, int]]]: A List of Lists of disjoint pairs.
+    """
+    result: List[List[Tuple[int, int]]] = []
+
+    for pair in pairs:
+        added = False
+        for group in result:
+            if not any(elem in pair for p in group for elem in p):
+                group.append(pair)
+                added = True
+                break
+        if not added:
+            result.append([pair])
+
+    return result
 
 
 @timeit
@@ -422,22 +947,35 @@ def sort_batches_by_final_layout(
 
 @timeit
 def submit_execute(
-    sorted_transpiled_qc_list: Dict[Tuple, List[QuantumCircuit]],
+    sorted_transpiled_qc_list: Dict[Tuple[int] | str, List[QuantumCircuit]],
     backend: IQMBackendBase,
     shots: int,
-    calset_id: Optional[str],
-    max_gates_per_batch: Optional[int],
+    calset_id: Optional[str] = None,
+    max_gates_per_batch: Optional[int] = None,
+    max_circuits_per_batch: Optional[int] = None,
+    circuit_compilation_options: Optional[CircuitCompilationOptions] = None,
 ) -> List[IQMJob]:
-    """Submit for execute a list of quantum circuits on the specified Backend.
+    """Submit function to execute lists of quantum circuits on the specified backend,
+        organized as a dictionary with keys being identifiers of a batch (normally qubits) and values corresponding lists of quantum circuits.
+        The result is returned as a single list of IQMJob objects.
 
     Args:
-        sorted_transpiled_qc_list (Dict[Tuple, List[QuantumCircuit]]): the list of quantum circuits to be executed.
+        sorted_transpiled_qc_list (Dict[Tuple[int] | str, List[QuantumCircuit]]): A dictionary of lists of quantum circuits to be executed.
+            * The keys (Tuple[int] | str) should correspond to final measured qubits.
+            * The values (List[QuantumCircuit]) should be the corresponding list (batch) of quantum circuits.
         backend (IQMBackendBase): the backend to execute the circuits on.
         shots (int): the number of shots per circuit.
-        calset_id (Optional[str]): the calibration set ID, uses the latest one if None.
-        max_gates_per_batch (int): the maximum number of gates per batch sent to the backend, used to make manageable batches.
+        calset_id (Optional[str]): the calibration set ID.
+            * Default is None: uses the latest calibration ID.
+        max_gates_per_batch (Optional[int]): the maximum number of gates per batch sent to the backend, used to make manageable batches.
+            * Default is None.
+        max_circuits_per_batch (Optional[int]): the maximum number of circuits per batch sent to the backend, used to make manageable batches.
+            * Default is None.
+        circuit_compilation_options (CircuitCompilationOptions): Ability to pass a compilation options object,
+            enabling execution with dynamical decoupling, among other options - see qiskit-iqm documentation.
+            * Default is None.
     Returns:
-        List[IQMJob]: the IQMJob objects of the executed circuits.
+        List[IQMJob]: a list of IQMJob objects corresponding to the submitted circuits.
     """
     final_jobs = []
     for k in sorted(
@@ -450,25 +988,50 @@ def submit_execute(
             f"Submitting batch with {len(sorted_transpiled_qc_list[k])} circuits corresponding to qubits {list(k)}"
         )
         # Divide into batches according to maximum gate count per batch
-        if max_gates_per_batch is None:
+        if max_gates_per_batch is None and max_circuits_per_batch is None:
             jobs = backend.run(sorted_transpiled_qc_list[k], shots=shots, calibration_set_id=calset_id)
             final_jobs.append(jobs)
+
         else:
-            # Calculate average gate count per quantum circuit
-            avg_gates_per_qc = sum(sum(qc.count_ops().values()) for qc in sorted_transpiled_qc_list[k]) / len(
-                sorted_transpiled_qc_list[k]
-            )
+            if max_gates_per_batch is None and max_circuits_per_batch is not None:
+                restriction = "max_circuits_per_batch"
+                batching_size = max_circuits_per_batch
+
+            elif max_circuits_per_batch is None and max_gates_per_batch is not None:
+                restriction = "max_gates_per_batch"
+                # Calculate average gate count per quantum circuit
+                avg_gates_per_qc = sum(sum(qc.count_ops().values()) for qc in sorted_transpiled_qc_list[k]) / len(
+                    sorted_transpiled_qc_list[k]
+                )
+                batching_size = max(1, floor(max_gates_per_batch / avg_gates_per_qc))
+
+            else:  # Both are not None - select the one rendering the smallest batches.
+                # Calculate average gate count per quantum circuit
+                avg_gates_per_qc = sum(sum(qc.count_ops().values()) for qc in sorted_transpiled_qc_list[k]) / len(
+                    sorted_transpiled_qc_list[k]
+                )
+                qcvv_logger.warning(
+                    "Both max_gates_per_batch and max_circuits_per_batch are not None. Selecting the one giving the smallest batches."
+                )
+                batching_size = min(
+                    cast(int, max_circuits_per_batch), max(1, floor(cast(int, max_gates_per_batch) / avg_gates_per_qc))
+                )
+                if batching_size == max_circuits_per_batch:
+                    restriction = "max_circuits_per_batch"
+                else:
+                    restriction = "max_gates_per_batch"
+
             final_batch_jobs = []
-            for index, qc_batch in enumerate(
-                chunked(
-                    sorted_transpiled_qc_list[k],
-                    max(1, floor(max_gates_per_batch / avg_gates_per_qc)),
-                )
-            ):
+            for index, qc_batch in enumerate(chunked(sorted_transpiled_qc_list[k], batching_size)):
                 qcvv_logger.info(
-                    f"max_gates_per_batch restriction: submitting subbatch #{index+1} with {len(qc_batch)} circuits corresponding to qubits {list(k)}"
+                    f"{restriction} restriction: submitting subbatch #{index + 1} with {len(qc_batch)} circuits corresponding to qubits {list(k)}"
                 )
-                batch_jobs = backend.run(qc_batch, shots=shots, calibration_set_id=calset_id)
+                batch_jobs = backend.run(
+                    qc_batch,
+                    shots=shots,
+                    calibration_set_id=calset_id,
+                    circuit_compilation_options=circuit_compilation_options,
+                )
                 final_batch_jobs.append(batch_jobs)
             final_jobs.extend(final_batch_jobs)
 

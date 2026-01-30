@@ -17,7 +17,7 @@ Quantum Volume benchmark
 """
 
 from copy import deepcopy
-from time import strftime
+from time import strftime, time
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Type
 
 from matplotlib.figure import Figure
@@ -26,7 +26,7 @@ from mthree.classes import QuasiCollection
 from mthree.utils import expval
 import numpy as np
 from qiskit.circuit.library import QuantumVolume
-from qiskit_aer import Aer
+from qiskit_aer import StatevectorSimulator
 import xarray as xr
 
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
@@ -38,10 +38,6 @@ from iqm.benchmarks.benchmark_definition import (
     BenchmarkRunResult,
     add_counts_to_dataset,
 )
-
-# import iqm.diqe.executors.dynamical_decoupling.dd_high_level as dd
-# from iqm.diqe.executors.dynamical_decoupling.dynamical_decoupling_core import DDStrategy
-# from iqm.diqe.mapomatic import evaluate_costs, get_calibration_fidelities, get_circuit, matching_layouts
 from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.readout_mitigation import apply_readout_error_mitigation
@@ -119,7 +115,7 @@ def get_ideal_heavy_outputs(
     """
     simulable_circuits = deepcopy(qc_list)
     ideal_heavy_outputs: List[Dict[str, float]] = []
-    ideal_simulator = Aer.get_backend("statevector_simulator")
+    ideal_simulator = StatevectorSimulator()
 
     # Separate according to sorted indices
     circuit_batches = {
@@ -677,11 +673,13 @@ class QuantumVolumeBenchmark(Benchmark):
         sorted_transpiled_qc_list: Dict[Tuple[int, ...], List[QuantumCircuit]],
     ) -> Dict[str, Any]:
         """
-            Submit jobs for execution in the specified IQMBackend.
+        Submit a single set of QV jobs for execution in the specified IQMBackend:
+         Organizes the results in a dictionary with the qubit layout, the submitted job objects, the type of QV results and submission time.
+
         Args:
             backend (IQMBackendBase): the IQM backend to submit the job.
             qubits (List[int]): the qubits to identify the submitted job.
-            sorted_transpiled_qc_list (Dict[str, List[QuantumCircuit]]): qubits to submit jobs to.
+            sorted_transpiled_qc_list (Dict[Tuple[int, ...] | str, List[QuantumCircuit]]): A dictionary of Lists of quantum circuits.
         Returns:
             Dict with qubit layout, submitted job objects, type (vanilla/DD) and submission time.
         """
@@ -697,12 +695,9 @@ class QuantumVolumeBenchmark(Benchmark):
             self.shots,
             self.calset_id,
             max_gates_per_batch=self.max_gates_per_batch,
+            max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+            circuit_compilation_options=self.circuit_compilation_options,
         )
-        # else:
-        # DD IN DIQE VERSION PREVENTS SUBMITTING JOBS DYNAMICALLY:
-        # I.E., IT AUTOMATICALLY RETRIEVES COUNTS
-        # TODO: change this when job manager for DD in Pulla is updated! # pylint: disable=fixme
-        # raise ValueError("Dynamical decoupling is not yet enabled in the new base")
         # qcvv_logger.info(
         #     f"Now executing {self.num_circuits} circuits with default strategy Dynamical Decoupling"
         # )
@@ -721,6 +716,8 @@ class QuantumVolumeBenchmark(Benchmark):
         """Executes the benchmark."""
 
         self.execution_timestamp = strftime("%Y%m%d-%H%M%S")
+        total_submit: float = 0
+        total_retrieve: float = 0
 
         dataset = xr.Dataset()
         self.add_all_meta_to_dataset(dataset)
@@ -785,7 +782,9 @@ class QuantumVolumeBenchmark(Benchmark):
             all_op_counts[str(qubits)] = count_native_gates(backend, transpiled_qc_list)
 
             # Submit
+            t_start = time()
             all_qv_jobs.append(self.submit_single_qv_job(backend, qubits, sorted_transpiled_qc_list))
+            total_submit += time() - t_start
             qcvv_logger.info(f"Job for layout {qubits} submitted successfully!")
 
         # Retrieve counts of jobs for all qubit layouts
@@ -796,7 +795,7 @@ class QuantumVolumeBenchmark(Benchmark):
             execution_results, time_retrieve = retrieve_all_counts(job_dict["jobs"], str(qubits))
             # Retrieve all job meta data
             all_job_metadata = retrieve_all_job_metadata(job_dict["jobs"])
-
+            total_retrieve += time_retrieve
             # Export all to dataset
             dataset.attrs.update(
                 {
@@ -834,7 +833,8 @@ class QuantumVolumeBenchmark(Benchmark):
                     self.mit_shots,
                 )
             dataset.attrs.update({"REM_quasidistributions": rem_quasidistros})
-
+        dataset.attrs["total_submit_time"] = total_submit
+        dataset.attrs["total_retrieve_time"] = total_retrieve
         qcvv_logger.info(f"QV experiment execution concluded !")
         return dataset
 
@@ -862,8 +862,7 @@ class QuantumVolumeConfiguration(BenchmarkConfigurationBase):
                             - "fixed": Restricts the coupling map to only the specified qubits.
                             - "batching": Considers the full coupling map of the backend and circuit execution is batched per final layout.
                             * Default is "fixed"
-        rem (bool): Whether Readout Error Mitigation is applied in post-processing.
-                    When set to True, both results (readout-unmitigated and -mitigated) are produced.
+        rem (bool): Whether Readout Error Mitigation is applied in post-processing. When set to True, both results (readout-unmitigated and -mitigated) are produced.
                             - Default is True.
         mit_shots (int): The measurement shots to use for readout calibration.
                             * Default is 1_000.

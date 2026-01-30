@@ -4,7 +4,9 @@ Generation of error measures and result tables
 
 from argparse import Namespace
 import csv
+from itertools import product
 import os
+from typing import List, Tuple, Union
 
 import numpy as np
 import numpy.linalg as la
@@ -17,10 +19,12 @@ from pygsti.tools import change_basis
 from pygsti.tools.optools import compute_povm_map
 from qiskit.quantum_info import SuperOp
 from qiskit.quantum_info.operators.measures import diamond_norm
-from scipy.linalg import logm
+from scipy.linalg import expm, logm, schur
 from scipy.optimize import linear_sum_assignment, minimize
+import xarray as xr
 
-from mGST import additional_fns, algorithm, compatibility, low_level_jit
+from iqm.benchmarks.benchmark_definition import BenchmarkObservationIdentifier
+from mGST import additional_fns, algorithm, compatibility, low_level_jit, qiskit_interface
 
 
 def min_spectral_distance(X1, X2):
@@ -135,6 +139,33 @@ def gauge_opt(X, E, rho, target_mdl, weights):
     return compatibility.pygsti_model_to_arrays(gauge_optimized_mdl, basis="std")
 
 
+def generate_basis_labels(pdim: int, basis: Union[str, None] = None) -> List[str]:
+    """Generate a list of labels for the Pauli basis or the standard basis
+
+    Args:
+        pdim: int
+            Physical dimension
+        basis: str
+            Which basis the labels correspond to, currently default is standard basis and "Pauli" can be choose
+            for Pauli basis labels like "II", "IX", "XX", ...
+
+    Returns:
+        labels: List[str]
+            A list of all string combinations for the given dimension and basis
+    """
+    separator = ""
+    if basis == "Pauli":
+        pauli_labels_loc = ["I", "X", "Y", "Z"]
+        pauli_labels_rep = [pauli_labels_loc for _ in range(int(np.log2(pdim)))]
+        labels = [separator.join(map(str, x)) for x in product(*pauli_labels_rep)]
+    else:
+        std_labels_loc = ["0", "1"]
+        std_labels_rep = [std_labels_loc for _ in range(int(np.log2(pdim)))]
+        labels = [separator.join(map(str, x)) for x in product(*std_labels_rep)]
+
+    return labels
+
+
 def report(X, E, rho, J, y, target_mdl, gate_labels):
     """Generation of pandas dataframes with gate and SPAM quality measures
     The resutls can be converted to .tex tables or other formats to be used for GST reports
@@ -163,8 +194,6 @@ def report(X, E, rho, J, y, target_mdl, gate_labels):
             DataFrame of gate quality measures
         df_o : Pandas DataFrame
             DataFrame of all other quality/error measures
-        s_g : Pandas DataFrame.style object
-        s_o : Pandas DataFrame.style object
     """
     pdim = int(np.sqrt(rho.shape[0]))
     X_t, E_t, rho_t = compatibility.pygsti_model_to_arrays(target_mdl, basis="std")
@@ -231,8 +260,6 @@ def quick_report(X, E, rho, J, y, target_mdl, gate_labels=None):
             DataFrame of gate quality measures
         df_o : Pandas DataFrame
             DataFrame of all other quality/error measures
-        s_g : Pandas DataFrame.style object
-        s_o : Pandas DataFrame.style object
     """
     pdim = int(np.sqrt(rho.shape[0]))
     d = X.shape[0]
@@ -339,21 +366,173 @@ def compute_sparsest_Pauli_Hamiltonian(U_set):
     pdim = U_set.shape[1]
     pp_vecs = []
 
-    for U in U_set:
-        evals, evecs = np.linalg.eig(U)
+    for _, U in enumerate(U_set):
+        # Schur decomposition finds the unitary diagonalization of a unitary matrix, which is not always returned by np.linalg.eig
+        T, evecs = schur(U)
+        evals = np.diag(T)
         Pauli_norms = []
+        log_evals = np.log(evals)
         for i in range(2**pdim):
             bits = low_level_jit.local_basis(i, 2, pdim)
-            evals_new = 1j * np.log(evals) + 2 * np.pi * bits
+            evals_new = 1j * log_evals + 2 * np.pi * bits
             H_new = evecs @ np.diag(evals_new) @ evecs.T.conj()
             pp_vec = change_basis(H_new.reshape(-1), "std", "pp")
             Pauli_norms.append(np.linalg.norm(pp_vec, ord=1))
         opt_bits = low_level_jit.local_basis(np.argsort(Pauli_norms)[0], 2, pdim)
-        evals_opt = 1j * np.log(evals) + 2 * np.pi * opt_bits
+        evals_opt = 1j * log_evals + 2 * np.pi * opt_bits
         H_opt = evecs @ np.diag(evals_opt) @ evecs.T.conj()
         pp_vecs.append(change_basis(H_opt.reshape(-1), "std", "pp"))
     pauli_coeffs = np.array(pp_vecs) / np.sqrt(pdim) / np.pi * 2
     return pauli_coeffs
+
+
+def match_hamiltonian_phase(pauli_coeffs, pauli_coeffs_target):
+    """
+    Matches the sign of the phase of a target gate Hamiltonian represented by Pauli coefficients to a measured Hamiltonian.
+
+    Parameters:
+    pauli_coeffs (numpy array): Pauli coefficients of the measured Hamiltonian.
+    pauli_coeffs_target (numpy array): Pauli coefficients of the target Hamiltonian.
+
+    Returns:
+    numpy array: Pauli coefficients of the target Hamiltonian with matched phase.
+    """
+    dim = int(np.sqrt(len(pauli_coeffs)))
+    H_target = change_basis(pauli_coeffs_target, "pp", "std").reshape((dim, dim))
+    U_target = expm(-1j * H_target * np.pi * np.sqrt(dim) / 2)
+    U_target_alt = expm(1j * H_target * np.pi * np.sqrt(dim) / 2)
+
+    # Check if sign flip leads to same unitary
+    if np.linalg.norm(U_target - U_target_alt) < 1e-6:
+        # Check if sign flip leads to better match to target Hamiltonian in Pauli basis
+        if np.linalg.norm(pauli_coeffs_target - pauli_coeffs) > np.linalg.norm(pauli_coeffs_target + pauli_coeffs):
+            return -pauli_coeffs_target
+
+    return pauli_coeffs_target
+
+
+def generate_rotation_param_results(
+    dataset: xr.Dataset,
+    qubit_layout: List[int],
+    X_opt: np.ndarray,
+    K_target: np.ndarray,
+    X_array: np.ndarray = None,
+    E_array: np.ndarray = None,
+    rho_array: np.ndarray = None,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Produces result tables and data for Kraus rank 1 estimates.
+
+    This includes parameters of the Hamiltonian generators in the Pauli basis for all gates.
+    If bootstrapping data is available, error bars will also be generated.
+
+    Args:
+        dataset: xarray.Dataset
+            A dataset containing counts from the experiment and configurations
+        qubit_layout: List[int]
+            The list of qubits for the current GST experiment
+        X_opt: 3D numpy array
+            The gate set after gauge optimization
+        K_target: 4D numpy array
+            The Kraus operators of all target gates, used to compute distance measures.
+        X_array: ndarray, optional
+            Array of bootstrap gate estimates, used for error bars
+        E_array: ndarray, optional
+            Array of bootstrap POVM estimates, used for error bars
+        rho_array: ndarray, optional
+            Array of bootstrap state estimates, used for error bars
+
+    Returns:
+        Tuple[DataFrame, dict]:
+            - df_g_rotation: Pandas DataFrame containing Hamiltonian (rotation) parameters with formatted values
+            - hamiltonian_params: Dictionary with raw values and uncertainty bounds if bootstrapping was used
+    """
+    identifier = BenchmarkObservationIdentifier(qubit_layout).string_identifier
+    pauli_labels = generate_basis_labels(dataset.attrs["pdim"], basis="Pauli")
+
+    U_opt = phase_opt(X_opt, K_target)
+    pauli_coeffs = compute_sparsest_Pauli_Hamiltonian(U_opt)
+
+    bootstrap = X_array is not None and E_array is not None and rho_array is not None
+
+    if bootstrap:
+        bootstrap_pauli_coeffs = np.zeros((len(X_array), dataset.attrs["num_gates"], dataset.attrs["pdim"] ** 2))
+        for i, X_ in enumerate(X_array):
+            X_std, _, _ = compatibility.pp2std(X_, E_array[i], rho_array[i])
+            U_opt_ = phase_opt(X_std, K_target)
+            pauli_coeffs_ = compute_sparsest_Pauli_Hamiltonian(U_opt_)
+            bootstrap_pauli_coeffs[i, :, :] = pauli_coeffs_
+        pauli_coeffs_low, pauli_coeffs_high = np.nanpercentile(bootstrap_pauli_coeffs, [2.5, 97.5], axis=0)
+
+    # Pandas dataframe with formated confidence intervals
+    df_g_rotation = pd.DataFrame(
+        np.array(
+            [
+                [
+                    number_to_str(
+                        pauli_coeffs[i, j],
+                        [pauli_coeffs_high[i, j], pauli_coeffs_low[i, j]] if bootstrap else None,
+                        precision=5,
+                    )
+                    for i in range(dataset.attrs["num_gates"])
+                ]
+                for j in range(dataset.attrs["pdim"] ** 2)
+            ]
+        ).T
+    )
+    df_g_rotation.columns = [f"h_%s" % label for label in pauli_labels]
+    df_g_rotation.rename(index=dataset.attrs["gate_labels"][identifier], inplace=True)
+
+    hamiltonian_params = {
+        "values": pauli_coeffs,
+        "uncertainties": (pauli_coeffs_low, pauli_coeffs_high) if bootstrap else None,
+    }
+
+    return df_g_rotation, hamiltonian_params
+
+
+def compute_matched_ideal_hamiltonian_params(dataset: xr.Dataset) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Computes the Hamiltonian parameters and matches the ideal Hamiltonian parameters to the measured ones (without changing the unitary it generates).
+
+    Args:
+        dataset (xarray.Dataset): A dataset containing counts from the experiment and configurations.
+
+    Returns:
+        Tuple[numpy.ndarray, numpy.ndarray]: A tuple containing:
+            - hamiltonian_params: Hamiltonian parameters of the measured gates.
+            - hamiltonian_params_ideal_matched: Ideal Hamiltonian parameters matched to the measured ones.
+    """
+
+    qubit_layouts = dataset.attrs["qubit_layouts"]
+    param_list_layouts = [
+        dataset.attrs[f"results_layout_{BenchmarkObservationIdentifier(layout).string_identifier}"][
+            "hamiltonian_params"
+        ]["values"]
+        for layout in qubit_layouts
+    ]
+    hamiltonian_params = np.array(param_list_layouts)
+
+    K_target = qiskit_interface.qiskit_gate_to_operator(dataset.attrs["gate_set"])
+    X_target = np.einsum("ijkl,ijnm -> iknlm", K_target, K_target.conj()).reshape(
+        (dataset.attrs["num_gates"], dataset.attrs["pdim"] ** 2, dataset.attrs["pdim"] ** 2)
+    )
+
+    param_list_layouts = []
+    for qubit_layout in qubit_layouts:
+        _, ideal_params = generate_rotation_param_results(dataset, qubit_layout, X_target, K_target)
+        ideal_params = ideal_params["values"]
+        param_list_layouts.append(ideal_params)
+    hamiltonian_params_ideal = np.array(param_list_layouts)
+
+    hamiltonian_params_ideal_matched = np.empty(hamiltonian_params_ideal.shape)
+    for i, _ in enumerate(qubit_layouts):
+        for j in range(hamiltonian_params_ideal.shape[1]):
+            hamiltonian_params_ideal_matched[i, j, :] = match_hamiltonian_phase(
+                hamiltonian_params[i, j, :], hamiltonian_params_ideal[i, j, :]
+            )
+
+    return hamiltonian_params, hamiltonian_params_ideal_matched
 
 
 def phase_err(angle, U, U_t):
@@ -376,7 +555,7 @@ def phase_err(angle, U, U_t):
     return la.norm(np.exp(1j * angle) * U - U_t)
 
 
-def phase_opt(X, K_t):
+def phase_opt(X: np.ndarray, K_t: np.ndarray):
     """Return rK = 1 gate set with global phase fitting matching to target gate set
 
     Parameters
@@ -401,7 +580,7 @@ def phase_opt(X, K_t):
     K_t = K_t.reshape(d, pdim, pdim)
     K_opt = np.zeros(K.shape).astype(complex)
     for i in range(d):
-        angle_opt = minimize(phase_err, 1e-9, args=(K[i], K_t[i]), method="COBYLA").x
+        angle_opt = minimize(phase_err, 1, bounds=[[-np.pi, np.pi]], args=(K[i], K_t[i])).x
         K_opt[i] = K[i] * np.exp(1j * angle_opt)
     return K_opt
 
@@ -540,12 +719,12 @@ def bootstrap_errors(K, X, E, rho, mGST_args, bootstrap_samples, weights, gate_l
 
     Parameters
     ----------
-    K : numpy array
+    K: numpy array
         Each subarray along the first axis contains a set of Kraus operators.
         The second axis enumerates Kraus operators for a gate specified by the first axis.
-    X : 3D numpy array
+    X: 3D numpy array
         Array where reconstructed CPT superoperators in standard basis are stacked along the first axis.
-    E : numpy array
+    E: numpy array
         Current POVM estimate
     rho : numpy array
         Current initial state estimate
@@ -608,7 +787,6 @@ def bootstrap_errors(K, X, E, rho, mGST_args, bootstrap_samples, weights, gate_l
             threshold_multiplier=ns.threshold_multiplier,
             target_rel_prec=ns.target_rel_prec,
             init=[K, E, rho],
-            testing=False,
         )
 
         X_opt, E_opt, rho_opt = gauge_opt(X_, E_, rho_, target_mdl, weights)
@@ -708,3 +886,26 @@ def number_to_str(number, uncertainty=None, precision=3):
         return f"{number:.{precision}f}"
 
     return f"{number:.{precision}f} [{uncertainty[1]:.{precision}f},{uncertainty[0]:.{precision}f}]"
+
+
+def result_str_to_floats(result_str: str, err: str) -> Tuple[float, float]:
+    """Converts formated string results from mgst to float (value, uncertainty) pairs
+
+    Args:
+        result_str: str
+            The value of a result parameter formated as str
+        err: str
+            The error interval of the parameters
+
+    Returns:
+        value: float
+            The parameter value as float
+        uncertainty: float
+            A single uncertainty value
+    """
+    if err:
+        value = float(result_str.split("[")[0])
+        rest = result_str.split("[")[1].split(",")
+        uncertainty = float(rest[1][:-1]) - float(rest[0])
+        return value, uncertainty
+    return float(result_str), np.NaN

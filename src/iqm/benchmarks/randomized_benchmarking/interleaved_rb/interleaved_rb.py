@@ -16,12 +16,13 @@
 Interleaved Clifford Randomized Benchmarking.
 """
 
-from time import strftime
+from time import strftime, time
 from typing import Any, Dict, List, Literal, Optional, Sequence, Type
 
 from matplotlib.figure import Figure
 import numpy as np
 import xarray as xr
+from pycparser.ply.ctokens import t_STRING
 
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
 from iqm.benchmarks.benchmark_definition import (
@@ -75,6 +76,11 @@ def interleaved_rb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
 
     interleaved_gate = dataset.attrs["interleaved_gate"]
     interleaved_gate_parameters = dataset.attrs["interleaved_gate_params"]
+    if interleaved_gate_parameters is None:
+        interleaved_gate_string = f"{interleaved_gate}"
+    else:
+        params_string = str(tuple(f"{x:.2f}" for x in interleaved_gate_parameters))
+        interleaved_gate_string = f"{interleaved_gate}{params_string}"
 
     simultaneous_fit = dataset.attrs["simultaneous_fit"]
 
@@ -138,6 +144,7 @@ def interleaved_rb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
             [list_of_fidelities_clifford, list_of_fidelities_interleaved],
             "interleaved",
             simultaneous_fit,
+            interleaved_gate_string,
         )
         rb_fit_results = lmfit_minimizer(fit_parameters, fit_data, sequence_lengths, exponential_rb)
 
@@ -167,13 +174,34 @@ def interleaved_rb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
             )
 
             processed_results[rb_type] = {
-                "avg_gate_fidelity": {"value": fidelity.value, "uncertainty": fidelity.stderr},
+                "average_gate_fidelity": {"value": fidelity.value, "uncertainty": fidelity.stderr},
             }
+
+            if len(qubits) == 1 and rb_type == "clifford":
+                fidelity_native = rb_fit_results.params["fidelity_per_native_sqg"]
+                processed_results[rb_type].update(
+                    {
+                        "average_gate_fidelity_native": {
+                            "value": fidelity_native.value,
+                            "uncertainty": fidelity_native.stderr,
+                        }
+                    }
+                )
+            elif len(qubits) == 2 and rb_type == "clifford" and interleaved_gate_string == "CZGate":
+                fidelity_native_sqg = rb_fit_results.params["fidelity_per_native_sqg"]
+                processed_results[rb_type].update(
+                    {
+                        "average_gate_fidelity_native_sqg": {
+                            "value": fidelity_native_sqg.value,
+                            "uncertainty": fidelity_native_sqg.stderr,
+                        }
+                    }
+                )
 
             observations.extend(
                 [
                     BenchmarkObservation(
-                        name=f"{key}_{rb_type}",
+                        name=f"{key}_{interleaved_gate}" if "native" not in key else f"{key}",
                         identifier=BenchmarkObservationIdentifier(qubits),
                         value=values["value"],
                         uncertainty=values["uncertainty"],
@@ -189,8 +217,8 @@ def interleaved_rb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
                         "fit_amplitude": {"value": popt["amplitude"].value, "uncertainty": popt["amplitude"].stderr},
                         "fit_offset": {"value": popt["offset"].value, "uncertainty": popt["offset"].stderr},
                         "fidelities": fidelities[str(qubits)][rb_type],
-                        "avg_fidelities_nominal_values": average_fidelities,
-                        "avg_fidelities_stderr": stddevs_from_mean,
+                        "average_fidelities_nominal_values": average_fidelities,
+                        "average_fidelities_stderr": stddevs_from_mean,
                         "fitting_method": str(rb_fit_results.method),
                         "num_function_evals": int(rb_fit_results.nfev),
                         "data_points": int(rb_fit_results.ndata),
@@ -206,12 +234,6 @@ def interleaved_rb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
         obs_dict.update({qubits_idx: processed_results})
 
         # Generate decay plots
-        if interleaved_gate_parameters is None:
-            interleaved_gate_string = f"{interleaved_gate}"
-        else:
-            params_string = str(tuple(f"{x:.2f}" for x in interleaved_gate_parameters))
-            interleaved_gate_string = f"{interleaved_gate}{params_string}"
-
         fig_name, fig = plot_rb_decay(
             "irb",
             [qubits],
@@ -302,6 +324,8 @@ class InterleavedRandomizedBenchmarking(Benchmark):
         # Submit jobs for all qubit layouts
         all_rb_jobs: Dict[str, List[Dict[str, Any]]] = {}  # Label by Clifford or Interleaved
         time_circuit_generation: Dict[str, float] = {}
+        total_submit: float = 0
+        total_retrieve: float = 0
 
         # Initialize the variable to contain the circuits for each layout
 
@@ -377,6 +401,7 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                 sorted_transpiled_interleaved_rb_qc_list = {
                     tuple(flat_qubits_array): parallel_transpiled_interleaved_rb_circuits[seq_length]
                 }
+                t_start = time()
                 all_rb_jobs["clifford"].append(
                     submit_parallel_rb_job(
                         backend,
@@ -386,6 +411,7 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         self.shots,
                         self.calset_id,
                         self.max_gates_per_batch,
+                        self.configuration.max_circuits_per_batch,
                     )
                 )
                 all_rb_jobs["interleaved"].append(
@@ -397,8 +423,10 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         self.shots,
                         self.calset_id,
                         self.max_gates_per_batch,
+                        self.configuration.max_circuits_per_batch,
                     )
                 )
+                total_submit += time() - t_start
                 qcvv_logger.info(f"Both jobs for sequence length {seq_length} submitted successfully!")
 
             self.untranspiled_circuits.circuit_groups.append(
@@ -484,6 +512,7 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                 time_circuit_generation[str(qubits)] = t_clifford + t_inter
 
                 # Submit Clifford then Interleaved
+                t_start = time()
                 all_rb_jobs["clifford"].extend(
                     submit_sequential_rb_jobs(
                         qubits,
@@ -492,6 +521,8 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         backend,
                         self.calset_id,
                         max_gates_per_batch=self.max_gates_per_batch,
+                        max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+                        circuit_compilation_options=self.circuit_compilation_options,
                     )
                 )
                 all_rb_jobs["interleaved"].extend(
@@ -502,8 +533,11 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                         backend,
                         self.calset_id,
                         max_gates_per_batch=self.max_gates_per_batch,
+                        max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+                        circuit_compilation_options=self.circuit_compilation_options,
                     )
                 )
+                total_submit += time() - t_start
                 qcvv_logger.info(
                     f"All jobs for qubits {qubits} and sequence lengths {self.sequence_lengths} submitted successfully!"
                 )
@@ -541,6 +575,7 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                 execution_results, time_retrieve = retrieve_all_counts(job_dict["jobs"], identifier)
                 # Retrieve all job meta data
                 all_job_metadata = retrieve_all_job_metadata(job_dict["jobs"])
+                total_retrieve += time_retrieve
                 # Export all to dataset
                 dataset.attrs[qubit_idx[str(qubits)]].update(
                     {
@@ -558,6 +593,8 @@ class InterleavedRandomizedBenchmarking(Benchmark):
                 qcvv_logger.info(f"Adding counts of qubits {qubits} and depth {depth} run to the dataset")
                 dataset, _ = add_counts_to_dataset(execution_results, identifier, dataset)
 
+        dataset.attrs["total_submit_time"] = total_submit
+        dataset.attrs["total_retrieve_time"] = total_retrieve
         qcvv_logger.info(f"Interleaved RB experiment concluded !")
         self.circuits = Circuits([self.transpiled_circuits, self.untranspiled_circuits])
 

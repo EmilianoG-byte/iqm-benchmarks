@@ -94,17 +94,18 @@ def update_K_geodesic(K, H, a):
         K_new[i] = K[i] @ MN[:pdim, :] + Q @ MN[pdim:, :]
     return K_new.reshape(d, rK, pdim, pdim)    
 
-def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, state_psd, indices_list, prob_matrix):
+def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_matrix, state_vector, indices_list, prob_matrix, mle:bool=False) -> float:
     """Compute objective function at position on geodesic
     
     Args:
         step_size: Geodesic curve parameter
         tanget_vector: Element of the tangent space at K and local direction of the geodesic
         kraus: Current position. Dimensions are (num_gates, kraus_rank, dim_out, dim_in)
-        povm_tensor: Current POVM estimate. Dimensions are (num_povm, dim_out, dim_out)
-        state_psd: Positive semidefinite matrix representing the initial state. Dimensions are (dim_out, dim_out)
+        povm_tensor : A 2D array representing the POVM elements, of dimensions (num_povm, dim**2).
+        state_vector : A 1D array representing the density matrix of dimensions (dim**2).
         indices_list: 2D array where each row contains the gate indices of a gate sequence
         prob_matrix: 2D array of measurement outcomes for sequences in J.
+        mle: If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
         
     Returns:
         Objective function value at new position along the geodesic
@@ -112,7 +113,8 @@ def lineobjf_isom_geodesic(step_size:float, tanget_vector, kraus, povm_tensor, s
     K_test = update_K_geodesic(kraus, tanget_vector, step_size)
     num_gates, rank_kraus, dim, dim  = K_test.shape
     X_test = np.einsum("ijkl,ijnm -> iknlm", K_test, K_test.conj()).reshape((num_gates, dim**2, dim**2))
-    return cost_function_jax(X_test, povm_tensor, state_psd, indices_list, prob_matrix)
+    return objf(X=X_test, E=povm_matrix, rho=state_vector, J=indices_list, y=prob_matrix, mle=mle)
+    # return cost_function_jax(X_test, povm_tensor, state_psd, indices_list, prob_matrix)
     # return cost_function_jax_mps(K_test, povm_tensor, state_psd, indices_list, prob_matrix, jit=True)
 
 
@@ -184,7 +186,7 @@ def update_B_geodesic(B, H, a):
 
 from mGST.low_level_jit import cost_function_jax
 
-def lineobjf_A_geodesic(a, H, X, A, rho, J, y):
+def lineobjf_A_geodesic(a, H, X, A, rho, J, y, mle=False):
     """Compute objective function at position on geodesic for POVM parametrization
 
     Parameters
@@ -204,6 +206,8 @@ def lineobjf_A_geodesic(a, H, X, A, rho, J, y):
     y : numpy array
         2D array of measurement outcomes for sequences in J;
         The columns contain the outcome probabilities for different povm elements
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
@@ -213,11 +217,11 @@ def lineobjf_A_geodesic(a, H, X, A, rho, J, y):
     n_povm = A.shape[0]
     A_test = update_A_geodesic(A, H, a)
     E_test = np.array([(A_test[i].T.conj() @ A_test[i]).reshape(-1) for i in range(n_povm)])
-    return cost_function_jax(X, E_test, rho, J, y)
-    # return objf(X, E_test, rho, J, y)
+    return objf(X, E_test, rho, J, y, mle=mle)
+    # return cost_function_jax(X, E_test, rho, J, y)
 
 
-def lineobjf_B_geodesic(a, H, X, E, B, J, y):
+def lineobjf_B_geodesic(a, H, X, E, B, J, y, mle=False):
     """Compute objective function at position on geodesic for the initial state parametrization
 
     Parameters
@@ -237,6 +241,8 @@ def lineobjf_B_geodesic(a, H, X, E, B, J, y):
     y : numpy array
         2D array of measurement outcomes for sequences in J;
         The columns contain the outcome probabilities for different povm elements
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
@@ -245,8 +251,8 @@ def lineobjf_B_geodesic(a, H, X, E, B, J, y):
     """
     B_test = update_B_geodesic(B, H, a)
     rho_test = (B_test @ B_test.T.conj()).reshape(-1)
-    return cost_function_jax(X, E, rho_test, J, y)
-    # return objf(X, E, rho_test, J, y)
+    return objf(X, E, rho_test, J, y, mle=mle)
+    # return cost_function_jax(X, E, rho_test, J, y)
 
 
 def lineobjf_A_B(a, v, delta_v, X, C, y, J, argument):

@@ -21,7 +21,6 @@ from math import floor, pi
 from time import perf_counter, strftime
 from typing import Any, Dict, List, Sequence, Tuple, Type
 
-import matplotlib as mpl
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
@@ -30,7 +29,12 @@ import xarray as xr
 
 from iqm.benchmarks import Benchmark
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
-from iqm.benchmarks.benchmark_definition import BenchmarkAnalysisResult, BenchmarkRunResult
+from iqm.benchmarks.benchmark_definition import (
+    BenchmarkAnalysisResult,
+    BenchmarkObservation,
+    BenchmarkObservationIdentifier,
+    BenchmarkRunResult,
+)
 from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.utils import (
@@ -60,9 +64,9 @@ def plot_times(clops_data: xr.Dataset, observations: Dict[int, Dict[str, Dict[st
         Figure: the figure.
     """
     # Define the keys for different categories of times
-    job_keys = ["submit_total", "compile_total", "execution_total"]
-    user_keys = ["user_submit_total", "user_retrieve_total", "assign_parameters_total"]
+    job_keys = ["compile_total", "execution_total"]
     total_keys = ["job_total"]
+    user_keys = ["user_retrieve_total", "user_submit_total", "assign_parameters_total", "time_transpile"]
 
     # Define variables for dataset values
     qubits = clops_data.attrs["qubits"]
@@ -76,7 +80,7 @@ def plot_times(clops_data: xr.Dataset, observations: Dict[int, Dict[str, Dict[st
     all_data.update(observations[1])
 
     # Define colors
-    cmap = mpl.pyplot.get_cmap("winter")
+    cmap = plt.colormaps["winter"]
     colors = [cmap(i) for i in np.linspace(0, 1, len(job_keys) + len(user_keys) + len(total_keys) + 1)]
 
     # Plotting parameters
@@ -89,10 +93,6 @@ def plot_times(clops_data: xr.Dataset, observations: Dict[int, Dict[str, Dict[st
     ax2 = ax1.twinx()
 
     fig_name = f"{num_qubits}_qubits_{tuple(qubits)}"
-
-    # Plot total CLOPS time
-    x_t = ax1.bar(4 * sep, clops_time, barsize, zorder=0, label="clops time", color=(colors[-1], alpha), edgecolor="k")
-    ax1.bar_label(x_t, fmt=f"clops time: {clops_time:.2f}", fontsize=fontsize)
 
     # Plot user keys
     for i, (key, cumulative_value) in enumerate(zip(user_keys, np.cumsum([all_data[k] for k in user_keys]))):
@@ -107,18 +107,9 @@ def plot_times(clops_data: xr.Dataset, observations: Dict[int, Dict[str, Dict[st
         )
         ax1.bar_label(x, fmt=f"{key.replace('_total', ' ').replace('_', ' ')}: {all_data[key]:.2f}", fontsize=fontsize)
 
-    # Plot total keys
-    for i, (key, cumulative_value) in enumerate(zip(total_keys, np.cumsum([all_data[k] for k in total_keys]))):
-        x = ax1.bar(
-            2 * sep,
-            cumulative_value,
-            barsize,
-            zorder=1 - i / 10,
-            label=key,
-            color=(colors[len(job_keys) + i], alpha),
-            edgecolor="k",
-        )
-        ax1.bar_label(x, fmt=f"{key.replace('_total', ' ')}: {all_data[key]:.2f}", fontsize=fontsize)
+    # Plot total CLOPS time
+    x_t = ax1.bar(2 * sep, clops_time, barsize, zorder=0, color=(colors[-1], alpha), edgecolor="k")
+    ax1.bar_label(x_t, fmt=f"CLOPS time: {clops_time:.2f}", fontsize=fontsize)
 
     # Plot job keys
     for i, (key, cumulative_value) in enumerate(zip(job_keys, np.cumsum([all_data[k] for k in job_keys]))):
@@ -134,14 +125,14 @@ def plot_times(clops_data: xr.Dataset, observations: Dict[int, Dict[str, Dict[st
     ax2.spines["bottom"].set_visible(False)
 
     # Set axis labels and limits
-    ax1.set_ylabel("Total CLOPS time (seconds)")
-    ax2.set_ylabel("Total CLOPS time (%)")
-    ax1.set_ylim(-0.2, clops_time + 1)
+    ax1.set_ylabel("Total CLOPS experiment time (seconds)")
+    ax2.set_ylabel("Total CLOPS experiment time (%)")
+    ax1.set_ylim(-0.2, clops_time + all_data["assign_parameters_total"] + all_data["time_transpile"] + 1)
     ax2.set_ylim(-0.2, 100)
 
     # Set x-ticks and labels
-    time_types = ["Remote (components)", "Remote (total)", "Wall-time (components)", "Wall-time (total)"]
-    ax1.set_xticks([i * sep + 1 for i in range(4)], time_types, fontsize=fontsize)
+    time_types = ["Remote (components)", "Wall-time (CLOPS)", "Wall-time (all components)"]
+    ax1.set_xticks([i * sep + 1 for i in range(3)], time_types, fontsize=fontsize)
 
     # Set plot title
     if all_data["clops_h"]["value"] == 0:
@@ -180,19 +171,19 @@ def retrieve_clops_elapsed_times(job_meta: Dict[str, Dict[str, Any]]) -> Dict[st
             if job_meta[update][batch]["timestamps"] is not None:
                 x = job_meta[update][batch]["timestamps"]
                 job_time_format = "%Y-%m-%dT%H:%M:%S.%f%z"  # Is it possible to extract this automatically?
-                compile_f = datetime.strptime(x["compile_end"], job_time_format)
-                compile_i = datetime.strptime(x["compile_start"], job_time_format)
-                submit_f = datetime.strptime(x["submit_end"], job_time_format)
-                submit_i = datetime.strptime(x["submit_start"], job_time_format)
-                execution_f = datetime.strptime(x["execution_end"], job_time_format)
-                execution_i = datetime.strptime(x["execution_start"], job_time_format)
-                job_f = datetime.strptime(x["job_end"], job_time_format)
-                job_i = datetime.strptime(x["job_start"], job_time_format)
+                compile_f = datetime.strptime(x["compilation_ended"], job_time_format)
+                compile_i = datetime.strptime(x["compilation_started"], job_time_format)
+                # submit_f = datetime.strptime(x["submit_end"], job_time_format)
+                # submit_i = datetime.strptime(x["submit_start"], job_time_format)
+                execution_f = datetime.strptime(x["execution_ended"], job_time_format)
+                execution_i = datetime.strptime(x["execution_started"], job_time_format)
+                job_f = datetime.strptime(x["ready"], job_time_format)
+                job_i = datetime.strptime(x["received"], job_time_format)
 
                 all_job_elapsed[update][batch] = {
                     "job_total": job_f - job_i,
                     "compile_total": compile_f - compile_i,
-                    "submit_total": submit_f - submit_i,
+                    # "submit_total": submit_f - submit_i,
                     "execution_total": execution_f - execution_i,
                 }
 
@@ -232,11 +223,12 @@ def clops_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
         AnalysisResult corresponding to CLOPS
     """
     plots: Dict[str, Any] = {}
-    observations = {}
+    obs_dict = {}
     dataset = run.dataset
 
     # Retrieve dataset values
     # backend_name = dataset.attrs["backend_configuration_name"]
+    qubits = dataset.attrs["qubits"]
     num_circuits = dataset.attrs["num_circuits"]
     num_updates = dataset.attrs["num_updates"]
     num_shots = dataset.attrs["num_shots"]
@@ -291,7 +283,7 @@ def clops_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
     )
 
     # UPDATE OBSERVATIONS
-    observations.update({1: processed_results})
+    obs_dict.update({1: processed_results})
 
     # PLOT
     # Get all execution elapsed times
@@ -305,13 +297,18 @@ def clops_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
             else:
                 qcvv_logger.info(f'\t"{k}": {overall_elapsed[k]:.2f} sec')
 
-        fig_name, fig = plot_times(dataset, observations)
+        fig_name, fig = plot_times(dataset, obs_dict)
         plots[fig_name] = fig
     else:
         qcvv_logger.info("There is no elapsed-time data associated to jobs (e.g., execution on simulator)")
 
     # Sort the final dataset
     dataset.attrs = dict(sorted(dataset.attrs.items()))
+
+    observations = [
+        BenchmarkObservation(name="clops_v", value=int(clops_v), identifier=BenchmarkObservationIdentifier(qubits)),
+        BenchmarkObservation(name="clops_h", value=int(clops_h), identifier=BenchmarkObservationIdentifier(qubits)),
+    ]
 
     return BenchmarkAnalysisResult(dataset=dataset, plots=plots, observations=observations)
 
@@ -460,7 +457,7 @@ class CLOPSBenchmark(Benchmark):
 
     @timeit
     def generate_circuit_list(
-        self,
+            self,
     ) -> List[QuantumCircuit]:
         """Generate a list of parametrized QV quantum circuits, with measurements at the end.
 
@@ -480,11 +477,11 @@ class CLOPSBenchmark(Benchmark):
 
     @timeit
     def assign_random_parameters_to_all(
-        self,
-        dict_parametrized_circs: Dict[Tuple, List[QuantumCircuit]],
-        optimize_sqg: bool,
+            self,
+            dict_parametrized_circs: Dict[Tuple, List[QuantumCircuit]],
+            optimize_sqg: bool,
     ) -> Tuple[List[List[float]], Dict[Tuple, List[QuantumCircuit]]]:
-        """
+        """Assigns random parameters to all parametrized circuits.
 
         Args:
             dict_parametrized_circs (Dict[Tuple, List[QuantumCircuit]]): Dictionary with list of int (qubits) as keys and lists of parametrized quantum circuits as values
@@ -494,30 +491,37 @@ class CLOPSBenchmark(Benchmark):
             - lists of list of float parameter values corresponding to param updates
             - dictionary with lists of int (qubits) as keys and lists of quantum circuits as values
         """
-        # Store parametrized circuits in a separate dictionary
-        sorted_dict_parametrized: Dict[Tuple, List[QuantumCircuit]] = {k: [] for k in dict_parametrized_circs.keys()}
-        param_values: List[List[float]] = []
-        for k in dict_parametrized_circs.keys():
-            for qc in dict_parametrized_circs[k]:
-                # Update parameters
-                parameters = self.generate_random_parameters()
+        # Pre-check if optimization is needed to avoid repeated condition checks
+        can_optimize = optimize_sqg and "move" not in self.backend.architecture.gates
 
-                # NDonis can't use optimize_sqg as is, yet -> complains about MOVE gate not being IQM native!
-                if optimize_sqg and self.backend.name != "IQMNdonisBackend":
+        # Pre-allocate the result dictionaries
+        sorted_dict_parametrized = {k: [] for k in dict_parametrized_circs}
+        param_values = []
+
+        # Generate all parameter sets at once
+        total_circuits = sum(len(circuits) for circuits in dict_parametrized_circs.values())
+        all_parameters = [self.generate_random_parameters() for _ in range(total_circuits)]
+        param_idx = 0
+
+        for k, circuits in dict_parametrized_circs.items():
+            for qc in circuits:
+                # Get pre-generated parameters
+                parameters = all_parameters[param_idx]
+                param_idx += 1
+
+                # Create parameter dictionary once
+                param_dict = dict(zip(qc.parameters, parameters))
+
+                # Assign parameters and optionally optimize
+                if can_optimize:
                     sorted_dict_parametrized[k].append(
-                        optimize_single_qubit_gates(  # Optimize SQG seems worth it AFTER assignment
-                            qc.assign_parameters(
-                                dict(zip(qc.parameters, parameters)),
-                                inplace=False,  # Leave the template intact for next updates
-                            )
+                        optimize_single_qubit_gates(
+                            qc.assign_parameters(param_dict, inplace=False)
                         )
                     )
                 else:
                     sorted_dict_parametrized[k].append(
-                        qc.assign_parameters(
-                            dict(zip(qc.parameters, parameters)),
-                            inplace=False,  # Leave the template intact for next updates
-                        )
+                        qc.assign_parameters(param_dict, inplace=False)
                     )
 
                 param_values.append(list(parameters))
@@ -540,7 +544,10 @@ class CLOPSBenchmark(Benchmark):
         """
         # Assign parameters to all quantum circuits
         qcvv_logger.info(
-            f"Update {(update + 1)}/{self.num_updates}\nAssigning random parameters to all {self.num_circuits} circuits"
+            f"Update {(update + 1)}/{self.num_updates}"
+        )
+        qcvv_logger.info(
+            f"Assigning random parameters to all {self.num_circuits} circuits"
         )
         (all_param_updates, sorted_transpiled_qc_list_parametrized), time_parameter_assign = (
             self.assign_random_parameters_to_all(sorted_transpiled_qc_list, self.optimize_sqg)
@@ -554,6 +561,8 @@ class CLOPSBenchmark(Benchmark):
             self.num_shots,
             self.calset_id,
             max_gates_per_batch=self.max_gates_per_batch,
+            max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+            circuit_compilation_options=self.circuit_compilation_options,
         )
 
         qcvv_logger.info(f"Retrieving counts")
@@ -604,7 +613,7 @@ class CLOPSBenchmark(Benchmark):
 
         self.untranspiled_circuits.circuit_groups.append(CircuitGroup(name=self.qubits, circuits=qc_list))
         for key in sorted_transpiled_qc_list.keys():
-            self.transpiled_circuits.circuit_groups.append(CircuitGroup(name=f"{self.qubits}_{key}", circuits=qc_list))
+            self.transpiled_circuits.circuit_groups.append(CircuitGroup(name=f"{self.qubits}_{key}", circuits=transpiled_qc_list))
 
         return sorted_transpiled_qc_list
 
@@ -658,7 +667,7 @@ class CLOPSBenchmark(Benchmark):
 
         dataset.attrs.update(
             {
-                "clops_time": end_clops_timer - start_clops_timer,
+                "clops_time": end_clops_timer - start_clops_timer - sum(all_times_parameter_assign.values()),
                 "all_times_parameter_assign": all_times_parameter_assign,
                 "all_times_submit": all_times_submit,
                 "all_times_retrieve": all_times_retrieve,

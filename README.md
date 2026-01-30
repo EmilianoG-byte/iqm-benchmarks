@@ -7,13 +7,15 @@ Below is a list of the benchmarks currently available in the suite:
 * Gates / Layers:
   - Standard Clifford Randomized Benchmarking [[Phys. Rev. A 85, 042311](https://journals.aps.org/pra/abstract/10.1103/PhysRevA.85.042311) (2012)]
   - Interleaved Randomized Benchmarking [[Phys. Rev. Lett. 109, 080505](https://doi.org/10.1103/PhysRevLett.109.080505) (2012)]
-  - Compressive Gate Set Tomography [[PRX Quantum 4, 010325](https://journals.aps.org/prxquantum/abstract/10.1103/PRXQuantum.4.010325) (2023)]
+  - Compressive Gate Set Tomography [[PRX Quantum 4, 010325](https://journals.aps.org/prxquantum/abstract/10.1103/PRXQuantum.4.010325) (2023)] (Optional dependencies required)
   - Mirror Randomized Benchmarking [[Phys. Rev. Lett. 129, 150502](https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.129.150502) (2022)]
+  - Error Per Layered Gate [[arXiv:2311.05933 [quant-ph]](https://arxiv.org/abs/2311.05933) (2023)]
 * Holistic:
   - Quantum Volume [[Phys. Rev. A 100, 032328](https://doi.org/10.1103/PhysRevA.100.032328) (2019)]
   - CLOPS [[arXiv:2110.14108 [quant-ph]](https://arxiv.org/abs/2110.14108) (2021)]
 * Entanglement:
   - GHZ State Fidelity [[arXiv:0712.0921 [quant-ph]](https://arxiv.org/abs/0712.0921) (2007)]
+  - Graph State Bipartite Entanglement [[Adv. Quantum Technol., 2100061](https://doi.org/10.1002/qute.202100061) (2021)]
 * Optimization:
   - Q-Score [[IEEE Trans. Quantum Eng., 2](https://doi.org/10.1109/TQE.2021.3090207) (2021)]
 
@@ -22,44 +24,71 @@ The project is split into different benchmarks, all sharing the `Benchmark` clas
 
 ## Installation _(latest release)_
 
-Usually it makes sense to use a new Conda environment (e.g. ``iqm-benchmarks``) to isolate your setup from the global Python installation. That way, you can play around without messing the rest of your system.
+[uv](https://docs.astral.sh/uv/) is highly recommended for practical Python environment and package management.
+With uv installed in your system, start a terminal in your machine and create a new Python environment
 
-Start a terminal in your machine, and type
-
-```
-conda create -n iqm-benchmarks python=3.11.2
-conda activate iqm-benchmarks
+```sh
+uv venv --python=3.11
 ```
 
+> Note: refer to uv's documentation if there are problems setting up a Python environment.
+
+After the command has run, read the output and make sure to use the prompt to activate the environment.
 Then, you can install the latest release of the IQM Benchmarks by running:
-```bash
-$ pip install iqm-benchmarks
+
+```sh
+uv pip install iqm-benchmarks
 ```
 
-If you have already installed `iqm-benchmarks` and want to get the latest release you can add the --upgrade flag:
+Supplied within the Python package there is an additional `requirements.txt` file containing locked, security scanned
+dependencies. The file can be used to constrain installed dependencies either directly from the repo or by
+extracting it from the PyPI package.
 
-```bash
-pip install iqm-benchmarks --upgrade
+```sh
+uv pip install --constraint requirements.txt iqm-benchmarks
 ```
 
-## Development mode _(latest changes: recommended)_
+## Optional dependencies
 
-To install in development mode with all required dependencies, you can instead clone the [repository](https://www.github.com/iqm-finland/iqm-benchmarks) and from the project directory run
+Optional dependencies like compressive gate set tomography and jupyter notebooks can be installed as follows:
+```sh
+uv pip install "iqm-benchmarks[mgst,examples]"
+```
+Current optional dependencies are:
+* `examples`: Jupyter notebooks
+* `mgst`: Compressive gate set tomography
+* `test`: Code testing and Linting
+* `docs`: Documentation building
+* `cicd`: CICD tools
 
-```bash
-python -m pip install -e ".[develop,test]" --upgrade --upgrade-strategy=eager
+## Development installation _(latest changes)_
+
+To install in development mode with all required dependencies, you can instead clone the
+[repository](https://www.github.com/iqm-finland/iqm-benchmarks) and from the project directory run
+
+```sh
+uv pip install --constraint requirements.txt iqm-benchmarks --editable ."[test, docs, mgst]"
 ```
 
 To run the tests, you can use the following command:
 
-```bash
-tox -e test
+```sh
+./test
 ```
 
 To build the API documentation as HTML:
 
-```bash
-tox -e docs
+```sh
+./docbuild
+```
+
+Update the requirements. This is necessary when you add a new dependency or update an existing one in `pyproject.toml`.
+After this, any changes in the lockfile `requirements.txt` have to be committed.
+The script upgrades locked dependencies defined in `pyproject.toml` within the given version ranges. However, transitive
+dependencies are deliberately not upgraded automatically.
+
+```sh
+python update-requirements.py
 ```
 
 ## Characterize Physical Hardware
@@ -114,7 +143,7 @@ EXAMPLE_MRB = MirrorRBConfiguration(
 )
 
 EXAMPLE_QV = QuantumVolumeConfiguration(
-    num_circuits=500,
+    num_circuits=800,
     shots=2**8,
     calset_id=None,
     num_sigmas=2,
@@ -124,7 +153,8 @@ EXAMPLE_QV = QuantumVolumeConfiguration(
     optimize_sqg=True,
     routing_method="sabre",
     physical_layout="fixed",
-    max_gates_per_batch=60_000,
+    max_circuits_per_batch=500,
+    max_gates_per_batch=60_000, # Will be used if it renders a smaller max batch size than max_circuits_per_batch
     rem=True,
     mit_shots=1_000,
 )

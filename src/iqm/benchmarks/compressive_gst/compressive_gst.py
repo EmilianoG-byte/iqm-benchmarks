@@ -32,16 +32,17 @@ from typing import Any, Dict, List, Tuple, Type, Union
 import numpy as np
 from qiskit.circuit.library import CZGate, RGate
 import xarray as xr
+from time import strftime
 
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
-from iqm.benchmarks.benchmark_definition import Benchmark, add_counts_to_dataset
+from iqm.benchmarks.benchmark_definition import Benchmark, BenchmarkObservationIdentifier, add_counts_to_dataset
 from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.compressive_gst.gst_analysis import mgst_analysis
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.utils import (
+    get_active_qubits,
     perform_backend_transpilation,
     retrieve_all_counts,
-    set_coupling_map,
     submit_execute,
     timeit,
 )
@@ -58,6 +59,8 @@ class CompressiveGST(Benchmark):
 
     analysis_function = staticmethod(mgst_analysis)
 
+    name: str = "compressive_gst"
+
     def __init__(self, backend: IQMBackendBase, configuration: "GSTConfiguration"):
         """Construct the compressive_gst class.
 
@@ -71,16 +74,18 @@ class CompressiveGST(Benchmark):
         self.num_qubits = len(self.qubit_layouts[0])
         self.pdim = 2**self.num_qubits
         self.num_povm = self.pdim
+        self.verbose_level = configuration.verbose_level
 
-        self.gate_set, self.gate_labels, self.num_gates = parse_gate_set(configuration, self.num_qubits)
+        self.gate_set, self.gate_labels, self.num_gates = parse_gate_set(
+            configuration, self.num_qubits, self.qubit_layouts
+        )
+        self.gate_context = configuration.gate_context
+        validate_gate_context(self)
 
         if configuration.opt_method not in ["GD", "SFN", "auto"]:
             raise ValueError("Invalid optimization method, valid options are: GD, SFN, auto")
         if configuration.opt_method == "auto":
-            if (self.num_qubits == 2 and configuration.rank > 2) or self.num_qubits > 2:
-                self.opt_method = "GD"
-            else:
-                self.opt_method = "SFN"
+            self.opt_method = "GD"  # Currently the fastest method in all cases
         else:
             self.opt_method = configuration.opt_method
 
@@ -91,23 +96,18 @@ class CompressiveGST(Benchmark):
                 self.max_iterations = [250, 250]
         elif isinstance(configuration.max_iterations, list):
             self.max_iterations = configuration.max_iterations
+        elif isinstance(configuration.max_iterations, int):
+            self.max_iterations = [configuration.max_iterations, configuration.max_iterations]
         if configuration.batch_size == "auto":
             self.batch_size = 30 * self.pdim
         else:
             self.batch_size = configuration.batch_size
 
-        self.y, self.J = (
-            np.empty((self.num_povm, self.configuration.num_circuits)),
-            np.empty((self.configuration.num_circuits, self.num_povm)),
-        )  # format used by mGST
-        self.bootstrap_results = List[Tuple[np.ndarray]]  # List of GST outcomes from bootstrapping
-
-    @staticmethod
-    def name() -> str:
-        return "compressive_GST"
+        # Circuit format used by mGST
+        self.J = np.empty((self.configuration.num_circuits, self.num_povm))
 
     @timeit
-    def generate_meas_circuits(self) -> None:
+    def generate_meas_circuits(self) -> tuple[BenchmarkCircuit, BenchmarkCircuit]:
         """Generate random circuits from the gate set
 
         The random circuits are distributed among different depths ranging from L_MIN
@@ -117,10 +117,17 @@ class CompressiveGST(Benchmark):
         meaningful results
 
         Returns:
+            transpiled_circuits: BenchmarkCircuit
+                The transpiled circuits
+            untranspiled_circuits: BenchmarkCircuit
+                The untranspiled circuits
             circuit_gen_transp_time: float
                 The time it took to generate and transpile the circuits
-
         """
+
+        transpiled_circuits = BenchmarkCircuit(name="transpiled_circuits")
+        untranspiled_circuits = BenchmarkCircuit(name="untranspiled_circuits")
+
         # Calculate number of short and long circuits
         N_short = int(np.ceil(self.configuration.num_circuits / 2))
         N_long = int(np.floor(self.configuration.num_circuits / 2))
@@ -140,27 +147,77 @@ class CompressiveGST(Benchmark):
             gate_circuits, self.gate_set, self.num_qubits, unmapped_qubits
         )
 
-        for qubits in self.qubit_layouts:
-            coupling_map = set_coupling_map(qubits, self.backend, physical_layout="fixed")
+        if "move" in self.backend.operation_names:
+            qcvv_logger.warning(
+                f"Transpilation on star-architectures currently allows move gates to transit barriers, "
+                f"leading to context-dependent gates which GST can not accurately resolve."
+            )
 
-            # Perform transpilation to backend
-            qcvv_logger.info(
-                f"Will transpile all {self.configuration.num_circuits} circuits according to fixed physical layout"
+        # Perform transpilation to backend
+        qcvv_logger.info(
+            f"Will transpile all {self.configuration.num_circuits} circuits according to fixed physical layout"
+        )
+
+        if "move" in self.backend.operation_names:
+            backend_qubits = np.arange(1, self.backend.num_qubits)
+            qubit_layouts = [[q - 1 for q in layout] for layout in self.qubit_layouts]
+        else:
+            backend_qubits = np.arange(self.backend.num_qubits)
+            qubit_layouts = self.qubit_layouts
+
+        if self.configuration.parallel_execution:
+            all_qubits = [qubit for layout in qubit_layouts for qubit in layout]
+            if len(all_qubits) != len(set(all_qubits)):
+                raise ValueError(
+                    "Qubit layouts can't overlap when parallel_execution is enabled, please choose non-overlapping layouts."
+                )
+            # For each gate sequence, create a circuit with gate context and GST sequence on all qubits in the layout
+            composed_qc_list = qiskit_interface.get_composed_qiskit_circuits(
+                gate_circuits,
+                self.gate_set,
+                self.backend.num_qubits,
+                qubit_layouts,
+                gate_context=self.gate_context,
+                parallel=True,
             )
             transpiled_qc_list, _ = perform_backend_transpilation(
-                raw_qc_list,
+                composed_qc_list,
                 self.backend,
-                qubits,
-                coupling_map=coupling_map,
+                qubits=backend_qubits,
+                coupling_map=self.backend.coupling_map,
                 qiskit_optim_level=0,
-                optimize_sqg=False,
+                optimize_sqg=True,
                 drop_final_rz=False,
             )
-            # Saving raw and transpiled circuits in a consistent format with other benchmarks
-            self.transpiled_circuits.circuit_groups.append(CircuitGroup(name=str(qubits), circuits=raw_qc_list))
-            self.untranspiled_circuits.circuit_groups.append(
-                CircuitGroup(name=str(qubits), circuits=transpiled_qc_list)
+            for qubits in self.qubit_layouts:
+                # Saving raw and transpiled circuits in a consistent format with other benchmarks
+                transpiled_circuits.circuit_groups.append(CircuitGroup(name=str(qubits), circuits=transpiled_qc_list))
+                untranspiled_circuits.circuit_groups.append(CircuitGroup(name=str(qubits), circuits=raw_qc_list))
+        else:
+            # for parralel = False, a unique list of circuits is generated for each qubit layout
+            composed_qc_list = qiskit_interface.get_composed_qiskit_circuits(
+                gate_circuits,
+                self.gate_set,
+                self.backend.num_qubits,
+                qubit_layouts,
+                gate_context=self.gate_context,
+                parallel=False,
             )
+            for idx, qubits in enumerate(self.qubit_layouts):
+                transpiled_qc_list, _ = perform_backend_transpilation(
+                    composed_qc_list[idx],
+                    self.backend,
+                    backend_qubits,
+                    coupling_map=self.backend.coupling_map,
+                    qiskit_optim_level=0,
+                    optimize_sqg=False,
+                    drop_final_rz=False,
+                )
+                # Saving raw and transpiled circuits in a consistent format with other benchmarks
+                transpiled_circuits.circuit_groups.append(CircuitGroup(name=str(qubits), circuits=transpiled_qc_list))
+                untranspiled_circuits.circuit_groups.append(CircuitGroup(name=str(qubits), circuits=raw_qc_list))
+
+        return transpiled_circuits, untranspiled_circuits
 
     def add_configuration_to_dataset(self, dataset):  # CHECK
         """
@@ -172,48 +229,75 @@ class CompressiveGST(Benchmark):
             dataset: xarray.Dataset to be used for further data storage
         """
         # Adding configuration entries and class variables, prioritizing the latter in case of conflicts
-        for key, value in (self.configuration.__dict__ | self.__dict__).items():
-            if key == "benchmark":  # Avoid saving the class objects
-                dataset.attrs[key] = value.name()
-            elif key == "backend":
+        avoided_keys = ["runs", "configuration", "circuits"]
+        for key, value in (self.serializable_configuration.__dict__ | self.__dict__).items():
+            if key == "backend":
                 dataset.attrs[key] = value.name
-            else:
+            elif key not in avoided_keys:
                 dataset.attrs[key] = value
+            else:
+                pass
         dataset.attrs["gauge_weights"] = dict({f"G%i" % i: 1 for i in range(self.num_gates)}, **{"spam": 0.1})
 
     def execute(self, backend) -> xr.Dataset:
         """
         The main GST execution routine
         """
-
+        self.execution_timestamp = strftime("%Y%m%d-%H%M%S")
+        total_submit: float = 0
+        total_retrieve: float = 0
         dataset = xr.Dataset()
-        qcvv_logger.info(f"Now generating {self.configuration.num_circuits} random GST circuits...")
+        qcvv_logger.info(f"Generating {self.configuration.num_circuits} random GST circuits")
 
         self.circuits = Circuits()
-        self.transpiled_circuits = BenchmarkCircuit(name="transpiled_circuits")
-        self.untranspiled_circuits = BenchmarkCircuit(name="untranspiled_circuits")
         # Generate circuits
-        self.generate_meas_circuits()
+        (transpiled_circuits, untranspiled_circuits), _ = self.generate_meas_circuits()
 
         # Submit all
-        all_jobs: Dict = {}
-        for qubit_layout in self.qubit_layouts:
-            transpiled_circuit_dict = {tuple(qubit_layout): self.transpiled_circuits[str(qubit_layout)].circuits}
-            all_jobs[str(qubit_layout)], _ = submit_execute(
+        if self.configuration.parallel_execution:
+            transpiled_circuit_dict = {
+                tuple(range(self.backend.num_qubits)): transpiled_circuits[str(self.qubit_layouts[0])].circuits
+            }
+            all_jobs_parallel, time_submit = submit_execute(
                 transpiled_circuit_dict,
                 backend,
                 self.configuration.shots,
                 self.calset_id,
                 max_gates_per_batch=self.configuration.max_gates_per_batch,
+                max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+                circuit_compilation_options=self.circuit_compilation_options,
             )
-        # Retrieve all
-        qcvv_logger.info(f"Now executing the corresponding circuit batch")
-        for qubit_layout in self.qubit_layouts:
-            counts, _ = retrieve_all_counts(all_jobs[str(qubit_layout)])
-            dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
+            total_submit += time_submit
+            # Retrieve
+            qcvv_logger.info(f"Now executing the corresponding circuit batch")
+            counts, time_retrieve = retrieve_all_counts(all_jobs_parallel)
+            total_retrieve += time_retrieve
+            dataset, _ = add_counts_to_dataset(counts, f"parallel_results", dataset)
+        else:
+            all_jobs: Dict = {}
+            for qubit_layout in self.qubit_layouts:
+                transpiled_circuit_dict = {tuple(qubit_layout): transpiled_circuits[str(qubit_layout)].circuits}
+                all_jobs[str(qubit_layout)], time_submit = submit_execute(
+                    transpiled_circuit_dict,
+                    backend,
+                    self.configuration.shots,
+                    self.calset_id,
+                    max_gates_per_batch=self.configuration.max_gates_per_batch,
+                    max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+                )
+                total_submit += time_submit
+            # Retrieve all
+            qcvv_logger.info(f"Now executing the corresponding circuit batch")
+            for qubit_layout in self.qubit_layouts:
+                counts, time_retrieve = retrieve_all_counts(all_jobs[str(qubit_layout)])
+                total_retrieve += time_retrieve
+                dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
 
+        self.circuits.benchmark_circuits = [transpiled_circuits, untranspiled_circuits]
         self.add_configuration_to_dataset(dataset)
-        self.circuits.benchmark_circuits = [self.transpiled_circuits, self.untranspiled_circuits]
+        dataset.attrs["total_submit_time"] = total_submit
+        dataset.attrs["total_retrieve_time"] = total_retrieve
+        qcvv_logger.info(f"Run completed")
         return dataset
 
 
@@ -270,11 +354,15 @@ class GSTConfiguration(BenchmarkConfigurationBase):
             * Default: "auto"
         bootstrap_samples (int): The number of times the optimization algorithm is repeated on fake data to estimate
             the uncertainty via bootstrapping.
+        verbose_level (int): The level of verbosity of the output. 0 is minimal, 1 gives optimization updates, 2 outputs optimization plots
+            * Default: 1
+        parallel_execution (bool): Whether to run the circuits for all layouts in parallel on the backend.
     """
 
     benchmark: Type[Benchmark] = CompressiveGST
     qubit_layouts: Union[List[int], List[List[int]]]
     gate_set: Union[str, List[Any]]
+    gate_context: Union[Any, List[Any], None] = None
     num_circuits: int
     rank: int
     shots: int = 2**10
@@ -283,10 +371,12 @@ class GSTConfiguration(BenchmarkConfigurationBase):
     from_init: bool = True
     max_inits: int = 20
     opt_method: str = "auto"
-    max_iterations: Union[str, List[int]] = "auto"
-    convergence_criteria: Union[str, List[float]] = [4, 1e-4]
+    max_iterations: Union[str, List[int], int] = "auto"
+    convergence_criteria: Union[str, List[float]] = [4, 1e-5]
     batch_size: Union[str, int] = "auto"
     bootstrap_samples: int = 0
+    verbose_level: int = 1
+    parallel_execution: bool = False
 
 
 def parse_layouts(qubit_layouts: Union[List[int], List[List[int]]]) -> List[List[int]]:
@@ -297,7 +387,7 @@ def parse_layouts(qubit_layouts: Union[List[int], List[List[int]]]) -> List[List
             The qubit_layouts on the backend where the gates are defined on
 
     Returns:
-        qubit_layouts: List[List[[int]]
+        qubit_layouts: List[List[int]]
             A properly typed qubit_layout if no Error was raised
     """
     if all(isinstance(qubits, int) for qubits in qubit_layouts):
@@ -315,8 +405,33 @@ def parse_layouts(qubit_layouts: Union[List[int], List[List[int]]]) -> List[List
     )
 
 
+def validate_gate_context(self):
+    """Validate that the gate context is properly configured.
+
+    Checks that:
+    1. If gate_context is a list, it has the same length as gate_set
+    2. The qubits used in gate_context don't overlap with qubits in the layouts
+
+    Raises:
+        ValueError: If gate_context is invalid or if qubits in gate_context overlap with qubits in layouts
+    """
+    if self.gate_context is not None:
+        if isinstance(self.gate_context, list):
+            if len(self.gate_context) != len(self.gate_set):
+                raise ValueError("If gate_context is a list, it must have the same length as gate_set.")
+            # Check that context circuits don't overlap with qubit layouts for GST circuits
+            context_qubits = [q for qc in self.gate_context for q in get_active_qubits(qc)]
+        else:
+            context_qubits = get_active_qubits(self.gate_context)
+        layout_qubits = [q for layout in self.qubit_layouts for q in layout]
+        if any(q in layout_qubits for q in context_qubits):
+            raise ValueError(
+                f"Gate context qubits {set(context_qubits)} must not overlap with qubits in layouts {set(layout_qubits)}."
+            )
+
+
 def parse_gate_set(
-    configuration: GSTConfiguration, num_qubits
+    configuration: GSTConfiguration, num_qubits: int, qubit_layouts: List[List[int]]
 ) -> Tuple[List[QuantumCircuit], Dict[str, Dict[int, str]], int]:
     """
     Handles different gate set inputs and produces a valid gate set
@@ -326,52 +441,61 @@ def parse_gate_set(
             Configuration class containing variables
         num_qubits: int
             The number of qubits on which the gate set is defined
+        qubit_layouts: List[List[int]]
+            A List of physical qubit layouts, as specified by integer labels, where the benchmark is meant to be run.
 
     Returns:
         gate_set: List[QuantumCircuit]
             A list of gates defined as quantum circuit objects
-        gate_labels: List[Dict[int, str]]
-            A dictionary with gate names for each layout
+        gate_labels_dict: Dict[str, Dict[int, str]]
+            The names of gates, i.e. "Rx_pi_2" for a pi/2 rotation around the x-axis.
         num_gates: int
             The number of gates in the gate set
 
     """
     if isinstance(configuration.gate_set, str) and configuration.gate_set not in [
         "1QXYI",
-        "2QXYCZ",
+        "2QXYICZ",
         "2QXYCZ_extended",
         "3QXYCZ",
     ]:
         raise ValueError(
             "No gate set of the specified name is implemented, please choose among "
-            "1QXYI, 2QXYCZ, 2QXYCZ_extended, 3QXYCZ."
+            "1QXYI, 2QXYICZ, 2QXYCZ_extended, 3QXYCZ."
         )
-    if configuration.gate_set in ["1QXYI", "2QXYCZ", "2QXYCZ_extended", "3QXYCZ"]:
-        gate_set, gate_labels, num_gates = create_predefined_gate_set(configuration.gate_set, num_qubits)
-        return gate_set, gate_labels, num_gates
+    if configuration.gate_set in ["1QXYI", "2QXYICZ", "2QXYCZ_extended", "3QXYCZ"]:
+        gate_set, gate_label_dict, num_gates = create_predefined_gate_set(
+            configuration.gate_set, num_qubits, qubit_layouts
+        )
+        return gate_set, gate_label_dict, num_gates
 
     if isinstance(configuration.gate_set, list):
+        gate_label_dict = {}
         gate_set = configuration.gate_set
         num_gates = len(gate_set)
         if configuration.gate_labels is None:
             gate_labels = {i: f"Gate %i" % i for i in range(num_gates)}
         else:
-            if configuration.gate_labels:
-                if len(configuration.gate_labels) != num_gates:
-                    raise ValueError(
-                        f"The number of gate labels (%i) does not match the number of gates (%i)"
-                        % (len(configuration.gate_labels), num_gates)
-                    )
-                gate_labels = dict(enumerate(configuration.gate_labels))
-        return gate_set, gate_labels, num_gates
+            if len(configuration.gate_labels) != num_gates:
+                raise ValueError(
+                    f"The number of gate labels (%i) does not match the number of gates (%i)"
+                    % (len(configuration.gate_labels), num_gates)
+                )
+            gate_labels = dict(enumerate(configuration.gate_labels))
+        for qubit_layout in qubit_layouts:
+            gate_label_dict.update({BenchmarkObservationIdentifier(qubit_layout).string_identifier: gate_labels})
+        return gate_set, gate_label_dict, num_gates
 
     raise ValueError(
-        f"Invalid gate set, choose among 1QXYI, 2QXYCZ, 2QXYCZ_extended,"
+        f"Invalid gate set, choose among 1QXYI, 2QXYICZ, 2QXYCZ_extended,"
         f" 3QXYCZ or provide a list of Qiskti circuits to define the gates."
     )
 
 
-def create_predefined_gate_set(gate_set, num_qubits) -> Tuple[List[QuantumCircuit], Dict, int]:
+# pylint: disable=too-many-statements
+def create_predefined_gate_set(
+    gate_set: Union[str, List[Any]], num_qubits: int, qubit_layouts: List[List[int]]
+) -> Tuple[List[QuantumCircuit], Dict[str, Dict[int, str]], int]:
     """Create a list of quantum circuits corresponding to a predefined gate set.
 
     The circuits are assigned to the specified qubit_layouts on the backend only during transipilation, so the qubit labels
@@ -383,30 +507,35 @@ def create_predefined_gate_set(gate_set, num_qubits) -> Tuple[List[QuantumCircui
     Returns:
         gates: List[QuantumCircuit]
             The gate set as a list of circuits
-        gate_labels_dict: Dict[int, str]
-            The names of gates, i.e. "Rx(pi/2)" for a pi/2 rotation around the x-axis.
+        gate_labels_dict: Dict[str, Dict[int, str]]
+            The names of gates, i.e. "Rx_pi_2" for a pi/2 rotation around the x-axis.
         num_gates: int
             The number of gates in the gate set
 
     """
     unmapped_qubits = list(np.arange(num_qubits))
+    # Define an idle gate using a time delay comparable to single qubit gate duration
+    Idle = QuantumCircuit(num_qubits, 0)
+    Idle.delay(32e-9, unit="s")
 
+    # Define the gate set
     if gate_set == "1QXYI":
-        gate_list = [RGate(1e-10, 0), RGate(0.5 * np.pi, 0), RGate(0.5 * np.pi, np.pi / 2)]
+        gate_list = [Idle, RGate(0.5 * np.pi, 0), RGate(0.5 * np.pi, np.pi / 2)]
         gates = [QuantumCircuit(num_qubits, 0) for _ in range(len(gate_list))]
         gate_qubits = [[0], [0], [0]]
         for i, gate in enumerate(gate_list):
             gates[i].append(gate, gate_qubits[i])
-        gate_labels = ["Idle", "Rx(pi/2)", "Ry(pi/2)"]
-    elif gate_set == "2QXYCZ":
-        gate_qubits = [[0], [1], [0], [1], [0, 1]]
-        gates = [QuantumCircuit(num_qubits, 0) for _ in range(5)]
-        gates[0].append(RGate(0.5 * np.pi, 0), [0])
-        gates[1].append(RGate(0.5 * np.pi, 0), [1])
-        gates[2].append(RGate(0.5 * np.pi, np.pi / 2), [0])
-        gates[3].append(RGate(0.5 * np.pi, np.pi / 2), [1])
-        gates[4].append(CZGate(), [0, 1])
-        gate_labels = ["Rx(pi/2)", "Rx(pi/2)", "Ry(pi/2)", "Ry(pi/2)", "CZ"]
+        gate_labels = ["Idle", "Rx_pi_2", "Ry_pi_2"]
+    elif gate_set == "2QXYICZ":
+        gate_qubits = [[0], [0], [1], [0], [1], [0, 1]]
+        gates = [QuantumCircuit(num_qubits, 0) for _ in range(6)]
+        gates[0].append(Idle, [0, 1])
+        gates[1].append(RGate(0.5 * np.pi, 0), [0])
+        gates[2].append(RGate(0.5 * np.pi, 0), [1])
+        gates[3].append(RGate(0.5 * np.pi, np.pi / 2), [0])
+        gates[4].append(RGate(0.5 * np.pi, np.pi / 2), [1])
+        gates[5].append(CZGate(), [0, 1])
+        gate_labels = ["Idle", "Rx_pi_2", "Rx_pi_2", "Ry_pi_2", "Ry_pi_2", "cz"]
     elif gate_set == "2QXYCZ_extended":
         gate_qubits = [[0], [1], [0], [1], [0, 1], [0, 1], [0, 1], [0, 1], [0, 1]]
         gates = [QuantumCircuit(num_qubits, 0) for _ in range(9)]
@@ -424,14 +553,14 @@ def create_predefined_gate_set(gate_set, num_qubits) -> Tuple[List[QuantumCircui
         gates[7].append(RGate(0.5 * np.pi, np.pi / 2), [1])
         gates[8].append(CZGate(), [[0], [1]])
         gate_labels = [
-            "Rx(pi/2)",
-            "Rx(pi/2)",
-            "Ry(pi/2)",
-            "Ry(pi/2)",
-            "Rx(pi/2)--Rx(pi/2)",
-            "Rx(pi/2)--Ry(pi/2)",
-            "Ry(pi/2)--Rx(pi/2)",
-            "Ry(pi/2)--Ry(pi/2)",
+            "Rx_pi_2",
+            "Rx_pi_2",
+            "Ry_pi_2",
+            "Ry_pi_2",
+            "Rx_pi_2-Rx_pi_2",
+            "Rx_pi_2-Ry_pi_2",
+            "Ry_pi_2-Rx_pi_2",
+            "Ry_pi_2-Ry_pi_2",
             "CZ",
         ]
     elif gate_set == "3QXYCZ":
@@ -449,7 +578,7 @@ def create_predefined_gate_set(gate_set, num_qubits) -> Tuple[List[QuantumCircui
         gate_qubits = [[0], [1], [2], [0], [1], [2], [0, 1], [0, 2]]
         for i, gate in enumerate(gate_list):
             gates[i].append(gate, gate_qubits[i])
-        gate_labels = ["Rx(pi/2)", "Rx(pi/2)", "Rx(pi/2)", "Ry(pi/2)", "Ry(pi/2)", "Ry(pi/2)", "CZ", "CZ"]
+        gate_labels = ["Rx_pi_2", "Rx_pi_2", "Rx_pi_2", "Ry_pi_2", "Ry_pi_2", "Ry_pi_2", "cz", "cz"]
     else:
         raise ValueError(
             f"Invalid gate set, choose among 1QXYI, 2QXYCZ, 2QXYCZ_extended,"
@@ -459,6 +588,12 @@ def create_predefined_gate_set(gate_set, num_qubits) -> Tuple[List[QuantumCircui
     gates = add_idle_gates(gates, unmapped_qubits, gate_qubits)
     gates = [remove_idle_wires(qc) for qc in gates]
 
-    gate_label_dict = dict(enumerate(gate_labels))
-
+    gate_label_dict = {}
+    for qubit_layout in qubit_layouts:
+        layout_label_dict = dict(enumerate(gate_labels))
+        iqm_qubits = [f"QB{q + 1}" for q in qubit_layout]
+        gate_qubits_iqm = [(iqm_qubits[q] for q in qubits) for qubits in gate_qubits]
+        for key, value in layout_label_dict.items():
+            layout_label_dict[key] = value + ":" + "__".join(gate_qubits_iqm[key])
+        gate_label_dict.update({BenchmarkObservationIdentifier(qubit_layout).string_identifier: layout_label_dict})
     return gates, gate_label_dict, len(gates)

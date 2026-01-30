@@ -27,9 +27,13 @@ from .benchmark_definition import (
 )
 from .circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from .entanglement.ghz import GHZBenchmark, GHZConfiguration
+from .entanglement.graph_states import GraphStateBenchmark, GraphStateConfiguration
+from .optimization.qscore import QScoreBenchmark, QScoreConfiguration
 from .quantum_volume.clops import CLOPSBenchmark, CLOPSConfiguration
 from .quantum_volume.quantum_volume import QuantumVolumeBenchmark, QuantumVolumeConfiguration
 from .randomized_benchmarking.clifford_rb.clifford_rb import CliffordRandomizedBenchmarking, CliffordRBConfiguration
+from .randomized_benchmarking.direct_rb.direct_rb import DirectRandomizedBenchmarking, DirectRBConfiguration
+from .randomized_benchmarking.eplg.eplg import EPLGBenchmark, EPLGConfiguration
 from .randomized_benchmarking.interleaved_rb.interleaved_rb import (
     InterleavedRandomizedBenchmarking,
     InterleavedRBConfiguration,
@@ -44,7 +48,20 @@ AVAILABLE_BENCHMARKS = {
     CliffordRandomizedBenchmarking.name: CliffordRandomizedBenchmarking,
     InterleavedRandomizedBenchmarking.name: InterleavedRandomizedBenchmarking,
     MirrorRandomizedBenchmarking.name: MirrorRandomizedBenchmarking,
+    DirectRandomizedBenchmarking.name: DirectRandomizedBenchmarking,
+    EPLGBenchmark.name: EPLGBenchmark,
+    QScoreBenchmark.name: QScoreBenchmark,
+    GraphStateBenchmark.name: GraphStateBenchmark,
 }
+
+try:
+    # Requires dependencies from "project.optional-dependencies.mgst" section to be installed. See "pyproject.toml"
+    # file
+    from .compressive_gst.compressive_gst import CompressiveGST, GSTConfiguration
+
+    AVAILABLE_BENCHMARKS.update({CompressiveGST.name: CompressiveGST})
+except ModuleNotFoundError:
+    pass
 
 try:
     # Change here if project is renamed and does not equal the package name

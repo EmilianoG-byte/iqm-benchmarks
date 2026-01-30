@@ -2,33 +2,37 @@
 Mirror Randomized Benchmarking.
 """
 
-from copy import deepcopy
-import random
-from time import strftime
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Type, cast
+from time import strftime, time
+from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Type
 import warnings
 
 import numpy as np
 from qiskit import transpile
 from qiskit.quantum_info import Clifford, random_clifford, random_pauli
-from qiskit_aer import Aer, AerSimulator
+from qiskit_aer import AerSimulator
 from scipy.spatial.distance import hamming
 import xarray as xr
 
-from iqm.benchmarks import BenchmarkAnalysisResult, BenchmarkRunResult
+from iqm.benchmarks import (
+    BenchmarkAnalysisResult,
+    BenchmarkObservation,
+    BenchmarkObservationIdentifier,
+    BenchmarkRunResult,
+)
 from iqm.benchmarks.benchmark import BenchmarkConfigurationBase
 from iqm.benchmarks.benchmark_definition import Benchmark, add_counts_to_dataset
 from iqm.benchmarks.circuit_containers import BenchmarkCircuit, CircuitGroup, Circuits
 from iqm.benchmarks.logging_config import qcvv_logger
 from iqm.benchmarks.randomized_benchmarking.randomized_benchmarking_common import (
+    edge_grab,
     exponential_rb,
     fit_decay_lmfit,
     lmfit_minimizer,
     plot_rb_decay,
-    validate_irb_gate,
 )
 from iqm.benchmarks.utils import (
     get_iqm_backend,
+    perform_backend_transpilation,
     retrieve_all_counts,
     retrieve_all_job_metadata,
     submit_execute,
@@ -87,143 +91,6 @@ def compute_polarizations(
     return polarizations
 
 
-# TODO: Let edge_grab also admit a 1Q gate ensemble! Currently uniform Clifford by default # pylint: disable=fixme
-# pylint: disable=too-many-branches
-def edge_grab(
-    qubit_set: List[int],
-    n_layers: int,
-    backend_arg: IQMBackendBase | str,
-    density_2q_gates: float = 0.25,
-    two_qubit_gate_ensemble: Optional[Dict[str, float]] = None,
-) -> List[QuantumCircuit]:
-    """Generate a list of random layers containing single-qubit Cliffords and two-qubit gates,
-    sampled according to the edge-grab algorithm (see arXiv:2204.07568 [quant-ph]).
-
-    Args:
-        qubit_set (List[int]): The set of qubits of the backend.
-        n_layers (int): The number of layers.
-        backend_arg (IQMBackendBase | str): IQM backend.
-        density_2q_gates (float): The expected density of 2Q gates in a circuit formed by subsequent application of layers
-        two_qubit_gate_ensemble (Dict[str, float]): A dictionary with keys being str specifying 2Q gates, and values being corresponding probabilities
-    Raises:
-        ValueError: if the probabilities in the gate ensembles do not add up to unity.
-    Returns:
-        List[QuantumCircuit]: the list of gate layers, in the form of quantum circuits.
-    """
-    # Check the ensemble of 2Q gates, otherwise assign
-    if two_qubit_gate_ensemble is None:
-        two_qubit_gate_ensemble = cast(Dict[str, float], {"CZGate": 1.0})
-    elif sum(two_qubit_gate_ensemble.values()) != 1.0:
-        raise ValueError("The 2Q gate ensemble probabilities must sum to 1.0")
-
-    # Validate 2Q gates and get circuits
-    two_qubit_circuits = {}
-    for k in two_qubit_gate_ensemble.keys():
-        two_qubit_circuits[k] = validate_irb_gate(k, backend_arg, gate_params=None)
-    # TODO: Admit parametrized 2Q gates! # pylint: disable=fixme
-
-    # Check backend and retrieve if necessary
-    if isinstance(backend_arg, str):
-        backend = get_iqm_backend(backend_arg)
-    else:
-        backend = backend_arg
-
-    # Definitions
-    num_qubits = len(qubit_set)
-    physical_to_virtual_map = {q: i for i, q in enumerate(qubit_set)}
-
-    # Get the possible edges where to place 2Q gates given the backend connectivity
-    twoq_edges = []
-    for i, q0 in enumerate(qubit_set):
-        for q1 in qubit_set[i + 1 :]:
-            if (q0, q1) in list(backend.coupling_map):
-                twoq_edges.append([q0, q1])
-    twoq_edges = list(sorted(twoq_edges))
-
-    # Generate the layers
-    layer_list = []
-    for _ in range(n_layers):
-        # Pick edges at random and store them in a new list "edge_list"
-        aux = deepcopy(twoq_edges)
-        edge_list = []
-        layer = QuantumCircuit(num_qubits)
-        # Take (and remove) edges from "aux", then add to "edge_list"
-        edge_qubits = []
-        while aux:
-            new_edge = random.choice(aux)
-            edge_list.append(new_edge)
-            edge_qubits = list(np.array(edge_list).flatten())
-            # Removes all edges which include either of the qubits in new_edge
-            aux = [e for e in aux if ((new_edge[0] not in e) and (new_edge[1] not in e))]
-
-        # Define the probability for adding 2Q gates, given the input density
-        if len(edge_list) != 0:
-            prob_2qgate = num_qubits * density_2q_gates / len(edge_list)
-        else:
-            prob_2qgate = 0
-
-        # Add gates in selected edges
-        for e in edge_list:
-            # Sample the 2Q gate
-            two_qubit_gate = random.choices(
-                list(two_qubit_gate_ensemble.keys()),
-                weights=list(two_qubit_gate_ensemble.values()),
-                k=1,
-            )[0]
-
-            # Pick whether to place the sampled 2Q gate according to the probability above
-            is_gate_placed = random.choices(
-                [True, False],
-                weights=[prob_2qgate, 1 - prob_2qgate],
-                k=1,
-            )[0]
-
-            if is_gate_placed:
-                if two_qubit_gate == "clifford":
-                    layer.compose(
-                        random_clifford(2).to_instruction(),
-                        qubits=[
-                            physical_to_virtual_map[e[0]],
-                            physical_to_virtual_map[e[1]],
-                        ],
-                        inplace=True,
-                    )
-                else:
-                    layer.append(
-                        two_qubit_circuits[two_qubit_gate],
-                        [
-                            physical_to_virtual_map[e[0]],
-                            physical_to_virtual_map[e[1]],
-                        ],
-                    )
-            else:
-                layer.compose(
-                    random_clifford(1).to_instruction(),
-                    qubits=[physical_to_virtual_map[e[0]]],
-                    inplace=True,
-                )
-                layer.compose(
-                    random_clifford(1).to_instruction(),
-                    qubits=[physical_to_virtual_map[e[1]]],
-                    inplace=True,
-                )
-
-        # Add 1Q gates in remaining qubits
-        remaining_qubits = [q for q in qubit_set if q not in edge_qubits]
-        while remaining_qubits:
-            for q in remaining_qubits:
-                layer.compose(
-                    random_clifford(1).to_instruction(),
-                    qubits=[physical_to_virtual_map[q]],
-                    inplace=True,
-                )
-                remaining_qubits.remove(q)
-
-        layer_list.append(layer)
-
-    return layer_list
-
-
 def generate_pauli_dressed_mrb_circuits(
     qubits: List[int],
     pauli_samples_per_circ: int,
@@ -231,8 +98,13 @@ def generate_pauli_dressed_mrb_circuits(
     backend_arg: IQMBackendBase | str,
     density_2q_gates: float = 0.25,
     two_qubit_gate_ensemble: Optional[Dict[str, float]] = None,
+    clifford_sqg_probability=1.0,
+    sqg_gate_ensemble: Optional[Dict[str, float]] = None,
     qiskit_optim_level: int = 1,
     routing_method: str = "basic",
+    simulation_method: Literal[
+        "automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"
+    ] = "automatic",
 ) -> Dict[str, List[QuantumCircuit]]:
     """Samples a mirror circuit and generates samples of "Pauli-dressed" circuits,
         where for each circuit, random Pauli layers are interleaved between each layer of the circuit
@@ -243,16 +115,34 @@ def generate_pauli_dressed_mrb_circuits(
         depth (int): the depth (number of canonical layers) of the circuit
         backend_arg (IQMBackendBase | str): the backend
         density_2q_gates (float): the expected density of 2Q gates
-        two_qubit_gate_ensemble (Optional[Dict[str, float]]):
-        qiskit_optim_level (int):
-        routing_method (str):
+        two_qubit_gate_ensemble (Optional[Dict[str, float]]): A dictionary with keys being str specifying 2Q gates, and values being corresponding probabilities.
+                * Default is None.
+        clifford_sqg_probability (float): Probability with which to uniformly sample Clifford 1Q gates.
+                * Default is 1.0.
+        sqg_gate_ensemble (Optional[Dict[str, float]]): A dictionary with keys being str specifying 1Q gates, and values being corresponding probabilities.
+                * Default is None.
+        qiskit_optim_level (int): Qiskit transpiler optimization level.
+                * Default is 1.
+        routing_method (str): Qiskit transpiler routing method.
+                * Default is "basic".
+        simulation_method (Literal["automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"]):
+                Qiskit's Aer simulation method
+                * Default is "automatic".
     Returns:
-
+        Dict[str, List[QuantumCircuit]]
     """
     num_qubits = len(qubits)
 
     # Sample the layers using edge grab sampler - different samplers may be conditionally chosen here in the future
-    cycle_layers = edge_grab(qubits, depth, backend_arg, density_2q_gates, two_qubit_gate_ensemble)
+    cycle_layers = edge_grab(
+        qubits,
+        depth,
+        backend_arg,
+        density_2q_gates,
+        two_qubit_gate_ensemble,
+        clifford_sqg_probability,
+        sqg_gate_ensemble,
+    )
 
     # Sample the edge (initial/final) random Single-qubit Clifford layer
     clifford_layer = [random_clifford(1) for _ in range(num_qubits)]
@@ -262,13 +152,11 @@ def generate_pauli_dressed_mrb_circuits(
     pauli_dressed_circuits_untranspiled: List[QuantumCircuit] = []
     pauli_dressed_circuits_transpiled: List[QuantumCircuit] = []
 
-    sim_method = "stabilizer"
-    simulator = AerSimulator(method=sim_method)
+    simulator = AerSimulator(method=simulation_method)
 
     for _ in range(pauli_samples_per_circ):
         # Initialize the quantum circuit object
         circ = QuantumCircuit(num_qubits)
-        circ_untransp = QuantumCircuit(num_qubits)
         # Sample all the random Paulis
         paulis = [random_pauli(num_qubits) for _ in range(depth + 1)]
 
@@ -286,7 +174,6 @@ def generate_pauli_dressed_mrb_circuits(
             )
             circ.barrier()
             circ.compose(cycle_layers[k], inplace=True)
-            circ_untransp.compose(cycle_layers[k], inplace=True)
             circ.barrier()
 
         # Apply middle Pauli
@@ -326,16 +213,22 @@ def generate_pauli_dressed_mrb_circuits(
 
         # Add measurements to transpiled - before!
         circ.measure_all()
-        circ_transpiled = transpile(
-            circ,
+        if "move" in retrieved_backend.architecture.gates:
+            # All-to-all coupling map on the active qubits
+            effective_coupling_map = [[x, y] for x in qubits for y in qubits if x != y]
+        else:
+            effective_coupling_map = retrieved_backend.coupling_map
+        circ_transpiled, _ = perform_backend_transpilation(
+            [circ],
             backend=retrieved_backend,
-            initial_layout=qubits,
-            optimization_level=qiskit_optim_level,
+            qubits=qubits,
+            coupling_map=effective_coupling_map,
+            qiskit_optim_level=qiskit_optim_level,
             routing_method=routing_method,
         )
 
         pauli_dressed_circuits_untranspiled.append(circ_untranspiled)
-        pauli_dressed_circuits_transpiled.append(circ_transpiled)
+        pauli_dressed_circuits_transpiled.append(circ_transpiled[0])
 
     # Store the circuit
     all_circuits.update(
@@ -357,8 +250,13 @@ def generate_fixed_depth_mrb_circuits(
     backend_arg: IQMBackendBase | str,
     density_2q_gates: float = 0.25,
     two_qubit_gate_ensemble: Optional[Dict[str, float]] = None,
+    clifford_sqg_probability=1.0,
+    sqg_gate_ensemble: Optional[Dict[str, float]] = None,
     qiskit_optim_level: int = 1,
     routing_method: str = "basic",
+    simulation_method: Literal[
+        "automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"
+    ] = "automatic",
 ) -> Dict[int, Dict[str, List[QuantumCircuit]]]:
     """Generates a dictionary MRB circuits at fixed depth, indexed by sample number
 
@@ -368,10 +266,21 @@ def generate_fixed_depth_mrb_circuits(
         pauli_samples_per_circ (int): the number of pauli samples per circuit
         depth (int): the depth (number of canonical layers) of the circuits
         backend_arg (IQMBackendBase | str): the backend
-        density_2q_gates (float):
+        density_2q_gates (float): the expected density of 2Q gates
+        two_qubit_gate_ensemble (Optional[Dict[str, float]]): A dictionary with keys being str specifying 2Q gates, and values being corresponding probabilities.
+                * Default is None.
         two_qubit_gate_ensemble (Optional[Dict[str, float]]):
-        qiskit_optim_level (int):
-        routing_method (str):
+        clifford_sqg_probability (float): Probability with which to uniformly sample Clifford 1Q gates.
+                * Default is 1.0.
+        sqg_gate_ensemble (Optional[Dict[str, float]]): A dictionary with keys being str specifying 1Q gates, and values being corresponding probabilities.
+                * Default is None.
+        qiskit_optim_level (int): Qiskit transpiler optimization level.
+                * Default is 1.
+        routing_method (str): Qiskit transpiler routing method.
+                * Default is "basic".
+        simulation_method (Literal["automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"]):
+                            Qiskit's Aer simulation method
+                            * Default is "automatic".
     Returns:
         A dictionary of lists of Pauli-dressed quantum circuits corresponding to the circuit sample index
     """
@@ -385,8 +294,11 @@ def generate_fixed_depth_mrb_circuits(
             backend_arg,
             density_2q_gates,
             two_qubit_gate_ensemble,
-            qiskit_optim_level,
-            routing_method,
+            clifford_sqg_probability,
+            sqg_gate_ensemble,
+            qiskit_optim_level=qiskit_optim_level,
+            routing_method=routing_method,
+            simulation_method=simulation_method,
         )
 
     return circuits
@@ -424,7 +336,8 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
         AnalysisResult corresponding to MRB
     """
     plots = {}
-    observations = {}
+    obs_dict = {}
+    observations: list[BenchmarkObservation] = []
     dataset = run.dataset.copy(deep=True)
 
     # shots = dataset.attrs["shots"]
@@ -509,7 +422,7 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
         fidelity = rb_fit_results.params["fidelity_mrb"]
 
         processed_results = {
-            "avg_gate_fidelity": {"value": fidelity.value, "uncertainty": fidelity.stderr},
+            "average_gate_fidelity": {"value": fidelity.value, "uncertainty": fidelity.stderr},
         }
 
         dataset.attrs[qubits_idx].update(
@@ -518,8 +431,8 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
                 "fit_amplitude": {"value": popt["amplitude"].value, "uncertainty": popt["amplitude"].stderr},
                 "fit_offset": {"value": popt["offset"].value, "uncertainty": popt["offset"].stderr},
                 "polarizations": polarizations,
-                "avg_polarization_nominal_values": average_polarizations,
-                "avg_polatization_stderr": stddevs_from_mean,
+                "average_polarization_nominal_values": average_polarizations,
+                "average_polarization_stderr": stddevs_from_mean,
                 "fitting_method": str(rb_fit_results.method),
                 "num_function_evals": int(rb_fit_results.nfev),
                 "data_points": int(rb_fit_results.ndata),
@@ -532,25 +445,36 @@ def mrb_analysis(run: BenchmarkRunResult) -> BenchmarkAnalysisResult:
         )
 
         # Update observations
-        observations.update({qubits_idx: processed_results})
+        obs_dict.update({qubits_idx: processed_results})
 
         # Generate plots
         fig_name, fig = plot_rb_decay(
             "mrb",
             [qubits],
             dataset,
-            observations,
+            obs_dict,
             mrb_2q_density=density_2q_gates,
             mrb_2q_ensemble=two_qubit_gate_ensemble,
         )
         plots[fig_name] = fig
+
+        observations.extend(
+            [
+                BenchmarkObservation(
+                    name="decay_rate",
+                    identifier=BenchmarkObservationIdentifier(qubits),
+                    value=popt["decay_rate"].value,
+                    uncertainty=popt["decay_rate"].stderr,
+                )
+            ]
+        )
 
     # Generate the combined plot
     fig_name, fig = plot_rb_decay(
         "mrb",
         qubits_array,
         dataset,
-        observations,
+        obs_dict,
         mrb_2q_density=density_2q_gates,
         mrb_2q_ensemble=two_qubit_gate_ensemble,
     )
@@ -582,17 +506,25 @@ class MirrorRandomizedBenchmarking(Benchmark):
 
         self.qubits_array = configuration.qubits_array
         self.depths_array = configuration.depths_array
+
         self.num_circuit_samples = configuration.num_circuit_samples
         self.num_pauli_samples = configuration.num_pauli_samples
+
         self.two_qubit_gate_ensemble = configuration.two_qubit_gate_ensemble
         self.density_2q_gates = configuration.density_2q_gates
+        self.clifford_sqg_probability = configuration.clifford_sqg_probability
+        self.sqg_gate_ensemble = configuration.sqg_gate_ensemble
 
         self.qiskit_optim_level = configuration.qiskit_optim_level
 
-        self.simulator = Aer.get_backend("qasm_simulator")
+        self.simulation_method = configuration.simulation_method
 
         self.session_timestamp = strftime("%Y%m%d-%H%M%S")
         self.execution_timestamp = ""
+
+        # Initialize the variable to contain the circuits for each layout
+        self.untranspiled_circuits = BenchmarkCircuit("untranspiled_circuits")
+        self.transpiled_circuits = BenchmarkCircuit("transpiled_circuits")
 
     def add_all_meta_to_dataset(self, dataset: xr.Dataset):
         """Adds all configuration metadata and circuits to the dataset variable
@@ -620,7 +552,8 @@ class MirrorRandomizedBenchmarking(Benchmark):
         sorted_transpiled_circuit_dicts: Dict[Tuple[int, ...], List[QuantumCircuit]],
     ) -> Dict[str, Any]:
         """
-            Submit fixed-depth MRB jobs for execution in the specified IQMBackend
+        Submit fixed-depth MRB jobs for execution in the specified IQMBackend
+
         Args:
             backend_arg (IQMBackendBase): the IQM backend to submit the job
             qubits (Sequence[int]): the qubits to identify the submitted job
@@ -637,6 +570,8 @@ class MirrorRandomizedBenchmarking(Benchmark):
             self.shots,
             self.calset_id,
             max_gates_per_batch=self.max_gates_per_batch,
+            max_circuits_per_batch=self.configuration.max_circuits_per_batch,
+            circuit_compilation_options=self.circuit_compilation_options,
         )
         mrb_submit_results = {
             "qubits": qubits,
@@ -657,10 +592,8 @@ class MirrorRandomizedBenchmarking(Benchmark):
         # Submit jobs for all qubit layouts
         all_mrb_jobs: List[Dict[str, Any]] = []
         time_circuit_generation: Dict[str, float] = {}
-
-        # Initialize the variable to contain the circuits for each layout
-        self.untranspiled_circuits = BenchmarkCircuit("untranspiled_circuits")
-        self.transpiled_circuits = BenchmarkCircuit("transpiled_circuits")
+        total_submit: float = 0
+        total_retrieve: float = 0
 
         # The depths should be assigned to each set of qubits!
         # The real final MRB depths are twice the originally specified, must be taken into account here!
@@ -704,8 +637,11 @@ class MirrorRandomizedBenchmarking(Benchmark):
                     backend,
                     self.density_2q_gates,
                     self.two_qubit_gate_ensemble,
+                    self.clifford_sqg_probability,
+                    self.sqg_gate_ensemble,
                     self.qiskit_optim_level,
                     self.routing_method,
+                    self.simulation_method,
                 )
                 time_circuit_generation[str(qubits)] += elapsed_time
 
@@ -719,7 +655,9 @@ class MirrorRandomizedBenchmarking(Benchmark):
 
                 # Submit
                 sorted_transpiled_qc_list = {tuple(qubits): mrb_transpiled_circuits_lists[depth]}
+                t_start = time()
                 all_mrb_jobs.append(self.submit_single_mrb_job(backend, qubits, depth, sorted_transpiled_qc_list))
+                total_retrieve += time() - t_start
                 qcvv_logger.info(f"Job for layout {qubits} & depth {depth} submitted successfully!")
 
                 self.untranspiled_circuits.circuit_groups.append(
@@ -732,7 +670,6 @@ class MirrorRandomizedBenchmarking(Benchmark):
             dataset.attrs[qubits_idx] = {"qubits": qubits}
 
         # Retrieve counts of jobs for all qubit layouts
-        all_job_metadata = {}
         for job_dict in all_mrb_jobs:
             qubits = job_dict["qubits"]
             depth = job_dict["depth"]
@@ -742,6 +679,7 @@ class MirrorRandomizedBenchmarking(Benchmark):
             )
             # Retrieve all job meta data
             all_job_metadata = retrieve_all_job_metadata(job_dict["jobs"])
+            total_retrieve += time_retrieve
             # Export all to dataset
             dataset.attrs[qubit_idx[str(qubits)]].update(
                 {
@@ -757,6 +695,8 @@ class MirrorRandomizedBenchmarking(Benchmark):
             qcvv_logger.info(f"Adding counts of qubits {qubits} and depth {depth} run to the dataset")
             dataset, _ = add_counts_to_dataset(execution_results, f"qubits_{str(qubits)}_depth_{str(depth)}", dataset)
 
+        dataset.attrs["total_submit_time"] = total_submit
+        dataset.attrs["total_retrieve_time"] = total_retrieve
         self.circuits = Circuits([self.transpiled_circuits, self.untranspiled_circuits])
 
         qcvv_logger.info(f"MRB experiment execution concluded !")
@@ -786,6 +726,13 @@ class MirrorRBConfiguration(BenchmarkConfigurationBase):
                             * Default is {"CZGate": 1.0}.
         density_2q_gates (float): The expected density of 2-qubit gates in the final circuits.
                             * Default is 0.25.
+        clifford_sqg_probability (float): Probability with which to uniformly sample Clifford 1Q gates.
+                * Default is 1.0.
+        sqg_gate_ensemble (Optional[Dict[str, float]]): A dictionary with keys being str specifying 1Q gates, and values being corresponding probabilities.
+                * Default is None.
+        simulation_method (Literal["automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"]):
+                            Qiskit's Aer simulation method
+                            * Default is "automatic".
     """
 
     benchmark: Type[Benchmark] = MirrorRandomizedBenchmarking
@@ -798,3 +745,8 @@ class MirrorRBConfiguration(BenchmarkConfigurationBase):
         "CZGate": 1.0,
     }
     density_2q_gates: float = 0.25
+    clifford_sqg_probability: float = 1.0
+    sqg_gate_ensemble: Optional[Dict[str, float]] = None
+    simulation_method: Literal[
+        "automatic", "statevector", "stabilizer", "extended_stabilizer", "matrix_product_state"
+    ] = "automatic"

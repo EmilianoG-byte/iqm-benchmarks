@@ -104,8 +104,8 @@ def contract(X, j_vec):
     return res
 
 
-@njit(cache=True, fastmath=True)
-def objf(X, E, rho, J, y):
+@njit(cache=True, fastmath=True)  # , parallel=True)
+def objf(X, E, rho, J, y, mle=False):
     """Calculate the objective function value for matrices, POVM elements, and target values.
 
     This function computes the objective function value based on input matrices X, POVM elements E,
@@ -123,6 +123,8 @@ def objf(X, E, rho, J, y):
         A 2D array representing the indices for which the objective function will be evaluated.
     y : numpy.ndarray
         A 2D array of shape (n_povm, len(J)) containing the target values.
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
@@ -132,12 +134,17 @@ def objf(X, E, rho, J, y):
     """
     m = len(J)
     n_povm = y.shape[0]
-    objf_ = 0
+    objf_: float = 0
     for i in prange(m):  # pylint: disable=not-an-iterable
         j = J[i][J[i] >= 0]
-        C = contract(X, j)
+        state = rho
+        for ind in j[::-1]:
+            state = X[ind] @ state
         for o in range(n_povm):
-            objf_ += abs(E[o].conj() @ C @ rho - y[o, i]) ** 2
+            if mle:
+                objf_ -= np.log(abs(E[o].conj() @ state)) * y[o, i]
+            else:
+                objf_ += abs(E[o].conj() @ state - y[o, i]) ** 2 / m / n_povm
     return objf_ / m / n_povm
 
 def cost_function_numba(K, E, rho, J, y):
@@ -772,9 +779,9 @@ def Mp_norm_lower(X_true, E_true, rho_true, X, E, rho, J, n_povm, p):
     return dist ** (1 / p) / m / n_povm, max_dist ** (1 / p)
 
 
-@njit(cache=True)
-def dK(X, K, E, rho, J, y, d, r, rK):
-    """Compute the derivative of the Kraus operator K with respect to its parameters.
+@njit(cache=True)  # , parallel=True)
+def dK(X, K, E, rho, J, y, d, r, rK, mle=False):
+    """Compute the derivative of the objective function with respect to the Kraus tensor K.
 
     This function calculates the derivative of the Kraus operator K, based on the
     input matrices X, E, and rho, as well as the isometry condition.
@@ -799,35 +806,60 @@ def dK(X, K, E, rho, J, y, d, r, rK):
         The rank of the problem.
     rK : int
         The number of rows in the reshaped Kraus operator K.
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
     numpy.ndarray
-        The derivative of the Kraus operator K with respect to its parameters,
+        The derivative objective function with respect to the Kraus tensor K,
         reshaped to (d, rK, pdim, pdim), and scaled by 2/m/n_povm.
     """
+    # pylint: disable=too-many-nested-blocks
     K = K.reshape(d, rK, -1)
     pdim = int(np.sqrt(r))
     n_povm = y.shape[0]
     dK_ = np.zeros((d, rK, r))
     dK_ = np.ascontiguousarray(dK_.astype(np.complex128))
     m = len(J)
-    for k in range(d):
+
+    for k in prange(d):  # pylint: disable=not-an-iterable
         for n in range(m):
             j = J[n][J[n] >= 0]
             for i, j_curr in enumerate(j):
                 if j_curr == k:
+                    R = rho.copy()
+                    for ind in j[i + 1 :][::-1]:
+                        R = X[ind] @ R
                     for o in range(n_povm):
-                        L = E[o].conj() @ contract(X, j[:i])
-                        R = contract(X, j[i + 1 :]) @ rho
-                        D_ind = L @ X[k] @ R - y[o, n]
-                        dK_[k] += D_ind * K[k].conj() @ np.kron(L.reshape(pdim, pdim).T, R.reshape(pdim, pdim).T)
-    return dK_.reshape(d, rK, pdim, pdim) * 2 / m / n_povm
+                        L = E[o].conj()
+                        for ind in j[:i]:
+                            L = L @ X[ind]
+                        if mle:
+                            p_ind = L @ X[k] @ R
+                            dK_[k] -= (
+                                K[k].conj()
+                                @ np.kron(L.reshape(pdim, pdim).T, R.reshape(pdim, pdim).T)
+                                * y[o, n]
+                                / p_ind
+                            )
+                        else:
+                            D_ind = L @ X[k] @ R - y[o, n]
+                            dK_[k] += (
+                                D_ind
+                                * K[k].conj()
+                                @ np.kron(L.reshape(pdim, pdim).T, R.reshape(pdim, pdim).T)
+                                * 2
+                                / m
+                                / n_povm
+                            )
+    return dK_.reshape(d, rK, pdim, pdim)
 
 
-@njit(cache=True)
-def dK_dMdM(X, K, E, rho, J, y, d, r, rK):
-    """Compute the derivatives of K, dM10, and dM11 for the given input parameters.
+@njit(cache=True)  # , parallel=False)
+def dK_dMdM(X, K, E, rho, J, y, d, r, rK, mle=False):
+    """Compute the derivatives of the objective function with respect to K and the
+    product of derivatives of the measurement map with respect to K.
 
     This function calculates the derivatives of K, dM10, and dM11 based on the input matrices X,
     matrix K, POVM elements E, density matrix rho, and target values y.
@@ -852,6 +884,8 @@ def dK_dMdM(X, K, E, rho, J, y, d, r, rK):
         The number of rows for the matrix K.
     rK : int
         The number of columns for the matrix K.
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
@@ -869,25 +903,41 @@ def dK_dMdM(X, K, E, rho, J, y, d, r, rK):
     for n in range(m):
         j = J[n][J[n] >= 0]
         dM = np.ascontiguousarray(np.zeros((n_povm, d, rK, r)).astype(np.complex128))
-        for i, _ in enumerate(j):
-            k = j[i]
-            C = contract(X, j[:i])
-            R = contract(X, j[i + 1 :]) @ rho
-            for o in range(n_povm):
-                L = E[o].conj() @ C
-                D_ind = L @ X[k] @ R - y[o, n]
-                dM_loc = K[k].conj() @ np.kron(L.reshape((pdim, pdim)).T, R.reshape((pdim, pdim)).T)
-                dM[o, k, :, :] += dM_loc
-                dK_[k] += D_ind * dM_loc
+        p_ind_array = np.zeros(n_povm).astype(np.complex128)
         for o in range(n_povm):
-            dM11 += np.kron(dM[o].conj().reshape(-1), dM[o].reshape(-1))
-            dM10 += np.kron(dM[o].reshape(-1), dM[o].reshape(-1))
-    return (dK_.reshape((d, rK, pdim, pdim)) * 2 / m / n_povm, 2 * dM10 / m / n_povm, 2 * dM11 / m / n_povm)
+            for i, k in enumerate(j):
+                R = rho.copy()
+                for ind in j[i + 1 :][::-1]:
+                    R = X[ind] @ R
+                L = E[o].conj().copy()
+                for ind in j[:i]:
+                    L = L @ X[ind]
+                dM_loc = K[k].conj() @ np.kron(L.reshape((pdim, pdim)).T, R.reshape((pdim, pdim)).T)
+                p_ind = L @ X[k] @ R
+                if mle:
+                    dM[o, k] += dM_loc
+                    dK_[k] -= dM_loc * y[o, n] / p_ind
+                else:
+                    dM[o, k] += dM_loc
+                    D_ind = p_ind - y[o, n]
+                    dK_[k] += D_ind * dM_loc * 2 / m / n_povm
+            if len(j) == 0:
+                p_ind_array[o] = E[o].conj() @ rho
+            else:
+                p_ind_array[o] = p_ind
+        for o in range(n_povm):
+            if mle:
+                dM11 += np.kron(dM[o].conj().reshape(-1), dM[o].reshape(-1)) * y[o, n] / p_ind_array[o] ** 2
+                dM10 += np.kron(dM[o].reshape(-1), dM[o].reshape(-1)) * y[o, n] / p_ind_array[o] ** 2
+            else:
+                dM11 += np.kron(dM[o].conj().reshape(-1), dM[o].reshape(-1)) * 2 / m / n_povm
+                dM10 += np.kron(dM[o].reshape(-1), dM[o].reshape(-1)) * 2 / m / n_povm
+    return (dK_.reshape((d, rK, pdim, pdim)), dM10, dM11)
 
 
-@njit(cache=True, parallel=False)
-def ddM(X, K, E, rho, J, y, d, r, rK):
-    """Compute the second derivative of the objective function with respect to matrix elements.
+@njit(cache=True)  # , parallel=False)
+def ddM(X, K, E, rho, J, y, d, r, rK, mle=False):
+    """Compute the second derivative of the objective function with respect to the Kraus tensor K.
 
     This function calculates the second derivative of the objective function for a given
     set of input parameters.
@@ -912,6 +962,8 @@ def ddM(X, K, E, rho, J, y, d, r, rK):
         Dimension of the local basis.
     rK : int
         Number of rows in the Kraus operator matrix.
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
@@ -928,7 +980,7 @@ def ddM(X, K, E, rho, J, y, d, r, rK):
     ddK = np.zeros((d**2, rK**2, r, r))
     ddK = np.ascontiguousarray(ddK.astype(np.complex128))
     dconjdK = np.zeros((d**2, rK**2, r, r))
-    dconjdK = np.ascontiguousarray(ddK.astype(np.complex128))
+    dconjdK = np.ascontiguousarray(dconjdK.astype(np.complex128))
     m = len(J)
     for k in range(d**2):
         k1, k2 = local_basis(k, d, 2)
@@ -944,11 +996,12 @@ def ddM(X, K, E, rho, J, y, d, r, rK):
                             for o in range(n_povm):
                                 L = E[o].conj() @ L0
                                 if i1 == i2:
-                                    D_ind = L @ X[k1] @ R - y[o, n]
+                                    p_ind = L @ X[k1] @ R
                                 elif i1 < i2:
-                                    D_ind = L @ X[k1] @ C.reshape(r, r) @ X[k2] @ R - y[o, n]
+                                    p_ind = L @ X[k1] @ C.reshape(r, r) @ X[k2] @ R
                                 else:
-                                    D_ind = L @ X[k2] @ C.reshape(r, r) @ X[k1] @ R - y[o, n]
+                                    p_ind = L @ X[k2] @ C.reshape(r, r) @ X[k1] @ R
+                                D_ind = p_ind - y[o, n]
 
                                 ddK_loc = np.zeros((rK**2, r, r)).astype(np.complex128)
                                 dconjdK_loc = np.zeros((rK**2, r, r)).astype(np.complex128)
@@ -1002,18 +1055,21 @@ def ddM(X, K, E, rho, J, y, d, r, rK):
                                                 .reshape(pdim, pdim, pdim, pdim)
                                                 .transpose(2, 0, 1, 3)
                                             ).reshape(r, r)
-
-                                ddK[k1 * d + k2] += D_ind * ddK_loc
-                                dconjdK[k1 * d + k2] += D_ind * dconjdK_loc
+                                if mle:
+                                    ddK[k1 * d + k2] -= ddK_loc * y[o, n] / p_ind
+                                    dconjdK[k1 * d + k2] -= dconjdK_loc * y[o, n] / p_ind
+                                else:
+                                    ddK[k1 * d + k2] += D_ind * ddK_loc * 2 / m / n_povm
+                                    dconjdK[k1 * d + k2] += D_ind * dconjdK_loc * 2 / m / n_povm
     return (
-        ddK.reshape(d, d, rK, rK, pdim, pdim, pdim, pdim) * 2 / m / n_povm,
-        dconjdK.reshape(d, d, rK, rK, pdim, pdim, pdim, pdim) * 2 / m / n_povm,
+        ddK.reshape(d, d, rK, rK, pdim, pdim, pdim, pdim),
+        dconjdK.reshape(d, d, rK, rK, pdim, pdim, pdim, pdim),
     )
 
 
-@njit(parallel=True, cache=True)
+@njit(cache=True)  # , parallel=True)
 def dA(X, A, B, J, y, r, pdim, n_povm):
-    """Compute the derivative of A with respect to the objective function.
+    """Compute the derivative of to the objective function with respect to the POVM tensor A
 
     This function calculates the gradient of A for a given set of input parameters.
 
@@ -1039,7 +1095,7 @@ def dA(X, A, B, J, y, r, pdim, n_povm):
     Returns
     -------
     dA : ndarray
-        Derivative of A with respect to the objective function.
+        Derivative of the objective function with respect to A.
     """
     A = np.ascontiguousarray(A)
     B = np.ascontiguousarray(B)
@@ -1047,23 +1103,23 @@ def dA(X, A, B, J, y, r, pdim, n_povm):
     for k in range(n_povm):
         E[k] = (A[k].T.conj() @ A[k]).reshape(-1)
     rho = (B @ B.T.conj()).reshape(-1)
-    dA_ = np.zeros((n_povm, pdim, pdim))
-    dA_ = dA_.astype(np.complex128)
+    dA_ = np.zeros((n_povm, pdim, pdim)).astype(np.complex128)
     m = len(J)
-    for n in prange(m):  # pylint: disable=not-an-iterable
-        jE = J[n][J[n] >= 0][0]
-        j = J[n][J[n] >= 0][1:]
+    # pylint: disable=not-an-iterable
+    for n in prange(m):
+        j = J[n][J[n] >= 0]
         inner_deriv = contract(X, j) @ rho
-        D_ind = E[jE].conj().dot(inner_deriv) - y[n]
-        dA_[jE] += D_ind * A[jE] @ inner_deriv.reshape(pdim, pdim).T.conj()
-    return dA_
+        dA_step = np.zeros((n_povm, pdim, pdim)).astype(np.complex128)
+        for o in range(n_povm):
+            D_ind = E[o].conj() @ inner_deriv - y[o, n]
+            dA_step[o] += D_ind * A[o].conj() @ inner_deriv.reshape(pdim, pdim).T
+        dA_ += dA_step
+    return dA_ * 2 / m / n_povm
 
 
-@njit(parallel=True, cache=True)
+@njit(cache=True)  # , parallel=True)
 def dB(X, A, B, J, y, pdim):
-    """Compute the derivative of B with respect to the objective function.
-
-    This function calculates the gradient of B for a given set of input parameters.
+    """Compute the derivative of the objective function with respect to the state tensor B.
 
     Parameters
     ----------
@@ -1083,7 +1139,7 @@ def dB(X, A, B, J, y, pdim):
     Returns
     -------
     dB : ndarray
-        Derivative of B with respect to the objective function.
+        Derivative of the objective function with respect to the state tensor B.
     """
     A = np.ascontiguousarray(A)
     B = np.ascontiguousarray(B)
@@ -1101,13 +1157,9 @@ def dB(X, A, B, J, y, pdim):
     return dB_
 
 
-@njit(parallel=False, cache=True)
-def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
-    """Calculate the derivatives of a given POVM element with respect to its parameters.
-
-    This function computes the derivatives of the POVM element based on input matrices
-    A, B, and X, as well as the isometry condition. The derivatives are only dependent
-    on one POVM element, and different POVM elements are connected via the isometry condition.
+@njit(cache=True)  # , parallel=True)
+def ddA_derivs(X, A, B, J, y, r, pdim, n_povm, mle=False):
+    """Calculate all nonzero terms of the second derivatives with respect to the POVM tensor A.
 
     Parameters
     ----------
@@ -1127,14 +1179,16 @@ def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
         The dimension of the input matrices A and B.
     n_povm : int
         The number of POVM elements.
+    mle : bool
+        If True, the log-likelihood objective function is used, otherwise the least squares objective function is used
 
     Returns
     -------
     tuple of numpy.ndarray
         A tuple containing the computed derivatives:
-        - dA: The derivative of the POVM element A with respect to its parameters,
+        - dA: The derivative w.r.t. A
         of shape (n_povm, pdim, pdim).
-        - dMdM: The product of the derivatives dM and dM, of shape (n_povm, r, r).
+        - dMdM: The product of the measurement map derivatives dM and dM, of shape (n_povm, r, r).
         - dMconjdM: The product of the conjugate of dM and dM, of shape (n_povm, r, r).
         - dconjdA: The product of the conjugate of dA, of shape (n_povm, r, r).
     """
@@ -1148,7 +1202,6 @@ def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
     # dM: derivative of probability wrt to Z
     # D_ind: evaluation of probability
     # dMdM: product of two derivatives in the last line of equation of the derivatives (page 26)
-    dM = np.zeros((pdim, pdim)).astype(np.complex128)
     dMdM = np.zeros((n_povm, r, r)).astype(np.complex128)
     dMconjdM = np.zeros((n_povm, r, r)).astype(np.complex128)
     dconjdA = np.zeros((n_povm, r, r)).astype(np.complex128)
@@ -1156,22 +1209,38 @@ def ddA_derivs(X, A, B, J, y, r, pdim, n_povm):
     for n in prange(m):  # pylint: disable=not-an-iterable
         j = J[n][J[n] >= 0]
         R = contract(X, j) @ rho
+        dA_step = np.zeros((n_povm, pdim, pdim)).astype(np.complex128)
+        dMdM_step = np.zeros((n_povm, r, r)).astype(np.complex128)
+        dMconjdM_step = np.zeros((n_povm, r, r)).astype(np.complex128)
+        dconjdA_step = np.zeros((n_povm, r, r)).astype(np.complex128)
         for o in range(n_povm):
-            D_ind = E[o].conj() @ R - y[o, n]
             dM = A[o].conj() @ R.reshape(pdim, pdim).T
-            dMdM[o] += np.outer(dM, dM)
-            dMconjdM[o] += np.outer(dM.conj(), dM)
-            dA_[o] += D_ind * dM
-            dconjdA[o] += D_ind * np.kron(np.eye(pdim).astype(np.complex128), R.reshape(pdim, pdim).T)
-    return dA_ * 2 / m / n_povm, dMdM * 2 / m / n_povm, dMconjdM * 2 / m / n_povm, dconjdA * 2 / m / n_povm
+            if mle:
+                p_ind = E[o].conj() @ R
+                dMdM_step[o] += np.outer(dM, dM) * y[o, n] / p_ind**2
+                dMconjdM_step[o] += np.outer(dM.conj(), dM) * y[o, n] / p_ind**2
+                dA_step[o] -= dM * y[o, n] / p_ind
+                dconjdA_step[o] -= (
+                    np.kron(np.eye(pdim).astype(np.complex128), R.reshape(pdim, pdim).T) * y[o, n] / p_ind
+                )
+            else:
+                D_ind = E[o].conj() @ R - y[o, n]
+                dMdM_step[o] += np.outer(dM, dM) * 2 / m / n_povm
+                dMconjdM_step[o] += np.outer(dM.conj(), dM) * 2 / m / n_povm
+                dA_step[o] += D_ind * dM * 2 / m / n_povm
+                dconjdA_step[o] += (
+                    D_ind * np.kron(np.eye(pdim).astype(np.complex128), R.reshape(pdim, pdim).T) * 2 / m / n_povm
+                )
+        dA_ += dA_step
+        dMdM += dMdM_step
+        dMconjdM += dMconjdM_step
+        dconjdA += dconjdA_step
+    return dA_, dMdM, dMconjdM, dconjdA
 
 
-# @njit(parallel=True, cache=True)
-def ddB_derivs(X, A, B, J, y, r, pdim):
-    """Calculate the derivatives of the isometry matrix B with respect to its parameters.
-
-    This function computes the derivatives of the isometry matrix B based on input matrices A and X,
-    as well as the isometry condition.
+@njit(cache=True)  # , parallel=True)
+def ddB_derivs(X, A, B, J, y, r, pdim, mle=False):
+    """Calculate all nonzero terms of the second derivative with respect to the state tensor B.
 
     Parameters
     ----------
@@ -1194,11 +1263,10 @@ def ddB_derivs(X, A, B, J, y, r, pdim):
     -------
     tuple of numpy.ndarray
         A tuple containing the computed derivatives:
-        - dB: The derivative of the isometry matrix B with respect to its parameters,
-        of shape (pdim, pdim).
+        - dB: The derivative w.r.t. B, of shape (pdim, pdim).
         - dMdM: The product of the derivatives dM and dM, of shape (r, r).
         - dMconjdM: The product of the conjugate of dM and dM, of shape (r, r).
-        - dconjdB: The product of the conjugate of dB, of shape (r, r).
+        - dconjdB: The mixed second derivative of by dB and dB*, of shape (r, r).
     """
     n_povm = A.shape[0]
     A = np.ascontiguousarray(A)
@@ -1218,12 +1286,17 @@ def ddB_derivs(X, A, B, J, y, r, pdim):
         C = contract(X, j)
         for o in range(n_povm):
             L = E[o].conj() @ C
-            D_ind = L @ rho - y[o, n]
-
             dM = L.reshape(pdim, pdim) @ B.conj()
-            dMdM += np.outer(dM, dM)
-            dMconjdM += np.outer(dM.conj(), dM)
-
-            dB_ += D_ind * dM
-            dconjdB += D_ind * np.kron(L.reshape(pdim, pdim), np.eye(pdim).astype(np.complex128))
-    return dB_ * 2 / m / n_povm, dMdM * 2 / m / n_povm, dMconjdM * 2 / m / n_povm, dconjdB.T * 2 / m / n_povm
+            if mle:
+                p_ind = L @ rho
+                dMdM += np.outer(dM, dM) * y[o, n] / p_ind**2
+                dMconjdM += np.outer(dM.conj(), dM) * y[o, n] / p_ind**2
+                dB_ -= dM * y[o, n] / p_ind
+                dconjdB -= np.kron(L.reshape(pdim, pdim), np.eye(pdim).astype(np.complex128)) * y[o, n] / p_ind
+            else:
+                D_ind = L @ rho - y[o, n]
+                dMdM += np.outer(dM, dM) * 2 / m / n_povm
+                dMconjdM += np.outer(dM.conj(), dM) * 2 / m / n_povm
+                dB_ += D_ind * dM * 2 / m / n_povm
+                dconjdB += D_ind * np.kron(L.reshape(pdim, pdim), np.eye(pdim).astype(np.complex128)) * 2 / m / n_povm
+    return dB_, dMdM, dMconjdM, dconjdB.T
