@@ -4,6 +4,8 @@ from mGST import additional_fns
 from iqm.benchmarks.compressive_gst.compressive_gst import GSTConfiguration, CompressiveGST
 from iqm.benchmarks.compressive_gst.gst_analysis import dataset_counts_to_mgst_format
 
+from iqm.benchmarks.benchmark_definition import BenchmarkRunResult
+
 from mGST.qiskit_interface import qiskit_gate_to_operator
 from mGST.low_level_jit import (
     gradient_all_3_and_value_jit,
@@ -91,6 +93,45 @@ def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
         
     return K, X, E, rho
 
+def get_full_mgst_parameters_from_result_and_configuration(result:BenchmarkRunResult, configuration:GSTConfiguration, seed:int = 42, only_jax_variables:bool = False):
+    """
+    Get the full set of parameters required to run mGST from a given benchmark result and configuration.
+
+    Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
+    """
+    kraus_rank = configuration.rank
+    qubit_layout = configuration.qubit_layouts[0]
+    dataset = result.dataset
+    y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt = get_mgst_parameters_from_dataset(dataset, qubit_layout=qubit_layout, rK=kraus_rank)
+    K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True, seed=seed)
+
+    if only_jax_variables:
+        indices_list = [indices[indices != -1] for indices in J]
+        return K, X, E, rho, y, indices_list
+    return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, kraus_rank
+
+def get_full_mgst_parameters_from_benchmark(benchmark:CompressiveGST, seed:int = 42, only_jax_variables:bool = False, run_benchmark:bool = False):
+    """
+    Get the full set of parameters required to run mGST from a given benchmark.
+
+    Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
+    """
+    # result = benchmark.run()
+    if run_benchmark:
+        try:
+            result = benchmark.run()
+        except Exception as e:
+            print("Error during benchmark run:", e)
+            print("Returning benchmark object for inspection.")
+            return benchmark
+    else:
+        try:
+            result = benchmark.runs[-1]
+        except IndexError:
+            raise ValueError("No previous benchmark run found. Please set `run_benchmark=True` to execute the benchmark.")
+        
+    return get_full_mgst_parameters_from_result_and_configuration(result=result, configuration=benchmark.configuration, seed=seed, only_jax_variables=only_jax_variables)
+
 def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, backend, seed:int = 42, only_jax_variables:bool = False):
     """
     Get the full set of parameters required to run mGST from a given configuration.
@@ -98,27 +139,19 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
     """
     benchmark = CompressiveGST(backend, configuration)
-    result = benchmark.run()
-    
-    rK = configuration.rank
-    qubit_layout = configuration.qubit_layouts[0]
-    dataset = result.dataset
-    y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt = get_mgst_parameters_from_dataset(dataset, qubit_layout=qubit_layout, rK=rK)
-    K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True, seed=seed)
-    
-    if only_jax_variables:
-        indices_list = [indices[indices != -1] for indices in J]
-        return K, X, E, rho, y, indices_list
-    return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, rK
+    return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables)
 
-def create_4q_gst_config(kraus_rank:int=1, max_gates_per_batch:int | None = None):
+def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_gates_per_batch:int | None = None, max_circuits_per_batch:int | None = None, seq_len_list:list | None = None) -> GSTConfiguration:
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
 
     NOTE: Garnet allows for a maximum of 500 circuits per job. Under this configuration, setting 500 gates per batch will create 87 jobs of each 23 circuits (except the last one with 22 circuits).
 
     Args:
-         kraus_rank: Rank of the Kraus operators in the compressed representation. Defaults to 1.
-         max_gates_per_batch: Maximum number of gates per batch to be sent to the backend. If None, no limit is set. Defaults to None.
+        kraus_rank: Rank of the Kraus operators in the compressed representation. Defaults to 1.
+        num_gate_sequences: Number of gate sequences to be used in the GST protocol.
+        max_gates_per_batch: Maximum number of gates per batch to be sent to the backend. If None, no limit is set. Defaults to None.
+        max_circuits_per_batch: Maximum number of circuits per batch to be sent to the backend.
+            If None, no limit is set. Defaults to None.
 
     Returns:
        The configuration used for 4Q GST
@@ -151,14 +184,19 @@ def create_4q_gst_config(kraus_rank:int=1, max_gates_per_batch:int | None = None
                 "Ry(pi/2)", "Ry(pi/2)", "Ry(pi/2)", "Ry(pi/2)", 
                 "CZ-CZ"]
 
+    if seq_len_list is None:
+        seq_len_list = [1, 10, 20]
+
     Q4_GST = GSTConfiguration(
         qubit_layouts=[[0,1,3,4]],
         gate_set=gates,
         gate_labels=gate_labels,
-        num_circuits=2000,
-        shots=1000,
+        num_circuits=num_gate_sequences,
+        shots=shots,
         rank=kraus_rank,
         max_gates_per_batch=max_gates_per_batch,
+        max_circuits_per_batch=max_circuits_per_batch,
+        seq_len_list=seq_len_list,
     )
 
     return Q4_GST

@@ -286,12 +286,26 @@ class CompressiveGST(Benchmark):
                     max_circuits_per_batch=self.configuration.max_circuits_per_batch,
                 )
                 total_submit += time_submit
+                
+            # Store all jobs after submission
+            dataset.attrs["all_jobs"] = all_jobs
+            qcvv_logger.info(f"Stored jobs for {len(all_jobs)} layouts in dataset")
+                
             # Retrieve all
             qcvv_logger.info(f"Now executing the corresponding circuit batch")
-            for qubit_layout in self.qubit_layouts:
-                counts, time_retrieve = retrieve_all_counts(all_jobs[str(qubit_layout)])
-                total_retrieve += time_retrieve
-                dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
+            try:
+                for qubit_layout in self.qubit_layouts:
+                    counts, time_retrieve = retrieve_all_counts(all_jobs[str(qubit_layout)])
+                    total_retrieve += time_retrieve
+                    dataset, _ = add_counts_to_dataset(counts, str(qubit_layout), dataset)
+            except Exception as e:
+                qcvv_logger.error(f"Error during count retrieval: {e}")
+                qcvv_logger.info(f"Jobs stored in dataset.attrs['all_jobs'], can be retrieved manually")
+                self.circuits.benchmark_circuits = [transpiled_circuits, untranspiled_circuits]
+                self.add_configuration_to_dataset(dataset)
+                dataset.attrs["total_submit_time"] = total_submit
+                dataset.attrs["total_retrieve_time"] = total_retrieve
+                raise
 
         self.circuits.benchmark_circuits = [transpiled_circuits, untranspiled_circuits]
         self.add_configuration_to_dataset(dataset)
