@@ -233,6 +233,8 @@ def cost_function_mps_single_gate_sequence_coherent(kraus_tensor:jnp.ndarray, po
     inner_prod_vector = contract_mps_all_povm_coherent(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
     return mean_square_error_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
 
+cost_function_mps_single_gate_sequence_coherent_jit = jax.jit(cost_function_mps_single_gate_sequence_coherent)
+
 def cost_function_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
     """Compute the full cost function for a single set of gate indices and a single probability vector.
     
@@ -561,6 +563,8 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
     
     return regularized_value
     
+import warnings
+
 
 def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False):
     """Compute the cost function using jax and mps contraction strategy.
@@ -578,21 +582,30 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     cost_value = 0
     num_gate_sequences = len(indices_list)
     num_povm = povm_psd.shape[0]
+    num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape
+    
+    coherent = (kraus_rank == 1)
+    
+    # if coherent:
+    #     warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
+    #     inner_function = cost_function_mps_single_gate_sequence_coherent_jit if jit else cost_function_mps_single_gate_sequence_coherent
+    # else:
+    inner_function = cost_function_mps_single_gate_sequence_jit if jit else cost_function_mps_single_gate_sequence
+      
     if jit:
-        inner_function = cost_function_mps_single_gate_sequence_jit
-        previous_count = cost_function_mps_single_gate_sequence_jit._cache_size()
+        previous_count = inner_function._cache_size()
         if verbose:
             print(f'Initial count: {previous_count}')
-    else:
-        inner_function = cost_function_mps_single_gate_sequence
     
     for idx, gates_indices in enumerate(indices_list):
         cost_value += inner_function(kraus_tensor, povm_psd, state_psd, gates_indices, prob_matrix[:,idx])
+        
         if jit:
-            new_count = cost_function_mps_single_gate_sequence_jit._cache_size()
+            new_count = inner_function._cache_size()
             if new_count != previous_count:
                 print(f'at iteration {idx} the new count changed to: {new_count}')
                 previous_count = new_count
+                
     return cost_value / (num_gate_sequences * num_povm)
 
 def cost_function_jax(kraus_contracted, povm_matrix, state_vector, indices_list, prob_matrix):
