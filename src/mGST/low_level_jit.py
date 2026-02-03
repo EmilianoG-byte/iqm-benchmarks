@@ -582,15 +582,13 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
     cost_value = 0
     num_gate_sequences = len(indices_list)
     num_povm = povm_psd.shape[0]
-    num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape
+    num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape    
     
-    coherent = (kraus_rank == 1)
-    
-    # if coherent:
-    #     warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
-    #     inner_function = cost_function_mps_single_gate_sequence_coherent_jit if jit else cost_function_mps_single_gate_sequence_coherent
-    # else:
-    inner_function = cost_function_mps_single_gate_sequence_jit if jit else cost_function_mps_single_gate_sequence
+    if kraus_rank == 1: # coherent channels. Can use specialized contraction path.
+        warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
+        inner_function = cost_function_mps_single_gate_sequence_coherent_jit if jit else cost_function_mps_single_gate_sequence_coherent
+    else:
+        inner_function = cost_function_mps_single_gate_sequence_jit if jit else cost_function_mps_single_gate_sequence
       
     if jit:
         previous_count = inner_function._cache_size()
