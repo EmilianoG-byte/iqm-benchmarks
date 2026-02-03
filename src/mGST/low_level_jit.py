@@ -145,7 +145,7 @@ def objf(X, E, rho, J, y, mle=False):
                 objf_ -= np.log(abs(E[o].conj() @ state)) * y[o, i]
             else:
                 objf_ += abs(E[o].conj() @ state - y[o, i]) ** 2 / m / n_povm
-    return objf_ / m / n_povm
+    return objf_
 
 def cost_function_numba(K, E, rho, J, y):
     num_gates = K.shape[0]
