@@ -56,7 +56,20 @@ def get_mgst_parameters_from_dataset(dataset, qubit_layout, rK):
 
 ## Preparing an initialization (random gate set or target gate set)
 
-def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
+def initialize_mgst_parameters(dataset, target_init:bool = True, seed:int = 42):
+    """Initialize the mGST parameters either from the target gate set or randomly.
+    
+    Args:
+        dataset: Dataset object containing the attributes required for initialization.
+        target_init: Whether to initialize from the target gate set or randomly. Defaults to True.
+        seed: Seed for random initialization. Defaults to 42.
+        
+    Returns:
+        K: Kraus operators tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        X: Superoperator tensor of dimensions (num_gates, dim_in^2, dim_in^2)
+        E: POVM operators tensor of dimensions (num_povm, dim_in^2)
+        rho: State vector of dimensions (dim_out^2,)
+    """
     d = dataset.attrs["num_gates"]
     pdim = dataset.attrs["pdim"]
     r = pdim ** 2
@@ -93,7 +106,12 @@ def initialize_mgst_parameters(dataset, target_init = True, seed:int = 42):
         
     return K, X, E, rho
 
-def get_full_mgst_parameters_from_result_and_configuration(result:BenchmarkRunResult, configuration:GSTConfiguration, seed:int = 42, only_jax_variables:bool = False):
+def get_full_mgst_parameters_from_result_and_configuration(
+    result:BenchmarkRunResult, 
+    configuration:GSTConfiguration, 
+    seed:int = 42, 
+    only_jax_variables:bool = False
+    )->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[jnp.ndarray]]:
     """
     Get the full set of parameters required to run mGST from a given benchmark result and configuration.
 
@@ -139,7 +157,7 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
     """
     benchmark = CompressiveGST(backend, configuration)
-    return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables)
+    return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables, run_benchmark=True)
 
 def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_gates_per_batch:int | None = None, max_circuits_per_batch:int | None = None, seq_len_list:list | None = None) -> GSTConfiguration:
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
@@ -149,12 +167,16 @@ def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_
     Args:
         kraus_rank: Rank of the Kraus operators in the compressed representation. Defaults to 1.
         num_gate_sequences: Number of gate sequences to be used in the GST protocol.
+        shots: Number of shots per circuit.
         max_gates_per_batch: Maximum number of gates per batch to be sent to the backend. If None, no limit is set. Defaults to None.
         max_circuits_per_batch: Maximum number of circuits per batch to be sent to the backend.
             If None, no limit is set. Defaults to None.
+        seq_len_list: Three numbers controling the depth of the random sequences. The first is the 
+            minimal depth, the last is the maximal depth and the middle number specifies a cutoff depth below
+            which all possible sequences are selected. Default: [1, 10, 19]
 
     Returns:
-       The configuration used for 4Q GST
+       The configuration used for 4Q GST. This includes 9 gates: 4 Rx(pi/2) gates, 4 Ry(pi/2) gates, and a CZ-CZ gate acting on qubits (0,1) and (2,3).
     """
 
     cz_cz = QuantumCircuit(4)
@@ -185,7 +207,7 @@ def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_
                 "CZ-CZ"]
 
     if seq_len_list is None:
-        seq_len_list = [1, 10, 20]
+        seq_len_list = [1, 10, 19]
 
     Q4_GST = GSTConfiguration(
         qubit_layouts=[[0,1,3,4]],

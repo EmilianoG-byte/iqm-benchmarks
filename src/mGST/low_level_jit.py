@@ -160,15 +160,19 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 
-def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
+def contract_mps_all_povm(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
     """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd
 
     Args:
-        kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
         povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
             (see B in Eq. 9 of mGST paper)
-        gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+        
+    Returns:
+        jnp.ndarray: tensor of dimension: (num_povm), corresponding to the contracted inner products <povm_i| K_{j_n} ... K_{j_1} |state>
+        for i in range(num_povm).
     """
     # Initialize right tensor as the state
     right_tensor = state_psd @ state_psd.conj().T  # dim_up_in, dim_down_in
@@ -176,30 +180,92 @@ def contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices):
     optimal_path = [(0, 1), (0, 1)]
     # Iterate through the Kraus tensors in reverse order
     for idx in reversed(gates_indices):
-        k = kraus[idx]  # kraus_rank, dim_up_out, dim_up_in
+        k = kraus_tensor[idx]  # kraus_rank, dim_up_out, dim_up_in
         # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) x (kraus_rank, dim_down_out, dim_down_in) -> dim_up_out, dim_down_in
         right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
         
     # (num_povm, rank_povm, dim_up_in) x (dim_up_in, dim_down_in) x (num_povm, rank_povm, dim_down_in) -> num_povm
     return jnp.einsum("ijk, kl, ijl -> i", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
     # return jnp.sum(povm_psd.conj() * right_tensor.T, axis=(1, 2))
-
-def cost_function_mps_single_gate_sequence(kraus, povm_psd, state_psd, gates_indices, prob_vector):
-    """Compute the full cost function for a single set of gate indices.
-
+    
+def contract_mps_all_povm_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
+    """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd using the optimal contraction path for a coherent quantum channel (i.e. kraus rank = 1).
+    
+    WARNING: the following contraction only makes sense assuming that the kraus rank is 1, i.e. the quantum channel is coherent/unitary.
+    
     Args:
-        kraus: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank = 1, dim_out, dim_in)
         povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
             (see B in Eq. 9 of mGST paper)
-        gates_indices: list of indices that dictate which k[idx] will be chosen for each contraction loop.
-        prob_vector: tensor of dimension: (num_povm)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
     """
-    inner_prod_vector = contract_mps_all_povm(kraus, povm_psd, state_psd, gates_indices) # num_povm
-    cost_vector = jnp.abs(inner_prod_vector - prob_vector)**2
-    return jnp.sum(cost_vector) # num_povm ->
+
+    # Erase leg with dimension 1
+    kraus_tensor = jnp.squeeze(kraus_tensor) # num_gates, dim_out, dim_in
+
+    right_tensor = state_psd  # dim_in, rank_state
+    for idx in reversed(gates_indices):
+        k = kraus_tensor[idx]  # dim_out, dim_in
+        right_tensor = k @ right_tensor  # dim_out, rank_state
+        
+    contracted_tensor = povm_psd @ right_tensor # num_povm, rank_povm, rank_state
+    return jnp.einsum("ijk, ijk -> i", contracted_tensor, contracted_tensor.conj()) # num_povm
+
+def cost_function_mps_single_gate_sequence_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
+    """Compute the full cost function for a single set of gate indices and a single probability vector, assuming coherent quantum channels (i.e. kraus rank = 1).
+    
+    The equation for this looks like: 
+    C = sum_{i=1}^{num_povm} | <povm_i| K_{j_n} ... K_{j_1} |state> - p_i |^2
+
+    WARNING: the following contraction only makes sense assuming that the kraus rank is 1, i.e. the quantum channel is coherent/unitary.
+
+    Args:
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank = 1, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+        prob_vector: tensor of dimension: (num_povm)
+    Returns:
+        jnp.ndarray: scalar corresponding to the cost function value for the given gate sequence and probability vector.
+    """
+    inner_prod_vector = contract_mps_all_povm_coherent(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
+    return mean_square_error_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
+
+def cost_function_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
+    """Compute the full cost function for a single set of gate indices and a single probability vector.
+    
+    The equation for this looks like: 
+    C = sum_{i=1}^{num_povm} | <povm_i| K_{j_n} ... K_{j_1} |state> - p_i |^2
+
+    Args:
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+        prob_vector: tensor of dimension: (num_povm)
+        
+    Returns:
+        jnp.ndarray: scalar corresponding to the cost function value for the given gate sequence and probability vector.
+    """
+    inner_prod_vector = contract_mps_all_povm(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
+    return mean_square_error_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
 
 cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
+
+def mean_square_error_vectors(estimate:jnp.ndarray, target:jnp.ndarray)->float:
+    """Compute the mean square error between the estimate and target vectors.
+    
+    Args:
+        estimate: vector of the estimate operator
+        target: vector of the target operator
+    Returns:
+        The mean square error between the two vectors.
+    """
+    cost_vector = jnp.abs(estimate - target)**2 # num_povm
+    return jnp.sum(cost_vector) # num_povm -> scalar
 
 def frobenius_distance(A:jnp.ndarray, B:jnp.ndarray):
     """Compute the Frobenius norm between two matrices A and B."""

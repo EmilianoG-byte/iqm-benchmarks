@@ -444,6 +444,8 @@ def validate_gate_context(self):
             )
 
 
+VALID_DEFAULT_GATE_SETS = ["1QXYI", "2QXYICZ", "2QXYCZ_extended", "3QXYCZ"]
+
 def parse_gate_set(
     configuration: GSTConfiguration, num_qubits: int, qubit_layouts: List[List[int]]
 ) -> Tuple[List[QuantumCircuit], Dict[str, Dict[int, str]], int]:
@@ -467,17 +469,12 @@ def parse_gate_set(
             The number of gates in the gate set
 
     """
-    if isinstance(configuration.gate_set, str) and configuration.gate_set not in [
-        "1QXYI",
-        "2QXYICZ",
-        "2QXYCZ_extended",
-        "3QXYCZ",
-    ]:
+    if isinstance(configuration.gate_set, str) and configuration.gate_set not in VALID_DEFAULT_GATE_SETS:
         raise ValueError(
             f"No gate set of the specified name is implemented: {configuration.gate_set}, please choose among "
-            "1QXYI, 2QXYICZ, 2QXYCZ_extended, 3QXYCZ."
+            f"{', '.join(VALID_DEFAULT_GATE_SETS)}."
         )
-    if configuration.gate_set in ["1QXYI", "2QXYICZ", "2QXYCZ_extended", "3QXYCZ"]:
+    if configuration.gate_set in VALID_DEFAULT_GATE_SETS:
         gate_set, gate_label_dict, num_gates = create_predefined_gate_set(
             configuration.gate_set, num_qubits, qubit_layouts
         )
