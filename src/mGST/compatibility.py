@@ -110,7 +110,7 @@ def arrays_to_pygsti_model(X, E, rho, basis="std"):
     Parameters
     ----------
     X : numpy array
-        Gate set tensor of shape (Number of Gates, Kraus rank, dimension^2, dimension^2)
+        Gate set tensor of shape (Number of Gates, dimension^2, dimension^2)
     E : numpy array
         POVM matrix of shape (#POVM elements, dimension^2)
     rho : numpy array

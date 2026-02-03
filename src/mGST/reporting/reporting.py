@@ -109,11 +109,11 @@ def gauge_opt(X, E, rho, target_mdl, weights):
     Parameters
     ----------
     X : numpy array
-        Gate set
+        Gate set of shape (num_gates, dimesion^2, dimension^2)
     E : numpy array
-        POVM
+        POVM of shape (num_povms, dimension^2)
     rho : numpy array
-        Initial state
+        Initial state (dimension^2)
     target_mdl : pygsti model object
         A model containing the target gate set
     weights : dict[str: float]
