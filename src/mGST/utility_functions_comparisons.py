@@ -19,6 +19,7 @@ from mGST.low_level_jit import (
     gradient_state_mps_jit_reg)
 
 from mGST.typing import Tensor, Matrix, Scalar
+from mGST.riemannian import project_onto_tangent_space, canonical_gradient
 
 from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
 from mGST.additional_fns import random_gs, perturbed_target_init
@@ -32,7 +33,6 @@ from typing_extensions import Literal
 
 import jax.numpy as jnp
 import numpy as np
-import jax
 
 from typing import Sequence
 
@@ -1117,62 +1117,6 @@ def factorize_psd_truncated(psd: jnp.ndarray, max_rank: int | None = None, uniqu
     return factorization
     #  s[..., None, :] reshapes s into shape (..., 1, min(max_rank, N)), allowing elementwise multiplication with x ((..., N, min(max_rank, N))).
 
-def canonical_gradient(x:Matrix, z:Matrix)->Matrix:
-    """ Compute the riemmanian gradient at the point x on the stiefel manifold using the canonical metric
-
-    Handles batch dimensions.
-
-    Args:
-        x: The base point of the tangent space. Shape (..., n, p)
-        z: The euclidean gradient at x. Shape (..., n, p)
-
-    Returns:
-        The riemannian gradient using the canonical metric
-    """
-    return z - x @ transpose(z.conj()) @ x
-
-
-def project_onto_tangent_space(x: Matrix, z: Matrix)->Matrix:
-    """ Project a matrix z onto the tangent space of the manifold at x
-
-    Handles batch dimensions.
-
-    Args:
-        x: The base point of the tangent space. Shape (..., n, p)
-        z: The matrix to project onto the tangent space. Shape (..., n, p)
-
-    Returns:
-        A matrix projected onto the tangent space of the manifold at x.
-    """
-    return z - x @ symmetrize(transpose(x).conj() @ z)
-
-def transpose(A:Matrix)->Matrix:
-    """
-    Transpose a matrix, swapping its last two dimensions.
-
-    Handles batch dimensions.
-
-    Args:
-        A: Matrix to be transposed. Shape (..., n, p)
-        
-    Returns:
-        Transposed matrix
-    """
-    return A.swapaxes(-1, -2)
-
-def symmetrize(A:Matrix)->Matrix:
-    """
-    Symmetrize a matrix by projecting it onto the symmetric subspace.
-    
-    Handles batch dimensions.
-    
-    Args:
-        A: square matrix to be symmetrized. Shape (..., n, n)
-    Returns:
-        Symmetrized matrix. Shape (..., n, n)
-    """
-    return 0.5 * (A + transpose(A).conj())
-
 def tensor_to_isometry(tensor: Tensor, n:int, p:int)-> Matrix:
     """
     Reshape a tensor into an isometry matrix of dimensions n and p.
@@ -1339,30 +1283,6 @@ def calculate_finite_sampling_error(prob_matrix_exact:jnp.ndarray, prob_matrix_s
     """
     num_povm, num_gate_sequences = prob_matrix_exact.shape
     return jnp.sum(jnp.abs(prob_matrix_exact - prob_matrix_sampled)**2) / (num_gate_sequences * num_povm)
-
-def random_tangent_vector(x:Matrix, seed=42)->Matrix:
-    """
-    Generate a random tangent vector at the point x on the stiefel manifold.
-    
-    Args:
-        x: Point on the stiefel manifold of dimensions (n, p)
-        n: Row dimension of the tangent vector
-        p: Column dimension of the tangent vector
-    
-    Returns:
-        A random tangent vector of dimensions (n, p) at the point x
-    """
-    key = jax.random.PRNGKey(seed)
-    # Split the key to generate independent random parts
-    key_real, key_imag = jax.random.split(key)
-
-    # Generate real and imaginary parts
-    real_part = jax.random.normal(key_real, x.shape)
-    imag_part = jax.random.normal(key_imag, x.shape)
-
-    # Combine into a complex matrix
-    z = real_part + 1j * imag_part
-    return project_onto_tangent_space(x=x, z=z)
 
 def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple[int, int]:
     """

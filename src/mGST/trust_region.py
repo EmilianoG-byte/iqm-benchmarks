@@ -5,8 +5,9 @@ Trust Region module for Optimization on the Stiefel Manifold
 import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
-from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, transpose, _update_tensor_via_gradient
+from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, _update_tensor_via_gradient
 from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
+from mGST.linear_algebra import transpose
 from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule, OptimizationScheduleItem
 
 

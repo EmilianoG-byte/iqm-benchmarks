@@ -7,7 +7,7 @@ import jax
 from typing import Sequence
 
 from mGST.typing import Tensor, Matrix, Scalar
-from mGST.utility_functions_comparisons import transpose
+from mGST.linear_algebra import transpose, symmetrize
 
 def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_x_to_z:Matrix, metric:str = "euclidean", alphas:tuple|None = None)-> Matrix:
     """
@@ -205,9 +205,109 @@ def is_in_tangent_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
     """
     Checks if the matrix z is in the tangent space of isometry x 
     
-    Checks tangent space condition x^H z + z^H x = 0
+    Checks tangent space condition: x^H z + z^H x = 0
     Args:
         x: Stiefel matrix of dimensions (n, p)
         z: Any matrix of dimensions (n, p)
     """
     return jnp.allclose(x.conj().T @ z, - z.conj().T @ x)
+
+def is_in_normal_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
+    """
+    Checks if the matrix z is in the normal space of isometry x
+
+    Checks normal space condition: x^H z - z^H x = 0
+    """
+    return jnp.allclose(x.conj().T @ z, z.conj().T @ x)
+
+def random_tangent_vector(x:Matrix, seed=42)->Matrix:
+    """
+    Generate a random tangent vector at the point x on the stiefel manifold.
+    
+    Args:
+        x: Point on the stiefel manifold of dimensions (n, p)
+        n: Row dimension of the tangent vector
+        p: Column dimension of the tangent vector
+    
+    Returns:
+        A random tangent vector of dimensions (n, p) at the point x
+    """
+    key = jax.random.PRNGKey(seed)
+    # Split the key to generate independent random parts
+    key_real, key_imag = jax.random.split(key)
+
+    # Generate real and imaginary parts
+    real_part = jax.random.normal(key_real, x.shape)
+    imag_part = jax.random.normal(key_imag, x.shape)
+
+    # Combine into a complex matrix
+    z = real_part + 1j * imag_part
+    return project_onto_tangent_space(x=x, z=z)
+
+def random_normal_vector(x:Matrix, seed=42)->Matrix:
+    """
+    Generate a random normal vector at the point x on the stiefel manifold.
+    
+    Args:
+        x: Point on the stiefel manifold of dimensions (n, p)
+        n: Row dimension of the normal vector
+        p: Column dimension of the normal vector
+    
+    Returns:
+        A random normal vector of dimensions (n, p) at the point x
+    """
+    key = jax.random.PRNGKey(seed)
+    # Split the key to generate independent random parts
+    key_real, key_imag = jax.random.split(key)
+
+    # Generate real and imaginary parts
+    real_part = jax.random.normal(key_real, x.shape)
+    imag_part = jax.random.normal(key_imag, x.shape)
+
+    # Combine into a complex matrix
+    z = real_part + 1j * imag_part
+    return project_onto_normal_space(x=x, z=z)
+
+def project_onto_tangent_space(x: Matrix, z: Matrix)->Matrix:
+    """ Project a matrix z onto the tangent space of the manifold at x
+
+    Handles batch dimensions.
+
+    Args:
+        x: The base point of the tangent space. Shape (..., n, p)
+        z: The matrix to project onto the tangent space. Shape (..., n, p)
+
+    Returns:
+        A matrix projected onto the tangent space of the manifold at x.
+    """
+    return z - x @ symmetrize(transpose(x).conj() @ z)
+
+def project_onto_normal_space(x: Matrix, z: Matrix)->Matrix:
+    """ Project a matrix z onto the normal space of the manifold at x
+
+    Handles batch dimensions.
+
+    Args:
+        x: The base point of the tangent space. Shape (..., n, p)
+        z: The matrix to project onto the normal space. Shape (..., n, p)
+
+    Returns:
+        A matrix projected onto the normal space of the manifold at x.
+    """
+    return x @ symmetrize(transpose(x).conj() @ z)
+
+
+def canonical_gradient(x:Matrix, z:Matrix)->Matrix:
+    """ Compute the riemmanian gradient at the point x on the stiefel manifold using the canonical metric
+
+    Handles batch dimensions.
+
+    Args:
+        x: The base point of the tangent space. Shape (..., n, p)
+        z: The euclidean gradient at x. Shape (..., n, p)
+
+    Returns:
+        The riemannian gradient using the canonical metric
+    """
+    return z - x @ transpose(z.conj()) @ x
+
