@@ -2,6 +2,7 @@
 
 from jax import config
 import jax
+import jax.numpy as jnp
 
 config.update("jax_enable_x64", True)
 
@@ -76,3 +77,27 @@ def random_anti_hermitian_matrix(n:int, seed:int)-> Matrix:
     key = jax.random.PRNGKey(seed)
     A = jax.random.normal(key, (n, n)) + 1j * jax.random.normal(key, (n, n))
     return skew_symmetrize(A)
+
+def is_hermitian(A:Matrix, tol:float=1e-8)->bool:
+    """
+    Check if a matrix is symmetric.
+
+    Args:
+        A: Matrix to be checked. Shape (..., n, n)
+        tol: Tolerance for numerical precision
+    Returns:
+        True if A is symmetric, False otherwise
+    """
+    return jnp.allclose(A, transpose(A).conj(), atol=tol)
+
+def is_anti_hermitian(A:Matrix, tol:float=1e-8)->bool:
+    """
+    Check if a matrix is anti-symmetric.
+
+    Args:
+        A: Matrix to be checked. Shape (..., n, n)
+        tol: Tolerance for numerical precision
+    Returns:
+        True if A is anti-symmetric, False otherwise
+    """
+    return jnp.allclose(A, -transpose(A).conj(), atol=tol)
