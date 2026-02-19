@@ -159,6 +159,34 @@ import jax
 import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
+def contract_mps_general_povm(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
+    """Compute the inner product contraction <povm|kraus|state> for a single matrix in povm_psd
+
+    NOTE: Actually, due to the ellipssis this should work in general for all POVM's as well. The only difference is that the output will be a vector of dimension num_povm instead of a scalar.
+
+    Args:
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+        
+    Returns:
+        jnp.ndarray: tensor of dimension: (num_povm), corresponding to the contracted inner products <povm_i| K_{j_n} ... K_{j_1} |state>
+        for i in range(num_povm).
+    """
+    # Initialize right tensor as the state
+    right_tensor = state_psd @ state_psd.conj().T  # dim_up_in, dim_down_in
+    # right_tensor = state_psd
+    optimal_path = [(0, 1), (0, 1)]
+    # Iterate through the Kraus tensors in reverse order
+    for idx in reversed(gates_indices):
+        k = kraus_tensor[idx]  # kraus_rank, dim_up_out, dim_up_in
+        # (kraus_rank, dim_up_out, dim_up_in) x (dim_up_in, dim_down_in) x (kraus_rank, dim_down_out, dim_down_in) -> dim_up_out, dim_down_in
+        right_tensor = jnp.einsum("ijk,kl,iml->jm", k, right_tensor, k.conj(), optimize=optimal_path)
+        
+    # (num_povm, rank_povm, dim_up_in) x (dim_up_in, dim_down_in) x (num_povm, rank_povm, dim_down_in) -> num_povm
+    return jnp.einsum("...jk, kl, ...jl ->...", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
 
 def contract_mps_all_povm(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
     """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd

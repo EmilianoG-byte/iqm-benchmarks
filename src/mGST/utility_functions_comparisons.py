@@ -261,15 +261,15 @@ def create_2q_emerald_gst_config():
 
     return Q2_GST_EMERALD
 
-def get_x_from_k(k, depth=None, dim_squared=None):
+def get_x_from_k(k, num_gates=None, dim_squared=None):
     """Get the superoperator representation from the Kraus operators.
     
     DEPRECATED: use kraus_tensor_to_mgst instead.
     """
-    if not depth or not dim_squared:
-        depth = k.shape[0]
+    if not num_gates or not dim_squared:
+        num_gates = k.shape[0]
         dim_squared = k.shape[-1]**2
-    return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((depth, dim_squared, dim_squared))
+    return jnp.einsum("ijkl,ijnm -> iknlm", k, k.conj()).reshape((num_gates, dim_squared, dim_squared))
 
 def get_compressed_rep_from_mgst_output(kraus_mgst, povm_mgst, state_mgst, kraus_rank:int = 1, state_rank:int = 1, povm_rank:int = 1)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators.
