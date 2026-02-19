@@ -257,6 +257,10 @@ def plot_wall_time(
     ylabel: str = "Wall time [s]",
     comparison_data: dict[str, tuple[list, list]] = None,
     logscale: str | None = None,
+    different_lengths_allowed: bool = False,
+    label_fontsize: int = 12,
+    legend_fontsize: int = 10,
+    legend_loc: str = "best",
 ) -> None:
     """Plot wall time against a parameter for different methods/configurations.
 
@@ -268,7 +272,10 @@ def plot_wall_time(
         xlabel: Label for x-axis.
         ylabel: Label for y-axis.
         logscale: 'x', 'y', 'xy' for logarithmic scale on respective axes, or None for linear scale.
-        labels: Optional list of labels for methods. If None, uses dictionary keys.
+        comparison_data: Optional dictionary mapping method names to (x, y) data for additional comparison curves.
+        different_lengths_allowed: If True, allows time_data entries to have different lengths than x_values (plots only available points). If False, raises an error if lengths don't match.
+        label_fontsize: Font size for axis labels and title.
+        legend_fontsize: Font size for legend.
     """
     plt.figure(figsize=(8, 5), dpi=250)
     if logscale == "y":
@@ -282,7 +289,13 @@ def plot_wall_time(
 
     for i, (method, results) in enumerate(time_data.items()):
         if len(results) != len(x_values):
-            raise ValueError(f"Number of timing results for '{method}' doesn't match number of x values")
+            if not different_lengths_allowed:
+                raise ValueError(f"Number of timing results for '{method}' doesn't match number of x values")
+            else:
+                # Truncate or pad results to match x_values length
+                x_values_method = x_values[:len(results)]
+        else:
+            x_values_method = x_values
         
         marker = MARKERS[i % len(MARKERS)]
         color = COLOUR_PALETTE[i]
@@ -292,7 +305,7 @@ def plot_wall_time(
 
         # Plot main line with markers
         plot_function(
-            x_values,
+            x_values_method,
             means,
             label=method,
             color=color,
@@ -303,7 +316,7 @@ def plot_wall_time(
         )
         
         plt.fill_between(
-            x_values,
+            x_values_method,
             means - stds,
             means + stds,
             color=color,
@@ -321,10 +334,10 @@ def plot_wall_time(
                 linewidth=2,
             )
 
-    plt.xlabel(xlabel, fontsize=12)
-    plt.ylabel(ylabel, fontsize=12)
-    plt.title(title, fontsize=14)
+    plt.xlabel(xlabel, fontsize=label_fontsize)
+    plt.ylabel(ylabel, fontsize=label_fontsize)
+    plt.title(title, fontsize=label_fontsize)
     plt.grid(alpha=0.3)
-    plt.legend(fontsize=10)
+    plt.legend(loc=legend_loc, fontsize=legend_fontsize)
     plt.tight_layout()
     plt.show()

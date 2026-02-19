@@ -188,6 +188,30 @@ def contract_mps_general_povm(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
     # (num_povm, rank_povm, dim_up_in) x (dim_up_in, dim_down_in) x (num_povm, rank_povm, dim_down_in) -> num_povm
     return jnp.einsum("...jk, kl, ...jl ->...", povm_psd, right_tensor, povm_psd.conj(), optimize=optimal_path)
 
+def contract_mps_abstract_povm_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
+    """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd using the optimal contraction path for a coherent quantum channel (i.e. kraus rank = 1).
+    
+    WARNING: the following contraction only makes sense assuming that the kraus rank is 1, i.e. the quantum channel is coherent/unitary.
+    
+    Args:
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank = 1, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+    """
+
+    # Erase leg with dimension 1
+    kraus_tensor = jnp.squeeze(kraus_tensor) # num_gates, dim_out, dim_in
+
+    right_tensor = state_psd  # dim_in, rank_state
+    for idx in reversed(gates_indices):
+        k = kraus_tensor[idx]  # dim_out, dim_in
+        right_tensor = k @ right_tensor  # dim_out, rank_state
+        
+    contracted_tensor = povm_psd @ right_tensor # num_povm, rank_povm, rank_state
+    return jnp.einsum("...jk, ...jk -> ...", contracted_tensor, contracted_tensor.conj()) # num_povm
+
 def contract_mps_all_povm(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int])->jnp.ndarray:
     """Compute the inner product contraction <povm|kraus|state> for all matrices in povm_psd
 
