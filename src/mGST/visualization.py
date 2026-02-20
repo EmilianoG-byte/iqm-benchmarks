@@ -4,6 +4,7 @@ Utility functions for visualization purposes.
 
 import matplotlib.pyplot as plt
 import jax.numpy as jnp
+import numpy as np
 
 COLOUR_PALETTE = [
     "#294C60",
@@ -249,6 +250,115 @@ def plot_alternating_optimization(
 
     default_cost_function_formatting(title=title)
         
+    
+from matplotlib.colors import to_rgba, to_hex
+    
+def idx_and_color_to_face_color(idx: int, n_sets: int, color: str) -> str:
+    """Return a marker face color for the idx-th dataset out of n_sets.
+
+    The last set (idx == n_sets - 1) gets the full colour.
+    Earlier sets are progressively blended toward white (more pastel).
+
+    Args:
+        idx: Index of the current dataset (0-based).
+        n_sets: Total number of datasets.
+        color: Hex or named colour string for this method.
+    """
+    rgba = np.array(to_rgba(color), dtype=float)
+    # How far are we from the last set? 0 for the last, up to 1 for the first.
+    distance_from_last = (n_sets - 1 - idx) / max(n_sets - 1, 1)
+    # Scale up to a maximum pastel factor (0.75 keeps the colour recognisable)
+    factor = distance_from_last * 0.6
+    rgba[:3] = rgba[:3] + (1.0 - rgba[:3]) * factor
+    return to_hex(np.clip(rgba, 0.0, 1.0))        
+        
+def plot_many_sets_wall_time(
+    time_data_sets: list[dict[str, list[tuple[float, float]]]],
+    x_values: list[int | float],
+    title: str = "Wall Time Comparison",
+    xlabel: str = "Number of qubits",
+    ylabel: str = "Wall time [s]",
+    logscale: str | None = None,
+    label_fontsize: int = 12,
+    legend_fontsize: int = 10,
+) -> None:
+    """Plot wall time for multiple sets of timing data on a single figure.
+
+    Methods share the same color across datasets (determined by their order in COLOUR_PALETTE).
+    Datasets are visually separated by varying opacity: earlier datasets are more transparent,
+    the last dataset is fully opaque.
+
+    Args:
+        time_data_sets: List of dicts, each mapping method names to lists of (mean, std) tuples.
+            All dicts are assumed to share the same keys and each list should have the same
+            length as x_values.
+        x_values: Values for the x-axis (e.g. number of qubits).
+        title: Title of the plot.
+        xlabel: Label for the x-axis.
+        ylabel: Label for the y-axis.
+        logscale: 'x', 'y', or 'xy' for logarithmic scale on the respective axes, or None for linear.
+        label_fontsize: Font size for axis labels and title.
+        legend_fontsize: Font size for the legend.
+        legend_loc: Location string for the legend (passed directly to matplotlib).
+    """
+    # Lightest alpha for the first set, fully opaque for the last
+    # alphas = [1.0] if n_sets == 1 else [0.35 + 0.65 * j / (n_sets - 1) for j in range(n_sets)]
+
+    plt.figure(figsize=(9, 5), dpi=250)
+    if logscale == "y":
+        plot_function = plt.semilogy
+    elif logscale == "x":
+        plot_function = plt.semilogx
+    elif logscale == "xy":
+        plot_function = plt.loglog
+    else:
+        plot_function = plt.plot
+
+    n_sets = len(time_data_sets)
+    
+    alphas = [1.0] if n_sets == 1 else [0.35 + 0.65 * j / (n_sets - 1) for j in range(n_sets)]
+    
+    for j, time_data in enumerate(time_data_sets):
+        for i, (method, results) in enumerate(time_data.items()):
+            color = COLOUR_PALETTE[i % len(COLOUR_PALETTE)]
+            marker = MARKERS[i % len(MARKERS)]
+            means = jnp.array([r[0] for r in results])
+            stds = jnp.array([r[1] for r in results])
+
+            facecolor = idx_and_color_to_face_color(j, n_sets, color)
+
+            plot_function(
+                x_values,
+                means,
+                label=f"{method}",
+                color=facecolor,
+                marker=marker,
+                linestyle="-",
+                linewidth=2,
+                markersize=6,
+                # alpha=alphas[j],
+                # markerfacecolor=facecolor,
+                markeredgecolor="black",
+            )
+            plt.fill_between(
+                x_values,
+                means - stds,
+                means + stds,
+                color=color,
+                alpha= 0.2,
+            )
+
+    plt.xlabel(xlabel, fontsize=label_fontsize)
+    plt.ylabel(ylabel, fontsize=label_fontsize)
+    plt.title(title, fontsize=label_fontsize)
+    plt.grid(alpha=0.3)
+    plt.legend(
+        loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, fontsize=legend_fontsize
+    )
+    plt.tight_layout()
+    plt.show()
+    
+        
 def plot_wall_time(
     time_data: dict[str, list[tuple[float, float]]],
     x_values: list[int | float],
@@ -313,6 +423,7 @@ def plot_wall_time(
             linestyle="-",
             linewidth=2,
             markersize=6,
+            markeredgecolor="black"
         )
         
         plt.fill_between(
