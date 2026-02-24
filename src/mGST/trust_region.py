@@ -142,6 +142,7 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
     
     References:
     [1] Trust-region methods on Riemannian manifolds, P. A. Absil, C. G. Baker, and K. A. Gallivan, 2006.
+    [2] https://www.nicolasboumal.net/book/IntroOptimManifolds_Boumal_2023.pdf (Algorithm 6.4)
     
     Args:
         x: Current point on the manifold.
@@ -152,8 +153,8 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         n, p: Dimensions of the Stiefel manifold.
         rhessian_vector_fn: Function to compute the Riemannian Hessian-vector product.
         verbose: Whether to print information during the TCG algorithm.
-        theta: The theta parameter for the stopping criteria. If None, stopping criteria is not used.
-        kappa: The kappa parameter for the stopping criteria. If None, stopping criteria is not used.
+        theta: The theta parameter for the stopping criteria. If None, stopping criteria is not used. See [2] for an example of parameters.
+        kappa: The kappa parameter for the stopping criteria. If None, stopping criteria is not used. See [2] for an example of parameters.
     
     Returns:
         A tuple containing:
@@ -363,7 +364,7 @@ def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
-    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar]]:
+    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar], bool]:
     """
     Run the trust region optimization algorithm.
 
@@ -415,6 +416,7 @@ def run_trust_region_optimization(
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
     norm_grad = norm_grad_init
 
+    finished_early = False
     print(f"TR started for operator: {operator_type} 🚀.")
     if verbose:
         print("=======================================")
@@ -460,13 +462,14 @@ def run_trust_region_optimization(
             if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
                 if verbose:
                     print(f"Stopping criteria met. 🛑")
+                finished_early = True
                 break
                 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user {idx}.")
     print("=======================================")
     print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
-    return x_k, x_k_array, cost_fx_array
+    return x_k, x_k_array, cost_fx_array, finished_early
 
 def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
     """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
@@ -489,12 +492,13 @@ def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_gr
     
     References:
         - ChatGPT
+        - https://www.nicolasboumal.net/book/IntroOptimManifolds_Boumal_2023.pdf (Section 6.4.6)
     
     Args:
         norm_grad: The norm of the Riemannian gradient at the current point.
         tol_grad: The tolerance for the gradient norm. If None, no stopping criteria is applied.
     """
-    return norm_grad <= tol_grad * max(1.0, norm_grad_init)
+    return norm_grad <= tol_grad * norm_grad_init
 
 
 def validate_optimization_options(optimization_options:dict[str, OptimizationOptions])->dict[str, str]:
@@ -602,27 +606,32 @@ def run_riemannian_optimization(
         for idx in range(num_iterations):
             # Optimize POVM
             povm_options = optimization_schedule["povm"].get_options_for_iteration(idx)
-            povm_psd_k, cost_values_povm = _optimize_single_operator(
+            povm_psd_k, cost_values_povm, finished_early_povm = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
 
             cost_fn_history.extend(cost_values_povm)
             # Optimize Kraus
             kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
-            kraus_tensor_k, cost_values_kraus = _optimize_single_operator(
+            kraus_tensor_k, cost_values_kraus, finished_early_kraus = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
 
             cost_fn_history.extend(cost_values_kraus)
             # Optimize State
             state_options = optimization_schedule["state"].get_options_for_iteration(idx)
-            state_psd_k, cost_values_state = _optimize_single_operator(
+            state_psd_k, cost_values_state, finished_early_state = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
             cost_fn_history.extend(cost_values_state)
             
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
+                
+            # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
+            # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
+            if all([finished_early_povm, finished_early_kraus, finished_early_state]):
+                print(f"Optimization for all operators finished early at iteration {idx + 1}. Stopping outer loop optimization. 🛑")
 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user at outer iteration {idx}.")
@@ -666,7 +675,7 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         # Purposedly supressing warnings since the TR method raises warnings often, e.g. when the gradient is close to zero or t < 0.
         with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                optimized_operator, _, cost_values = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
+                optimized_operator, _, cost_values, finished_early = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
         if save_intermediate_cost_values:
             saved_cost_values = cost_values
         else:
@@ -678,8 +687,9 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         gds_options.pop("jit", None)  # Remove jit option if present, as it's not used in _update_tensor_via_gradient
         print(f"GDS started for operator: {operator_type} 🚀.")
         optimized_operator, _, cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
+        finished_early = False # GDS does not have a built-in stopping criteria as a single step. TODO: implement stopping criteria based on gradient norm.
         saved_cost_values = [cost_value]
     else:
         raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
 
-    return optimized_operator, saved_cost_values
+    return optimized_operator, saved_cost_values, finished_early

@@ -254,7 +254,7 @@ def generate_spam_err_std_pdf(filename, E, rho, E2, rho2, basis_labels=False, ti
     return None
 
 
-def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_labels=False, return_fig=False):
+def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_labels=False, return_fig=False, dpi:int=300):
     """Main routine to generate plots of reconstructed gates, ideal gates and the noise channels
     of the reconstructed gates. The matrices are shown as Hinton diagrams, where the size of each square represents
     the magnitude of the matrix element and the color represents its sign as well as the magnitude.
@@ -355,7 +355,7 @@ def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_lab
 
         figures.append(fig)
         if not return_fig:
-            plt.savefig(filename + f"G%i.pdf" % i, dpi=150, transparent=True, bbox_inches="tight")
+            plt.savefig(filename + f"G%i.pdf" % i, dpi=dpi, transparent=True, bbox_inches="tight")
 
     return figures
 

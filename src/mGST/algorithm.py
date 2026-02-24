@@ -740,7 +740,6 @@ def optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=F
     X_new = np.einsum("ijkl,ijnm -> iknlm", K_new, K_new.conj()).reshape((d, r, r))
     return K_new, X_new, E_new, rho_new, A_new, B_new
 
-from mGST.low_level_jit import cost_function_jax
 
 def run_mGST(
     *args,
