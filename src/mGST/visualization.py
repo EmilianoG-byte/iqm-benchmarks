@@ -36,7 +36,7 @@ MARKERS = [
 def default_cost_function_formatting(title:str):
     plt.xlabel("Iteration", fontsize=14)
     plt.ylabel("Cost Value", fontsize=14)
-    plt.title(title, fontsize=16)
+    plt.title(title, fontsize=16, wrap=True)
     plt.grid(color="lightgray", linestyle="--", linewidth=0.5)
     plt.legend(fontsize=12)
     plt.tight_layout()

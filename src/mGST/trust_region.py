@@ -140,6 +140,9 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
 def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
     """ Truncated Conjugate Gradient (TCG) method to approximately solve the trust region subproblem on the Stiefel manifold.
     
+    TODO: determine if we can use the Hessian-vector product output to compute the denominator in the quality coefficient
+    (reduce by half computation time).
+    
     References:
     [1] Trust-region methods on Riemannian manifolds, P. A. Absil, C. G. Baker, and K. A. Gallivan, 2006.
     [2] https://www.nicolasboumal.net/book/IntroOptimManifolds_Boumal_2023.pdf (Algorithm 6.4)
@@ -212,7 +215,7 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         if check_stopping_criteria:
             norm_rk = jnp.sqrt(norm_sqrd_r_next)
             if determine_cg_stopping_criteria(norm_r0, norm_rk, theta=theta, kappa=kappa):
-                reason = f"Stopping criteria met 🛑. |r_k| = {norm_rk:.2e}"
+                reason = f"(tCG) Stopping criteria met 🛑. |r_k| = {norm_rk:.2e}"
                 on_boundary = False
                 break
 
@@ -461,7 +464,7 @@ def run_trust_region_optimization(
             norm_grad = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_k, metric=metric))
             if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
                 if verbose:
-                    print(f"Stopping criteria met. 🛑")
+                    print(f"(RTR) Stopping criteria met. 🚨 |r∇f(x)|/|r∇f(x_0)| = {norm_grad/norm_grad_init:.6e}")
                 finished_early = True
                 break
                 
@@ -498,6 +501,9 @@ def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_gr
         norm_grad: The norm of the Riemannian gradient at the current point.
         tol_grad: The tolerance for the gradient norm. If None, no stopping criteria is applied.
     """
+    # Should the norm_grad_init be here the one for the current iteration of the outer loop
+    # Or should it be overall the initial gradient.
+    # Perhaps the latter 🤔
     return norm_grad <= tol_grad * norm_grad_init
 
 
@@ -561,6 +567,7 @@ def run_riemannian_optimization(
     num_iterations:int,
     optimization_schedule:dict[str, OperatorSchedule] = None,
     save_intermediate_cost_values:bool=False,
+    noise_threshold:float|None = None,
     verbose:bool=True
     )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
@@ -580,6 +587,7 @@ def run_riemannian_optimization(
             The keys should be "kraus", "povm", and "state", and the values should be instances of TrustRegionOptions or GradientDescentOptions.
             If None, default TrustRegionOptions will be used for all operators.
         save_intermediate_cost_values: Whether to save intermediate cost function values during the optimization of each operator. For now, we can only save all values if using TrustRegionOptions, since the GDS does not return intermediate values.
+        noise_threshold: The noise threshold to determine if the optimization has converged. If the cost function value is below this threshold, the optimization will stop early. See ``determine_convergence_based_on_noise`` for more details. If None, this stopping criterion is disabled.
         verbose: Whether to print information during the optimization
         
     Returns:
@@ -595,13 +603,22 @@ def run_riemannian_optimization(
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
     
+    # If not given, set threshold to zero to disable early stopping based on progress.
+    convergence_reason = "Max iterations reached ⏳."
+    convergence_criteria = "Noise Threshold 📶"
+    if noise_threshold is None:
+        noise_threshold = 0.0
+        convergence_criteria = "Gradient Norm 📐"
+        
+    
     optimization_schedule_print = "\n".join(
     f"{operator}: {str(option)}"
     for operator, option in optimization_schedule.items()
 )
     
     print("🔰 Starting Riemannian Optimization 🔰 \n with optimization schedule: \n"
-          f"{optimization_schedule_print}")
+          f"{optimization_schedule_print} \n"
+          f"and convergence criteria: {convergence_criteria}")
     try:
         for idx in range(num_iterations):
             # Optimize POVM
@@ -609,8 +626,13 @@ def run_riemannian_optimization(
             povm_psd_k, cost_values_povm, finished_early_povm = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
-
             cost_fn_history.extend(cost_values_povm)
+            # Check cost fn convergence
+            cost_below_threshold = cost_fn_history[-1] < noise_threshold
+            if cost_below_threshold:
+                convergence_reason = "Cost fn below noise threshold after POVM 📈."
+                break
+                
             # Optimize Kraus
             kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
             kraus_tensor_k, cost_values_kraus, finished_early_kraus = _optimize_single_operator(
@@ -618,23 +640,38 @@ def run_riemannian_optimization(
             )
 
             cost_fn_history.extend(cost_values_kraus)
+            # Check cost fn convergence
+            cost_below_threshold = cost_fn_history[-1] < noise_threshold
+            if cost_below_threshold:
+                convergence_reason = "Cost fn below noise threshold after KRAUS 📈."
+                break
             # Optimize State
             state_options = optimization_schedule["state"].get_options_for_iteration(idx)
             state_psd_k, cost_values_state, finished_early_state = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
             cost_fn_history.extend(cost_values_state)
+            # Check cost fn convergence
+            if cost_fn_history[-1] < noise_threshold:
+                convergence_reason = "Cost fn below noise threshold after STATE 📈."
+                break
             
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
                 
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
             # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
-            if all([finished_early_povm, finished_early_kraus, finished_early_state]):
-                print(f"Optimization for all operators finished early at iteration {idx + 1}. Stopping outer loop optimization. 🛑")
+            all_gradients_converged = finished_early_povm and finished_early_kraus and finished_early_state
+            if all_gradients_converged:
+                convergence_reason = "All gradients converged 💥." 
+                break
 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user at outer iteration {idx}.")
+        
+    
+    final_message = f"‼️ Full optimization finished at iteration {idx + 1}/{num_iterations} ‼️ \n Reason: {convergence_reason}"
+    print(final_message) 
         
     optimized_operators = {
         "kraus": kraus_tensor_k,
@@ -693,3 +730,40 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
 
     return optimized_operator, saved_cost_values, finished_early
+
+
+def estimate_noise_floor_threshold(probability_matrix:jnp.ndarray, num_shots:int, multiplier:float = 5.0)->float:
+    """Estimate the noise floor threshold for the least-squares cost from empirical probabilities.
+
+    Estimates the expected mean squared error per (sequence, POVM element) due to
+    finite-sampling (shot) noise. 
+    
+    When the cost function drops below this threshold,
+    further optimization would mostly fit statistical fluctuations rather than
+    improve the physical model.
+
+    Each empirical frequency y_ij is a binomial estimate of the true probability
+    p_ij with variance Var(y_ij) = p_ij(1 - p_ij) / num_shots, approximated by
+    y_ij(1 - y_ij) / num_shots. The threshold is the average of this variance
+    over all sequences and POVM elements, scaled by ``multiplier``::
+
+        threshold = multiplier / (num_sequences * num_povm * num_shots)
+                    * sum_{i,j} y_ij (1 - y_ij)
+
+    Args:
+        probability_matrix: Empirical outcome probabilities, shape ``(num_povm, num_sequences)``.
+        num_shots: Number of measurement shots per sequence.
+        multiplier: Safety factor applied to the noise floor. Adjust based on empirical observations of typical noise levels. Default is 5.0.
+
+    Returns:
+        The noise floor threshold.
+    """
+    num_povm, num_sequences = probability_matrix.shape
+    threshold = jnp.sum(probability_matrix * (1 - probability_matrix))
+    # Expected square error from binomial noise
+    threshold /= num_shots 
+    # average over all POVM and Sequences
+    threshold /= (num_sequences * num_povm)
+    # Apply multiplier to adjust the threshold based on empirical observations (typical noise level). This can be tuned.
+    threshold *= multiplier
+    return threshold
