@@ -762,7 +762,7 @@ def convergence_criteria_from_noise_threshold(cost_fn_value:float, noise_thresho
         message = f"Cost function value for {operator.capitalize()} below noise threshold {noise_threshold:.2e} 📶."
     return converged, message
 
-def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn_current:float, relative_precision:float)-> tuple[bool, str]:
+def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn_current:float, relative_precision:float)-> tuple[bool, str, float]:
     """Determine convergence based on relative precision of cost function values.
     
     Args:
@@ -774,6 +774,7 @@ def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn
         A tuple containing:
         - A boolean indicating whether convergence criteria are met.
         - A string describing the reason for convergence.
+        - The relative change in the cost function value.
     """
     message = "No convergence criteria met yet ⏳."
     converged = False
