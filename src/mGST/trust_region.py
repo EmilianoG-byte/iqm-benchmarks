@@ -568,6 +568,7 @@ def run_riemannian_optimization(
     optimization_schedule:dict[str, OperatorSchedule] = None,
     save_intermediate_cost_values:bool=False,
     noise_threshold:float|None = None,
+    relative_precision: float|None = 1e-5,
     verbose:bool=True
     )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
@@ -587,7 +588,8 @@ def run_riemannian_optimization(
             The keys should be "kraus", "povm", and "state", and the values should be instances of TrustRegionOptions or GradientDescentOptions.
             If None, default TrustRegionOptions will be used for all operators.
         save_intermediate_cost_values: Whether to save intermediate cost function values during the optimization of each operator. For now, we can only save all values if using TrustRegionOptions, since the GDS does not return intermediate values.
-        noise_threshold: The noise threshold to determine if the optimization has converged. If the cost function value is below this threshold, the optimization will stop early. See ``determine_convergence_based_on_noise`` for more details. If None, this stopping criterion is disabled.
+        noise_threshold: The noise threshold to determine if the optimization has converged. If the cost function value is below this threshold, the optimization will stop early. If None, this stopping criterion is disabled. See `estimate_noise_floor_threshold`.
+        relative_precision: The relative precision to determine if the optimization has converged. If the relative change in the cost function value between the start and end of an iteration is below this threshold, the optimization will stop early. If None, this stopping criterion is disabled.
         verbose: Whether to print information during the optimization
         
     Returns:
@@ -604,21 +606,29 @@ def run_riemannian_optimization(
     state_psd_k = state_psd_init
     
     # If not given, set threshold to zero to disable early stopping based on progress.
-    convergence_reason = "Max iterations reached ⏳."
-    convergence_criteria = "Noise Threshold 📶"
+    convergence_criteria = "* Convergence Criteria: \n"
     if noise_threshold is None:
         noise_threshold = 0.0
-        convergence_criteria = "Gradient Norm 📐"
+    else:
+        convergence_criteria += f"+ Noise Threshold 📶 {noise_threshold:.2e} \n" 
+    if relative_precision is None:
+        relative_precision = 0.0 # Set to zero to disable early stopping based on relative precision.
+    else:
+        convergence_criteria += f"+ Relative Precision 📏 {relative_precision:.2e} \n"
         
+    # Convergence based on early stopp using norms is always present as a last resource
+    convergence_criteria += "+ Gradient(s) Norm(s) 📐"
+    # Default convergence reason
+    convergence_reason = "Max iterations reached ⏳."
     
     optimization_schedule_print = "\n".join(
     f"{operator}: {str(option)}"
     for operator, option in optimization_schedule.items()
 )
     
-    print("🔰 Starting Riemannian Optimization 🔰 \n with optimization schedule: \n"
+    print("🔰 Starting Riemannian Optimization 🔰 \n * optimization schedule: \n"
           f"{optimization_schedule_print} \n"
-          f"and convergence criteria: {convergence_criteria}")
+          f"{convergence_criteria}")
     try:
         for idx in range(num_iterations):
             # Optimize POVM
@@ -626,11 +636,12 @@ def run_riemannian_optimization(
             povm_psd_k, cost_values_povm, finished_early_povm = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
+            # Save the initial cost value from this iteration for convergence check
+            cost_fn_init_k = cost_values_povm[0]
             cost_fn_history.extend(cost_values_povm)
             # Check cost fn convergence
-            cost_below_threshold = cost_fn_history[-1] < noise_threshold
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="POVM")
             if cost_below_threshold:
-                convergence_reason = "Cost fn below noise threshold after POVM 📈."
                 break
                 
             # Optimize Kraus
@@ -641,23 +652,30 @@ def run_riemannian_optimization(
 
             cost_fn_history.extend(cost_values_kraus)
             # Check cost fn convergence
-            cost_below_threshold = cost_fn_history[-1] < noise_threshold
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="KRAUS")
             if cost_below_threshold:
-                convergence_reason = "Cost fn below noise threshold after KRAUS 📈."
                 break
             # Optimize State
             state_options = optimization_schedule["state"].get_options_for_iteration(idx)
             state_psd_k, cost_values_state, finished_early_state = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
             )
+            # Saved the final cost value from this iteration for convergence check
+            cost_fn_final_k = cost_values_state[-1]
             cost_fn_history.extend(cost_values_state)
             # Check cost fn convergence
-            if cost_fn_history[-1] < noise_threshold:
-                convergence_reason = "Cost fn below noise threshold after STATE 📈."
-                break
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="STATE")
+            if cost_below_threshold:
+                break    
             
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
+            
+            relative_cost_below_precision, convergence_reason = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_final_k, relative_precision=relative_precision)
+            if relative_cost_below_precision:
+                break
+            if verbose:
+                print(f"\n 🎯 Relative change in cost function value: {abs(cost_fn_final_k - cost_fn_init_k)/abs(cost_fn_init_k):.2e}. Relative precision target: {relative_precision:.2e}.")
                 
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
             # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
@@ -679,6 +697,47 @@ def run_riemannian_optimization(
         "state": state_psd_k,
     }
     return optimized_operators, cost_fn_history
+
+def convergence_criteria_from_noise_threshold(cost_fn_value:float, noise_threshold:float, operator:str)-> tuple[bool, str]:
+    """Determine convergence based on noise threshold.
+    
+    Args:
+        cost_fn_value: The current value of the cost function.
+        noise_threshold: The noise threshold to determine if the optimization has converged. If the cost function value is below this threshold, the optimization will stop early.
+        operator: The operator type for which to check convergence ('kraus', 'povm', or 'state'). This is used for the convergence message.
+        
+    Returns:
+        A tuple containing:
+        - A boolean indicating whether convergence criteria are met.
+        - A string describing the reason for convergence.
+    """
+    message = "No convergence criteria met yet ⏳."
+    converged = False
+    if cost_fn_value < noise_threshold:
+        converged = True
+        message = f"Cost function value for {operator.capitalize()} below noise threshold {noise_threshold:.2e} 📶."
+    return converged, message
+
+def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn_current:float, relative_precision:float)-> tuple[bool, str]:
+    """Determine convergence based on relative precision of cost function values.
+    
+    Args:
+        cost_fn_previous: The previous value of the cost function.
+        cost_fn_current: The current value of the cost function.
+        relative_precision: The target relative precision to determine convergence. If the relative change in the cost function value is below this threshold, the optimization is considered converged.
+        
+    Returns:
+        A tuple containing:
+        - A boolean indicating whether convergence criteria are met.
+        - A string describing the reason for convergence.
+    """
+    message = "No convergence criteria met yet ⏳."
+    converged = False
+    relative_change = abs(cost_fn_current - cost_fn_previous) / abs(cost_fn_previous)
+    if relative_change < relative_precision:
+        converged = True
+        message = f"Relative change in cost function value {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
+    return converged, message
 
 def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False)-> tuple[jnp.ndarray, list[float]]:
     """

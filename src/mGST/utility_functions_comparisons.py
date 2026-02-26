@@ -106,6 +106,25 @@ def initialize_mgst_parameters(dataset, target_init:bool = True, seed:int = 42):
         
     return K, X, E, rho
 
+def get_compressed_perturbed_kraus_from_superop(superop:jnp.ndarray, rank:int, seed:int = 42)->dict[str, jnp.ndarray]:
+    """Get a perturbed Kraus representation from a superoperator.
+    
+    Args:
+        superop: Superoperator tensor of dimensions (num_gates, dim_out^2, dim_in^2)
+            Names in other functions: `X`, `kraus_tensor_mgst`.
+        rank: Desired rank of the Kraus tensor in the compressed representation.
+        seed: Seed for random perturbation. Defaults to 42.
+        
+    Returns:
+    A dictionary containing the perturbed Kraus representation and the corresponding superoperator.
+        kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        superop: Superoperator tensor of dimensions (num_gates, dim_out^2, dim_in^2)
+    """
+    kraus_tensor_perturbed = additional_fns.perturbed_target_init(X_target=superop, rK=rank, seed=seed)
+    superop_perturbed = kraus_tensor_to_mgst(kraus_tensor_perturbed)
+    return {"kraus_tensor": kraus_tensor_perturbed, "superop": superop_perturbed}
+    
+
 def get_full_mgst_parameters_from_result_and_configuration(
     result:BenchmarkRunResult, 
     configuration:GSTConfiguration, 
@@ -385,6 +404,8 @@ def get_compressed_perturbed_rep_from_mgst(povm_mgst, state_mgst)->tuple[jnp.nda
     """Get the compressed representation of the MGST operators using cholesky factorization.
     
     This is the implementation used in the original mGST code.
+    
+    For the Kraus function see `get_compressed_perturbed_kraus_from_superop`.
     
     Args:
         povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
