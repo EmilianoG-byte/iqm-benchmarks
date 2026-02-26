@@ -178,6 +178,11 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     benchmark = CompressiveGST(backend, configuration)
     return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables, run_benchmark=True)
 
+def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backend)->jnp.ndarray:
+    benchmark = CompressiveGST(backend, configuration)
+    gate_set = benchmark.gate_set
+    return qiskit_gate_to_operator(gate_set)
+
 def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_gates_per_batch:int | None = None, max_circuits_per_batch:int | None = None, seq_len_list:list | None = None) -> GSTConfiguration:
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
 

@@ -452,3 +452,97 @@ def plot_wall_time(
     plt.legend(loc=legend_loc, fontsize=legend_fontsize)
     plt.tight_layout()
     plt.show()
+    
+    
+def visualize_data_sets_as_bars(
+    data: dict[str, dict[str, float]],
+    bar_labels: list[str] = None,
+    title: str = None,
+    ylabel: str = "Time [s]",
+    xlabel: str = None,
+    horizontal_lines: dict[str, float] = None,
+    logscale: bool = False,
+) -> None:
+    """
+    Plot grouped bar chart of expectation values with error bars.
+
+    Args:
+        data: Map of x labels to dicts of {bar label: value}.
+        bar_labels: Optional list of legend labels for the bars (e.g. qubit names).
+        title: Title of the plot.
+        ylabel: Y-axis label.
+        xlabel: X-axis label.
+        horizontal_lines: Optional dict of {line label: y value} to add horizontal lines for reference.
+    """
+    x_labels = list(data.keys())
+    x_positions = np.arange(len(x_labels))
+
+    # Get bar labels from first item
+    bar_keys = list(next(iter(data.values())).keys())
+    num_bars = len(bar_keys)
+
+    if bar_labels is None:
+        bar_labels = [f"Qubit {i}" for i in range(num_bars)]
+
+    colours = COLOUR_PALETTE[:num_bars]  # use your custom palette
+
+    total_width = 0.8
+    bar_width = total_width / num_bars
+
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=250)
+
+    for i, (bar_key, color, label) in enumerate(zip(bar_keys, colours, bar_labels)):
+        means = [data[x][bar_key] for x in x_labels]
+        bar_pos = x_positions + i * bar_width - total_width / 2 + bar_width / 2
+        ax.bar(
+            bar_pos,
+            means,
+            width=bar_width,
+            label=label,
+            color=color,
+        )
+
+    # Add horizontal lines if provided
+    if horizontal_lines:
+        # Create a list of colors for the lines that differ from bar colors
+        line_colors = ["red", "black", "blue", "green", "purple"][
+            : len(horizontal_lines)
+        ]
+
+        line_handles = []
+        for (label, y_value), color in zip(horizontal_lines.items(), line_colors):
+            line = ax.axhline(y=y_value, color=color, linestyle="--", linewidth=1.5)
+            line_handles.append((line, label))
+
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel(xlabel)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(x_labels)
+    
+    if logscale:
+        ax.set_yscale("log")
+        
+    if title:
+        ax.set_title(title)
+        
+    ax.grid(axis="y", linestyle="--", linewidth=0.5)
+
+    # Legend 1: for bar groups (qubits)
+    legend1 = ax.legend(loc="best", fontsize=10, title_fontsize=11)
+    ax.add_artist(legend1)  # ✅ Add legend1 explicitly
+
+    # Legend 3: for horizontal lines (if provided)
+    if horizontal_lines:
+        line_handles_list, line_labels = zip(*line_handles)
+        legend3 = ax.legend(
+            handles=line_handles_list,
+            labels=line_labels,
+            loc="upper left",
+            fontsize=10,
+            title_fontsize=11,
+        )
+        ax.add_artist(legend3)  # Add legend3 explicitly
+
+    fig.tight_layout()
+    plt.show()
+    return fig
