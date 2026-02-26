@@ -25,8 +25,6 @@ from mGST.optimization import (
     update_B_geodesic,
     update_K_geodesic,
 )
-from mGST.reporting.figure_gen import plot_objf
-
 
 def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3, mle=False):
     """Riemannian saddle free Newton step on the POVM parametrization
@@ -802,6 +800,9 @@ def run_mGST(
     res_list : list
         Collected objective function values after each iteration
     """
+    # Resolving circular import
+    from mGST.reporting.figure_gen import plot_objf
+    
     y, J, _, d, r, rK, n_povm, bsize, meas_samples = args
     t0 = time.time()
     pdim = int(np.sqrt(r))

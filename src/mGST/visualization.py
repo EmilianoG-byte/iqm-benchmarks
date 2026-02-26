@@ -462,6 +462,7 @@ def visualize_data_sets_as_bars(
     xlabel: str = None,
     horizontal_lines: dict[str, float] = None,
     logscale: bool = False,
+    dpi: int = 300,
 ) -> None:
     """
     Plot grouped bar chart of expectation values with error bars.
@@ -489,7 +490,7 @@ def visualize_data_sets_as_bars(
     total_width = 0.8
     bar_width = total_width / num_bars
 
-    fig, ax = plt.subplots(figsize=(6, 4), dpi=250)
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=dpi)
 
     for i, (bar_key, color, label) in enumerate(zip(bar_keys, colours, bar_labels)):
         means = [data[x][bar_key] for x in x_labels]
