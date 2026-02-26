@@ -367,7 +367,8 @@ def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
-    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar], bool]:
+    global_norm_grad_init: float| None = None, 
+    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
     """
     Run the trust region optimization algorithm.
 
@@ -385,6 +386,9 @@ def run_trust_region_optimization(
         kappa_cg: The kappa parameter for the stopping criteria of the truncated conjugate gradient algorithm.
         tol_grad: The tolerance for the norm of the Riemannian gradient to determine convergence.
         verbose_cg: Whether to print information during the truncated conjugate gradient algorithm.
+        global_norm_grad_init: A gradient norm value to used as the initial gradient norm for the stopping criteria. 
+            Within an optimization outer loop, this can be the gradient before any optimization step is taken.
+            If not provided, the initial gradient norm will be computed from the initial point within this RTR sweep.
         verbose: Whether to print information during the trust region outer loop optimization.
         
     Returns:
@@ -392,6 +396,7 @@ def run_trust_region_optimization(
         - The optimized point on the manifold.
         - A list of all accepted points during the optimization.
         - A list of the cost function values at each accepted point.
+        - The final gradient norm.
 
     See references for details on the choice of the parameters such as the trust region radius [5], tolerances [1, 2, 4], kappa and theta [1, 2, 3].
 
@@ -415,11 +420,12 @@ def run_trust_region_optimization(
     retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
 
     # Compute the initial Riemannian gradient and its norm
-    rgradient = rgradient_fn(x_k)    
+    rgradient = rgradient_fn(x_k)
+    # TODO: Think whether we need to compute the initial gradient norm all the time.
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
     norm_grad = norm_grad_init
-
-    finished_early = False
+    if global_norm_grad_init is not None:
+        norm_grad_init = global_norm_grad_init
     print(f"TR started for operator: {operator_type} 🚀.")
     if verbose:
         print("=======================================")
@@ -465,14 +471,13 @@ def run_trust_region_optimization(
             if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
                 if verbose:
                     print(f"(RTR) Stopping criteria met. 🚨 |r∇f(x)|/|r∇f(x_0)| = {norm_grad/norm_grad_init:.6e}")
-                finished_early = True
                 break
                 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user {idx}.")
     print("=======================================")
     print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
-    return x_k, x_k_array, cost_fx_array, finished_early
+    return x_k, x_k_array, cost_fx_array, norm_grad
 
 def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
     """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
@@ -488,7 +493,7 @@ def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor
     """
     z1_matrix, z2_matrix, x_matrix = tensors_to_isometries(z1, z2, x, n=n, p=p)
     
-    return riemannian_metric(z1_matrix, z2_matrix, x=x_matrix, metric=metric)
+    return riemannian_metric(z1=z1_matrix, z2=z2_matrix, x=x_matrix, metric=metric)
 
 def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_grad:float = 1e-8)->bool:
     """Determine whether to stop the trust region optimization based on the gradient norm.
@@ -496,6 +501,7 @@ def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_gr
     References:
         - ChatGPT
         - https://www.nicolasboumal.net/book/IntroOptimManifolds_Boumal_2023.pdf (Section 6.4.6)
+            They suggest to use 1e-8 as a default value for tol_grad, but this can be tuned based on the problem and desired precision.
     
     Args:
         norm_grad: The norm of the Riemannian gradient at the current point.
@@ -569,6 +575,8 @@ def run_riemannian_optimization(
     save_intermediate_cost_values:bool=False,
     noise_threshold:float|None = None,
     relative_precision: float|None = 1e-5,
+    global_gradients_norm_init: dict[str, float] | None = None,
+    global_gradient_norm_tol: float = 1e-6,
     verbose:bool=True
     )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
@@ -590,6 +598,8 @@ def run_riemannian_optimization(
         save_intermediate_cost_values: Whether to save intermediate cost function values during the optimization of each operator. For now, we can only save all values if using TrustRegionOptions, since the GDS does not return intermediate values.
         noise_threshold: The noise threshold to determine if the optimization has converged. If the cost function value is below this threshold, the optimization will stop early. If None, this stopping criterion is disabled. See `estimate_noise_floor_threshold`.
         relative_precision: The relative precision to determine if the optimization has converged. If the relative change in the cost function value between the start and end of an iteration is below this threshold, the optimization will stop early. If None, this stopping criterion is disabled.
+        global_gradients_norm_init: A dictionary containing the initial gradient norms for each operator type to be used in the stopping criteria based on gradient norms. The keys should be "kraus", "povm", and "state". If None, the initial gradient norms will be computed from the initial points within each optimization step.
+        global_gradient_norm_tol: The tolerance for the gradient norm stopping criterion. If the norm of the gradient falls below this value, the optimization will stop.
         verbose: Whether to print information during the optimization
         
     Returns:
@@ -604,6 +614,15 @@ def run_riemannian_optimization(
     kraus_tensor_k = kraus_tensor_init
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
+    # Initially, we don't have any gradient norm
+    if global_gradients_norm_init is not None:
+        global_gradient_norm_init_povm = global_gradients_norm_init.get("povm", None)
+        global_gradient_norm_init_kraus = global_gradients_norm_init.get("kraus", None)
+        global_gradient_norm_init_state = global_gradients_norm_init.get("state", None)
+    else:
+        global_gradient_norm_init_povm = None
+        global_gradient_norm_init_kraus = None
+        global_gradient_norm_init_state = None
     
     # If not given, set threshold to zero to disable early stopping based on progress.
     convergence_criteria = "* Convergence Criteria: \n"
@@ -633,8 +652,8 @@ def run_riemannian_optimization(
         for idx in range(num_iterations):
             # Optimize POVM
             povm_options = optimization_schedule["povm"].get_options_for_iteration(idx)
-            povm_psd_k, cost_values_povm, finished_early_povm = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
+            povm_psd_k, cost_values_povm, gradient_norm_k_povm = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm
             )
             # Save the initial cost value from this iteration for convergence check
             cost_fn_init_k = cost_values_povm[0]
@@ -646,22 +665,27 @@ def run_riemannian_optimization(
                 
             # Optimize Kraus
             kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
-            kraus_tensor_k, cost_values_kraus, finished_early_kraus = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
+            kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus
             )
-
+            cost_fn_current_k = cost_values_kraus[-1]
             cost_fn_history.extend(cost_values_kraus)
             # Check cost fn convergence
             cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="KRAUS")
             if cost_below_threshold:
                 break
+            relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
+            if relative_cost_below_precision:
+                break
+            
+            
             # Optimize State
             state_options = optimization_schedule["state"].get_options_for_iteration(idx)
-            state_psd_k, cost_values_state, finished_early_state = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values
+            state_psd_k, cost_values_state, gradient_norm_k_state = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state
             )
             # Saved the final cost value from this iteration for convergence check
-            cost_fn_final_k = cost_values_state[-1]
+            cost_fn_current_k = cost_values_state[-1]
             cost_fn_history.extend(cost_values_state)
             # Check cost fn convergence
             cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="STATE")
@@ -671,17 +695,16 @@ def run_riemannian_optimization(
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
             
-            relative_cost_below_precision, convergence_reason = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_final_k, relative_precision=relative_precision)
+            relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
             if relative_cost_below_precision:
                 break
             if verbose:
-                print(f"\n 🎯 Relative change in cost function value: {abs(cost_fn_final_k - cost_fn_init_k)/abs(cost_fn_init_k):.2e}. Relative precision target: {relative_precision:.2e}.")
+                print(f"\n 🎯 Relative change in cost function value: {relative_change:.2e}. Relative precision target: {relative_precision:.2e}.")
                 
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
             # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
-            all_gradients_converged = finished_early_povm and finished_early_kraus and finished_early_state
-            if all_gradients_converged:
-                convergence_reason = "All gradients converged 💥." 
+            all_gradients_small, convergence_reason = convergence_criteria_from_gradients_norms(gradient_norm_k_povm, gradient_norm_k_kraus, gradient_norm_k_state, threshold=global_gradient_norm_tol)
+            if all_gradients_small:
                 break
 
     except KeyboardInterrupt:
@@ -697,6 +720,27 @@ def run_riemannian_optimization(
         "state": state_psd_k,
     }
     return optimized_operators, cost_fn_history
+
+
+def convergence_criteria_from_gradients_norms(*gradients_norms, threshold:float = 1e-6)-> tuple[bool, str]:
+    """Determine convergence based on the norms of the gradients.
+    
+    Args:
+        *gradients_norms: The norms of the gradients for each operator.
+        threshold: The threshold for the norm of the gradients to determine convergence. If the norm of all gradients is below this threshold, the optimization is considered converged.
+        
+    Returns:
+        A tuple containing:
+        - A boolean indicating whether convergence criteria are met.
+        - A string describing the reason for convergence.
+    """
+    message = "No convergence criteria met yet ⏳."
+    converged = False
+    if max(gradients_norms) < threshold:
+        converged = True
+        message = f"Norms of all gradients below threshold {threshold:.2e} 📐."
+    return converged, message
+
 
 def convergence_criteria_from_noise_threshold(cost_fn_value:float, noise_threshold:float, operator:str)-> tuple[bool, str]:
     """Determine convergence based on noise threshold.
@@ -733,13 +777,13 @@ def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn
     """
     message = "No convergence criteria met yet ⏳."
     converged = False
-    relative_change = abs(cost_fn_current - cost_fn_previous) / abs(cost_fn_previous)
+    relative_change = abs(cost_fn_current - cost_fn_previous) / (abs(cost_fn_previous) + 1)
     if relative_change < relative_precision:
         converged = True
         message = f"Relative change in cost function value {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
-    return converged, message
+    return converged, message, relative_change
 
-def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False)-> tuple[jnp.ndarray, list[float]]:
+def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar]:
     """
     Optimize a single operator (Kraus, POVM, or State) using the specified optimization options.
     
@@ -752,6 +796,13 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         cost_function: The cost function to minimize. Needed if using TrustRegionOptions.
         cost_fn_kwargs: Additional keyword arguments to pass to the cost function. Needed both for TrustRegionOptions and GradientDescentOptions.
         save_intermediate_cost_values: Whether to save all cost function values during the optimization of the operator. For now, we can only save intermediate values if using TrustRegionOptions, since the GDS does not return intermediate values.
+        global_gradient_norm_init: A gradient norm value to used as the initial gradient norm for the stopping criteria.
+        
+    Returns:
+        A tuple containing:
+        - The optimized operator tensor.
+        - A list of cost function values during the optimization of this operator (if save_intermediate_cost_values is True and using TrustRegionOptions, otherwise a list with only the final cost function value).
+        - The initial gradient norm used for the stopping criteria (RTR) or the gradient used in this step (GDS).
     """
     options_dict = optimization_options.to_dict()
     if isinstance(optimization_options, TrustRegionOptions):
@@ -771,7 +822,7 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         # Purposedly supressing warnings since the TR method raises warnings often, e.g. when the gradient is close to zero or t < 0.
         with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                optimized_operator, _, cost_values, finished_early = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, **options_dict)
+                optimized_operator, _, cost_values, norm_grad_k = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, global_norm_grad_init=global_norm_grad_init, **options_dict)
         if save_intermediate_cost_values:
             saved_cost_values = cost_values
         else:
@@ -782,13 +833,12 @@ def _optimize_single_operator(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, st
         gds_options = options_dict | cost_fn_kwargs
         gds_options.pop("jit", None)  # Remove jit option if present, as it's not used in _update_tensor_via_gradient
         print(f"GDS started for operator: {operator_type} 🚀.")
-        optimized_operator, _, cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
-        finished_early = False # GDS does not have a built-in stopping criteria as a single step. TODO: implement stopping criteria based on gradient norm.
+        optimized_operator, _, norm_grad_k ,cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
         saved_cost_values = [cost_value]
     else:
         raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
 
-    return optimized_operator, saved_cost_values, finished_early
+    return optimized_operator, saved_cost_values, norm_grad_k
 
 
 def estimate_noise_floor_threshold(probability_matrix:jnp.ndarray, num_shots:int, multiplier:float = 5.0)->float:

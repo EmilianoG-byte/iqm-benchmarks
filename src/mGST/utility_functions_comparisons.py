@@ -19,7 +19,7 @@ from mGST.low_level_jit import (
     gradient_state_mps_jit_reg)
 
 from mGST.typing import Tensor, Matrix, Scalar
-from mGST.riemannian import project_onto_tangent_space, canonical_gradient
+from mGST.riemannian import project_onto_tangent_space, canonical_gradient, riemannian_metric
 
 from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
 from mGST.additional_fns import random_gs, perturbed_target_init
@@ -742,7 +742,7 @@ def _update_tensor_via_gradient(
     indices_list: list[list[int]], prob_matrix: jnp.ndarray, ls_method="COBYLA", ls_max_iter=200,
     optimize_step: bool = True, initial_step: float = 1, use_geodesic: bool = True,
     regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None,
-    metric:Literal["canonical", "euclidean"]="canonical", verbose:bool=False, return_cost_fn_value:bool=False)->tuple[jnp.ndarray, float]:
+    metric:Literal["canonical", "euclidean"]="canonical", verbose:bool=False, return_cost_fn_value:bool=False)->tuple[jnp.ndarray, float, float]:
     """Update a given operator tensor (POVM, Kraus, or State) following the gradient direction.
 
     Args:
@@ -761,6 +761,7 @@ def _update_tensor_via_gradient(
     Returns:
         * The updated tensor.
         * The optimized step size.
+        * The norm of the gradient used for the update.
         * (optional) The cost function value at the updated tensor.
     """
     
@@ -807,9 +808,10 @@ def _update_tensor_via_gradient(
         optimized_step = initial_step
     
     updated_tensor = _update_isometry_and_back_to_tensor(optimized_step, isometry, stiefel_gradient_matrix, previous_shape, operator_type, use_geodesic)
+    gradient_norm = jnp.sqrt(riemannian_metric(z1=stiefel_gradient_matrix, z2=stiefel_gradient_matrix, x=isometry, metric=metric))
     if return_cost_fn_value:
-        return updated_tensor, optimized_step, cost_fn_value
-    return updated_tensor, optimized_step
+        return updated_tensor, optimized_step, gradient_norm, cost_fn_value
+    return updated_tensor, optimized_step, gradient_norm
 
     
 def _gradient_descent_step_dmrg(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, ls_method="COBYLA", ls_max_iter=200, optimize_step:bool=True, initial_step_size:jnp.ndarray | None = None, use_geodesic:bool=True, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, float]:
