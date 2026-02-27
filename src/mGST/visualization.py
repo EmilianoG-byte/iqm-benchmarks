@@ -387,7 +387,7 @@ def plot_wall_time(
         label_fontsize: Font size for axis labels and title.
         legend_fontsize: Font size for legend.
     """
-    plt.figure(figsize=(8, 5), dpi=250)
+    figure = plt.figure(figsize=(8, 5), dpi=250)
     if logscale == "y":
         plot_function = plt.semilogy
     elif logscale == "x":
@@ -452,6 +452,7 @@ def plot_wall_time(
     plt.legend(loc=legend_loc, fontsize=legend_fontsize)
     plt.tight_layout()
     plt.show()
+    return figure  # Return the figure object for further manipulation if needed
     
     
 def visualize_data_sets_as_bars(

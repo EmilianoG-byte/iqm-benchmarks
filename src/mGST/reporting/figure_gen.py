@@ -402,9 +402,6 @@ def plot_largest_errors(
     matplotlib.figure.Figure
         The generated bar plot figure
     """
-    # Create figure and axis
-    fig_bar, ax = plt.subplots(figsize=(6, 4))
-
     # Sort indices by absolute magnitude
     sorting_indices = np.argsort(np.abs(param_delta))[::-1]
     param_delta_sorted = param_delta[sorting_indices]
@@ -417,6 +414,10 @@ def plot_largest_errors(
     # Truncate to determined number of errors
     param_delta_sorted = param_delta_sorted[:n_errs]
     sorting_indices = sorting_indices[:n_errs]
+
+    # Scale figure width with the number of bars so labels don't overlap
+    fig_width = max(6, n_errs * 0.55)
+    fig_bar, ax = plt.subplots(figsize=(fig_width, 4))
 
     # Create bars
     bars = ax.bar(
@@ -449,12 +450,20 @@ def plot_largest_errors(
     # Configure axis labels and title
     ax.axhline(0, color="black", linewidth=0.8)
     ax.set_xticks(range(n_errs))
-    ax.set_xticklabels(np.array(list(param_labels))[sorting_indices])
+    # Rotate labels at 45° for readability when many bars are present
+    tick_fontsize = max(6, 9 - n_errs // 8)
+    ax.set_xticklabels(
+        np.array(list(param_labels))[sorting_indices],
+        rotation=45,
+        ha="right",
+        fontsize=tick_fontsize,
+    )
     ax.set_xlabel("Pauli labels")
     ax.set_ylabel("Deviation from target")
-    ax.set_title(f"Largest coherent errors for {gate_label}", fontsize=10)
+    # ax.set_title(f"Largest coherent errors for {gate_label}", fontsize=10)
 
-    # Add values on top of each bar
+    # Add values on top of each bar; scale font down for crowded plots
+    annot_fontsize = max(5, 9 - n_errs // 6)
     for i, bar_ in enumerate(bars):
         value = param_delta[sorting_indices[i]]
         height = bar_.get_height()
@@ -465,9 +474,11 @@ def plot_largest_errors(
             textcoords="offset points",
             ha="center",
             va="bottom",
-            fontsize=9,
+            fontsize=annot_fontsize,
+            rotation=45 if n_errs > 10 else 0,
         )
 
+    fig_bar.tight_layout()
     return fig_bar
 
 
