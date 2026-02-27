@@ -343,7 +343,7 @@ def compute_angles_axes(U_set, alternative_phase=False):
     return angles, axes, pauli_coeffs
 
 
-def compute_sparsest_Pauli_Hamiltonian(U_set):
+def compute_sparsest_Pauli_Hamiltonian(U_set:np.ndarray)-> np.ndarray:
     """Takes the matrix logarithms of the given unitaries and returns sparsest Hamiltonian parameters in Pauli basis
     The parametrization is U = exp(-i pi H/2), i.e. H = i log(U)*2/pi.
     Different branches in the matrix logarithm lead to different Hamiltonians. This function optimizes over
@@ -353,12 +353,12 @@ def compute_sparsest_Pauli_Hamiltonian(U_set):
 
     Parameters
     ----------
-    U_set  : list[numpy array]
-        A list contining unitary matrices
+    U_set  : np.ndarray
+        A numpy array containing unitary matrices
 
     Returns
     -------
-    pauli_coeffs : list[numpy array]
+    pauli_coeffs : np.ndarray
         The full list of Pauli basis coefficients of the Hamiltonian for all gates
 
     Notes: sqrt(pdim) factor is due to Pauli basis normalization
@@ -555,15 +555,15 @@ def phase_err(angle, U, U_t):
     return la.norm(np.exp(1j * angle) * U - U_t)
 
 
-def phase_opt(X: np.ndarray, K_t: np.ndarray):
+def phase_opt(kraus_superop_unitary: np.ndarray, kraus_tensor_target: np.ndarray):
     """Return rK = 1 gate set with global phase fitting matching to target gate set
 
     Parameters
     ----------
-    X: 3D numpy array
+    kraus_superop_unitary_opt: 3D numpy array
         Array where CPT superoperators are stacked along the first axis.
         These should correspond to rK = 1 gates for the outputs to be meaningful.
-    K_t: 4D numpy array
+    kraus_tensor_target: 4D numpy array
         Array of target gate Kraus operators
         Each subarray along the first axis contains a set of Kraus operators.
         The second axis enumerates Kraus operators for a gate specified by the first axis.
@@ -571,18 +571,18 @@ def phase_opt(X: np.ndarray, K_t: np.ndarray):
     Returns
     -------
     K_opt: 4D numpy array
-        Array of Kraus operators with mathed global phase
+        Array of Kraus operators with matched global phase
     """
-    d = X.shape[0]
-    r = X.shape[1]
+    d = kraus_superop_unitary.shape[0]
+    r = kraus_superop_unitary.shape[1]
     pdim = int(np.sqrt(r))
-    K = additional_fns.Kraus_rep(X, d, pdim, 1).reshape((d, pdim, pdim))
-    K_t = K_t.reshape(d, pdim, pdim)
-    K_opt = np.zeros(K.shape).astype(complex)
+    kraus_tensor_unitary = additional_fns.Kraus_rep(kraus_superop_unitary, d, pdim, 1).reshape((d, pdim, pdim)) # kraus tensor
+    kraus_tensor_target = kraus_tensor_target.reshape(d, pdim, pdim)
+    kraus_tensor_optimized = np.zeros(kraus_tensor_unitary.shape).astype(complex)
     for i in range(d):
-        angle_opt = minimize(phase_err, 1, bounds=[[-np.pi, np.pi]], args=(K[i], K_t[i])).x
-        K_opt[i] = K[i] * np.exp(1j * angle_opt)
-    return K_opt
+        angle_opt = minimize(phase_err, 1, bounds=[[-np.pi, np.pi]], args=(kraus_tensor_unitary[i], kraus_tensor_target[i])).x
+        kraus_tensor_optimized[i] = kraus_tensor_unitary[i] * np.exp(1j * angle_opt)
+    return kraus_tensor_optimized
 
 
 def eff_depol_params_agf(X_opt_pp):
