@@ -35,6 +35,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from typing import Sequence
+import warnings
 
 backend = "iqmfakeapollo"
 
@@ -178,7 +179,10 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     benchmark = CompressiveGST(backend, configuration)
     return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables, run_benchmark=True)
 
-def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backend)->jnp.ndarray:
+def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backend:str = None)->jnp.ndarray:
+    if backend is None:
+        warnings.warn("No backend specified. Using 'iqmfakeapollo' as default backend.")
+        backend = "iqmfakeapollo"
     benchmark = CompressiveGST(backend, configuration)
     gate_set = benchmark.gate_set
     return qiskit_gate_to_operator(gate_set)
@@ -405,7 +409,7 @@ def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
     kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
     return kraus_tensor
 
-def get_compressed_perturbed_rep_from_mgst(povm_mgst, state_mgst)->tuple[jnp.ndarray, jnp.ndarray]:
+def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, rank_povm:int = None, rank_state:int = None)->tuple[jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
     
     This is the implementation used in the original mGST code.
@@ -420,10 +424,21 @@ def get_compressed_perturbed_rep_from_mgst(povm_mgst, state_mgst)->tuple[jnp.nda
     """
     num_povm, dim_sqrd = povm_mgst.shape
     dim = int(jnp.sqrt(dim_sqrd))
-    povm_psd = jnp.array([jnp.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)).T.conj() for k in range(num_povm)])
+    povm_psd = jnp.array(
+        [jnp.linalg.cholesky(
+            povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)
+            ).T.conj()
+         for k in range(num_povm)]
+        )
     state_mgst_offset = state_mgst + 1e-14 * jnp.eye(dim).reshape(-1)
     state_psd = jnp.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
     return povm_psd, state_psd
+
+def perturb_povm(povm_mgst:jnp.ndarray, epsilon:float = 1e-14)->jnp.ndarray:
+    """Perturb the POVM operators from MGST using cholesky factorization."""
+    num_povm, dim_sqrd = povm_mgst.shape
+    dim = int(jnp.sqrt(dim_sqrd))
+    return jnp.array([jnp.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + epsilon * jnp.eye(dim)).T.conj() for k in range(num_povm)])
 
 def get_compressed_perturbed_rep_from_mgst_numpy(povm_mgst, state_mgst)->tuple[np.ndarray, np.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization.
@@ -436,12 +451,8 @@ def get_compressed_perturbed_rep_from_mgst_numpy(povm_mgst, state_mgst)->tuple[n
     Returns:
         A tuple containing the compressed representation of the POVM and State.
     """
-    num_povm, dim_sqrd =povm_mgst.shape
-    dim = int(np.sqrt(dim_sqrd))
-    povm_psd = np.array([np.linalg.cholesky(povm_mgst[k].reshape(dim, dim) + 1e-14 * np.eye(dim)).T.conj() for k in range(num_povm)])
-    state_mgst_offset = state_mgst + 1e-14 * np.eye(dim).reshape(-1)
-    state_psd = np.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
-    return povm_psd, state_psd
+    povm_psd, state_psd = get_compressed_perturbed_rep_from_mgst(povm_mgst, state_mgst)
+    return np.array(povm_psd), np.array(state_psd)
 
 def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     """

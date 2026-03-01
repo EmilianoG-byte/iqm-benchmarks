@@ -364,8 +364,9 @@ def plot_largest_errors(
     param_delta,
     param_labels,
     n_errs,
-    threshold,
-    gate_label,
+    threshold = None,
+    gate_label = None,
+    x_label_name = None,
     has_uncertainties=False,
     yerr_low=None,
     yerr_high=None,
@@ -442,10 +443,10 @@ def plot_largest_errors(
             capsize=3,
         )
         error_extend = np.max([np.max(np.abs(param_delta_high)), np.max(np.abs(param_delta_low))])
-        ax.set_ylim(-error_extend * 1.1, error_extend * 1.1)
+        ax.set_ylim(-error_extend * 1.3, error_extend * 1.3)
     else:
         param_range = np.max(param_delta_sorted) - np.min(param_delta_sorted)
-        ax.set_ylim(np.min(param_delta_sorted) - param_range / 10, np.max(param_delta_sorted) + param_range / 10)
+        ax.set_ylim(np.min(param_delta_sorted) - param_range * 0.25, np.max(param_delta_sorted) + param_range * 0.25)
 
     # Configure axis labels and title
     ax.axhline(0, color="black", linewidth=0.8)
@@ -458,22 +459,25 @@ def plot_largest_errors(
         ha="right",
         fontsize=tick_fontsize,
     )
-    ax.set_xlabel("Pauli labels")
+    if x_label_name is not None:
+        ax.set_xlabel(x_label_name)
     ax.set_ylabel("Deviation from target")
-    # ax.set_title(f"Largest coherent errors for {gate_label}", fontsize=10)
+    if gate_label is not None:
+        ax.set_title(f"Largest coherent errors for {gate_label}", fontsize=10)
 
     # Add values on top of each bar; scale font down for crowded plots
     annot_fontsize = max(5, 9 - n_errs // 6)
     for i, bar_ in enumerate(bars):
         value = param_delta[sorting_indices[i]]
         height = bar_.get_height()
+        is_positive = height >= 0
         ax.annotate(
-            f"{value:.2e}",
+            rf"{value:.2e}",
             xy=(bar_.get_x() + bar_.get_width() / 2, height),
-            xytext=(0, 2) if height > 0 else (0, -11),  # vertical offset above or below the bar
+            xytext=(0, 3) if is_positive else (0, -3),  # small gap away from the bar tip
             textcoords="offset points",
             ha="center",
-            va="bottom",
+            va="bottom" if is_positive else "top",  # text grows away from the bar
             fontsize=annot_fontsize,
             rotation=45 if n_errs > 10 else 0,
         )

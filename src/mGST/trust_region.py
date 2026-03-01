@@ -426,7 +426,7 @@ def run_trust_region_optimization(
     norm_grad = norm_grad_init
     if global_norm_grad_init is not None:
         norm_grad_init = global_norm_grad_init
-    print(f"TR started for operator: {operator_type} 🚀.")
+    print(f"🚀 TR started for operator: {operator_type} 🚀.")
     if verbose:
         print("=======================================")
     try:
@@ -651,44 +651,54 @@ def run_riemannian_optimization(
     try:
         for idx in range(num_iterations):
             # Optimize POVM
-            povm_options = optimization_schedule["povm"].get_options_for_iteration(idx)
+            current_operator = "povm"
+            povm_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             povm_psd_k, cost_values_povm, gradient_norm_k_povm = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type="povm", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm
             )
             # Save the initial cost value from this iteration for convergence check
             cost_fn_init_k = cost_values_povm[0]
+            cost_fn_current_k = cost_values_povm[-1]
             cost_fn_history.extend(cost_values_povm)
             # Check cost fn convergence
-            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="POVM")
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator=current_operator)
             if cost_below_threshold:
                 break
+            
+            _, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
+            
+            if verbose:
+                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
                 
             # Optimize Kraus
-            kraus_options = optimization_schedule["kraus"].get_options_for_iteration(idx)
+            current_operator = "kraus"
+            kraus_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type="kraus", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus
             )
             cost_fn_current_k = cost_values_kraus[-1]
             cost_fn_history.extend(cost_values_kraus)
             # Check cost fn convergence
-            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="KRAUS")
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator=current_operator)
             if cost_below_threshold:
                 break
             relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
             if relative_cost_below_precision:
                 break
-            
+            if verbose:
+                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
             
             # Optimize State
-            state_options = optimization_schedule["state"].get_options_for_iteration(idx)
+            current_operator = "state"
+            state_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             state_psd_k, cost_values_state, gradient_norm_k_state = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type="state", cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state
             )
             # Saved the final cost value from this iteration for convergence check
             cost_fn_current_k = cost_values_state[-1]
             cost_fn_history.extend(cost_values_state)
             # Check cost fn convergence
-            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator="STATE")
+            cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator=current_operator)
             if cost_below_threshold:
                 break    
             
@@ -699,7 +709,7 @@ def run_riemannian_optimization(
             if relative_cost_below_precision:
                 break
             if verbose:
-                print(f"\n 🎯 Relative change in cost function value: {relative_change:.2e}. Relative precision target: {relative_precision:.2e}.")
+                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
                 
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
             # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
