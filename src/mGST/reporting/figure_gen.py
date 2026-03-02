@@ -254,46 +254,49 @@ def generate_spam_err_std_pdf(filename, E, rho, E2, rho2, basis_labels=False, ti
     return None
 
 
-def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_labels=False, return_fig=False, dpi:int=300):
-    """Main routine to generate plots of reconstructed gates, ideal gates and the noise channels
+def generate_gate_err_pdf(
+    filename: str,
+    gates1: np.ndarray,
+    gates2: np.ndarray,
+    basis_labels: list[str] | None = None,
+    gate_labels: list[str] | None = None,
+    save_fig: bool = False,
+    dpi: int = 300,
+) -> list[Figure]:
+    """Main routine to generate plots of reconstructed gates, ideal gates and the noise channels.
+
     of the reconstructed gates. The matrices are shown as Hinton diagrams, where the size of each square represents
     the magnitude of the matrix element and the color represents its sign as well as the magnitude.
     The basis is arbitrary but using gates in the Pauli basis is recommended.
 
-    Parameters
-    ----------
-    filename : str
-        The name under which the figures are saved in format "folder/name"
-    gates1 : numpy array
-        A gate set in the same format as the "X"-tensor. These gates are assumed to be the GST estimates.
-    gates1 : numpy array
-        A gate set in the same format as the "X"-tensor. These are assumed to be the target gates.
-    basis_labels : list[str]
-        A list of labels for the basis elements. For the standard basis this could be ["00", "01",...]
-        and for the Pauli basis ["I", "X", "Y", "Z"] or the multi-qubit version.
-    gate_labels : list[str]
-        A list of names for the gates
-    return_fig : bool
-        If set to True, a figure object is returned by the function, otherwise the plots are saved as <filename>
+    Args:
+        filename: The name under which the figures are saved in format "folder/name"
+        gates1: A gate set in the same format as the "X"-tensor. These gates are assumed to be the GST estimates.
+        gates2: A gate set in the same format as the "X"-tensor. These are assumed to be the target gates.
+        basis_labels: A list of labels for the basis elements. For the standard basis this could be ["00", "01",...]
+            and for the Pauli basis ["I", "X", "Y", "Z"] or the multi-qubit version.
+        gate_labels: A list of names for the gates
+        save_fig: Whether to save the generated figures as pdf files
+
     """
     d = gates1.shape[0]
     dim = gates1[0].shape[0]
-    basis_labels = basis_labels or np.arange(dim)
-    gate_labels = gate_labels or [f"G%i" % k for k in range(d)]
+    basis_labels = basis_labels if basis_labels is not None else list(np.arange(dim))
+    gate_labels = gate_labels if gate_labels is not None else ["G%i" % k for k in range(d)]
     plot3_title = r"id - G U^{-1}"
 
     figures = []
+    layout_dim_cutoff = 16
     for i in range(d):
         # Determine layout based on dimension
-        is_large_dim = dim > 16
-        layout_params = {
-            "ncols": 1 if is_large_dim else 3,
-            "nrows": 3 if is_large_dim else 1,
-            "gridspec_kw": {"height_ratios": [1, 1, 1]} if is_large_dim else {"width_ratios": [1, 1, 1]},
-            "sharex": True,
-        }
+        is_large_dim = dim > layout_dim_cutoff
 
-        fig, axes = plt.subplots(**layout_params)
+        fig, axes = plt.subplots(
+            ncols=1 if is_large_dim else 3,
+            nrows=3 if is_large_dim else 1,
+            gridspec_kw=({"height_ratios": [1, 1, 1]} if is_large_dim else {"width_ratios": [1, 1, 1]}),
+            sharex="all",
+        )
         plot_matrices = [
             np.real(gates1[i]),
             np.real(gates2[i]),
@@ -307,12 +310,13 @@ def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_lab
             max_weight = 2 ** np.ceil(np.log2(np.abs(plot_matrices[j]).max()))
 
             # Plot matrix elements as rectangles, using normalization for the error plot (j==2)
+            error_plot_index = 2
             for (x, y), w in np.ndenumerate(plot_matrices[j].T):
-                size = np.sqrt(np.abs(w) / max_weight) if j == 2 else np.sqrt(np.abs(w))
+                size = np.sqrt(np.abs(w) / max_weight) if j == error_plot_index else np.sqrt(np.abs(w))
                 color = "#d62728" if w < 0 else "#1f77b4"
 
                 rect = plt.Rectangle(
-                    [x + (1 - size) / 2, y + (1 - size) / 2],
+                    (x + (1.0 - size) / 2, y + (1 - size) / 2),
                     size,
                     size,
                     facecolor=color,
@@ -337,27 +341,42 @@ def generate_gate_err_pdf(filename, gates1, gates2, basis_labels=False, gate_lab
             ax.set_xticks(np.arange(dim) + 0.5, minor=True, labels=basis_labels, **x_tick_params)
             ax.set_yticks(np.arange(dim) + 0.5, minor=True, labels=basis_labels, **y_tick_params)
             ax.tick_params(which="major", length=0)  # Turn dummy ticks invisible
-            ax.tick_params(which="minor", top=True, labeltop=True, bottom=False, labelbottom=False, length=0)
+            ax.tick_params(
+                which="minor",
+                top=True,
+                labeltop=True,
+                bottom=False,
+                labelbottom=False,
+                length=0,
+            )
 
         axes[0].set_title(r"G (estimate)", fontsize="large")
         axes[0].set_ylabel(gate_labels[i], rotation=90, fontsize="large")
         axes[1].set_title(r"U (ideal gate)", fontsize="large")
         axes[2].set_title(plot3_title + "\n(renormalized)", fontsize="large")
-        fig.suptitle(f"Process matrices in the Pauli basis\n(red:<0; blue:>0)")
+        fig.suptitle("Process matrices in the Pauli basis\n(red:<0; blue:>0)")
+
+        fig.subplots_adjust(hspace=0.05, bottom=0.1, top=1.0)
 
         # Configure layout based on dimension size - reduce top margin
-        rect = [0, 0, 1, 0.85 if dim < 5 else 0.95]
-        fig.tight_layout(rect=rect)
+        dim_cutoff = 5
+        # fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.85 if dim < dim_cutoff else 0.95))
 
-        width = 0.5 * np.sqrt(dim) if is_large_dim else 2 * np.sqrt(dim)
-        height = 1.3 * np.sqrt(dim) if is_large_dim else 0.8 * np.sqrt(dim)
+        width = 0.65 * dim if is_large_dim else 2 * np.sqrt(dim)
+        height = 2.8 * width if is_large_dim else 0.8 * np.sqrt(dim)
         set_size(width, height)
 
         figures.append(fig)
-        if not return_fig:
-            plt.savefig(filename + f"G%i.pdf" % i, dpi=dpi, transparent=True, bbox_inches="tight")
+        if save_fig:
+            plt.savefig(
+                filename + "G%i.pdf" % i,
+                dpi=dpi,
+                transparent=True,
+                bbox_inches="tight",
+            )
 
     return figures
+
 
 
 def plot_largest_errors(
