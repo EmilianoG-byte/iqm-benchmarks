@@ -365,7 +365,7 @@ def kraus_tensor_to_mgst(kraus_tensor:jnp.ndarray)->jnp.ndarray:
     num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape
     return jnp.einsum("ijkl,ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_in**2, dim_in**2))
 
-def get_mgst_tensors_from_psd_representation(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray)->tuple[np.ndarray, np.ndarray, np.ndarray]:
+def get_mgst_tensors_from_psd_representation(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray)->dict[str, np.ndarray]:
     """Get the MGST representation of the operators from their PSD representation.
     
     Args:
@@ -373,10 +373,10 @@ def get_mgst_tensors_from_psd_representation(kraus_tensor:jnp.ndarray, povm_psd:
         povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
         state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
     Returns:
-        A tuple containing the MGST representation of the Kraus, POVM, and State.
-            * kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
-            * povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
-            * state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)    
+        A dictionary containing the MGST representation of the Kraus, POVM, and State.
+            * kraus: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+            * povm: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
+            * state: State operator from MGST. Dimensions: (dim_out x dim_out*)    
     """
     # POVM
     povm_mgst = povm_psd_to_mgst(povm_psd) # (num_povm, dim_out, dim_out*)
