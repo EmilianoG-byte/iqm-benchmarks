@@ -3,6 +3,7 @@
 from jax import config
 import jax
 import jax.numpy as jnp
+from numpy import matrix
 
 config.update("jax_enable_x64", True)
 

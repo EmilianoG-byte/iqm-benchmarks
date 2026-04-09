@@ -6,8 +6,9 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 
 Tensor = jnp.ndarray
-Matrix = jnp.ndarray
 Scalar = jnp.ndarray
+Vector = jnp.ndarray
+Matrix = jnp.ndarray
 
 from dataclasses import dataclass, asdict
 from typing import Optional, Any, Literal

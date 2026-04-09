@@ -15,8 +15,6 @@ from pandas import DataFrame
 import xarray as xr
 
 from iqm.benchmarks.benchmark_definition import BenchmarkObservationIdentifier
-from mGST.reporting.reporting import compute_matched_ideal_hamiltonian_params, generate_basis_labels
-
 
 SMALL_SIZE = 8
 MEDIUM_SIZE = 9
@@ -525,6 +523,8 @@ def generate_hamiltonian_visualizations(
             - Matrix plots
             - Bar plots
     """
+    # Lazy import to avoid circular dependencies
+    from mGST.reporting.reporting import compute_matched_ideal_hamiltonian_params, generate_basis_labels
     # Get the Hamiltonian parameters and their ideal values
     hamiltonian_params, hamiltonian_params_ideal = compute_matched_ideal_hamiltonian_params(dataset)
     param_labels = generate_basis_labels(dataset.attrs["pdim"], basis="Pauli")
