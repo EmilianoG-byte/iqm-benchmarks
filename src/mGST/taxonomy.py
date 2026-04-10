@@ -233,64 +233,6 @@ def pauli_weight(pauli_str: str) -> int:
     """
     return sum(1 for p in pauli_str if p != 'I')
 
-symbols = ["o", "x", "s", "d", "^", "v", "<", ">", "p", "*"]
-
-def plot_pauli_probabilities_indexed(probabilities: dict[str, float], title:str = None, sort: bool = False, ylabel: str = "Pauli Probability") -> None:
-
-    plt.figure(figsize=(8,4), dpi=200)
-
-    sort = False
-
-    if sort:
-        probabilites_sorted = [jnp.sort(probs, descending=True) for probs in probabilities.values()]
-        probabilities = dict(zip(probabilities.keys(), probabilites_sorted))
-
-    for i, (label, probs) in enumerate(probabilities.items()):
-        plt.semilogy(probs, symbols[i % len(symbols)] + "-", label=label)
-    plt.xlabel(f"Pauli Index (sorted = {sort})")
-    plt.ylabel(ylabel)
-    plt.title(title)
-    plt.grid(alpha=0.3)
-    plt.legend()
-    plt.show()
-    return plt.figure()
-
-
-def plot_pauli_probabilities_labeled(probabilities: dict[str, float], max_num_labels: int = None, safe: bool = True , log_scale: bool = False, title: str = None) -> None:
-    """
-    Plot the probabilities of Pauli operators as a bar chart.
-
-    Args:
-        probabilities: Dictionary mapping Pauli string labels to their corresponding probabilities.
-        max_num_labels: Maximum number of labels to display on the x-axis.
-    """
-    if max_num_labels is not None and max_num_labels > len(probabilities):
-        raise ValueError(f"max_num_labels ({max_num_labels}) exceeds the number of probabilities ({len(probabilities)}).")
-    if max_num_labels is None:
-        max_num_labels = len(probabilities)
-        if max_num_labels > 20 and safe:
-            print(f"Warning: Displaying all {max_num_labels} labels may result in a cluttered plot. Defaulting to 20 labels. To forcefully display all labels, set safe=False to disable this warning.")
-            max_num_labels = 20
-    
-    sorted_probs = sorted(probabilities.items(), key=lambda x: x[1], reverse=True)
-    # Sort probabilities in descending order and keep only the top max_num_labels
-    sorted_probs = sorted_probs[:max_num_labels]
-    probabilities = dict(sorted_probs)
-    labels = list(probabilities.keys())
-    probs = list(probabilities.values())
-
-    plt.figure(figsize=(10, 6), dpi=200)
-    plt.bar(labels, probs)
-    if log_scale:
-        plt.yscale('log')
-    plt.xlabel('Pauli Operators')
-    plt.ylabel('Probability')
-    plt.title(title)
-    plt.xticks(rotation=45)
-    plt.grid(axis='y')
-    plt.tight_layout()
-    plt.show()
-
 def weight_histogram(probabilities: dict[str, float], normalize: bool = False, exclude_identity: bool = False) -> dict[int, float]:
     """
     Compute the histogram of probabilities by Pauli weight.
@@ -316,27 +258,3 @@ def weight_histogram(probabilities: dict[str, float], normalize: bool = False, e
         histogram = {w: p / total for w, p in histogram.items()}
         
     return histogram
-
-def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, title: str = None, log_scale: bool = True) -> None:
-    """
-    Plot the histogram of probabilities by Pauli weight.
-
-    Args:
-        histogram: Dictionary mapping Pauli weight to total probability.
-        title: Title of the plot.
-    """
-
-    weights = sorted(histogram.keys(), reverse=not ascending)
-    probabilities = [histogram[w] for w in weights]
-
-    plt.figure(figsize=(6, 4), dpi=250)
-    plt.bar(weights, probabilities)
-    plt.xlabel('Pauli Weight')
-    plt.ylabel('Total Probability')
-    plt.title(title)
-    plt.xticks(weights)
-    if log_scale:
-        plt.yscale('log')
-    plt.grid(axis='y')
-    plt.show()
-    return plt.figure()

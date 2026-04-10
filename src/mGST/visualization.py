@@ -19,6 +19,7 @@ COLOUR_PALETTE = [
 ]
 MARKERS = [
     "o",
+    "x",
     "s",
     "D",
     "^",
@@ -28,7 +29,6 @@ MARKERS = [
     "p",
     "*",
     "h",
-    "x",
     "+",
 ]  # Extend as needed
 
@@ -548,3 +548,105 @@ def visualize_data_sets_as_bars(
     fig.tight_layout()
     plt.show()
     return fig
+
+
+def plot_pauli_probabilities_indexed(probabilities: dict[str, float], title:str = None, sort: bool = False, ylabel: str = "Pauli Probability") -> plt.Figure:
+    """Plot the probabilities of Pauli operators as a line chart with indexed x-axis.
+
+    Args:
+        probabilities: Dictionary mapping Pauli string labels to their corresponding probabilities.
+        title: Title of the plot. Defaults to None.
+        sort: Whether to sort the probabilities in descending order. Defaults to False.
+        ylabel: Label for the y-axis. Defaults to "Pauli Probability".
+
+    Returns:
+        The figure object containing the plot.
+    """
+
+    figure = plt.figure(figsize=(8,4), dpi=200)
+    
+    if sort:
+        print("Sorting")
+        probabilites_sorted = [jnp.sort(probs, descending=True) for probs in probabilities.values()]
+        probabilities = dict(zip(probabilities.keys(), probabilites_sorted))
+
+    for i, (label, probs) in enumerate(probabilities.items()):
+        plt.semilogy(probs, MARKERS[i % len(MARKERS)] + "-", label=label, color=COLOUR_PALETTE[i % len(COLOUR_PALETTE)], markersize=5, linewidth=1.5)
+    plt.xlabel(f"Pauli Index (sorted = {sort})")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    plt.grid(alpha=0.3)
+    plt.legend()
+    plt.show()
+    return figure
+
+def plot_pauli_probabilities_labeled(probabilities: dict[str, float], max_num_labels: int = None, safe: bool = True , log_scale: bool = False, title: str = None) -> plt.Figure:
+    """
+    Plot the probabilities of Pauli operators as a bar chart.
+
+    Args:
+        probabilities: Dictionary mapping Pauli string labels to their corresponding probabilities.
+        max_num_labels: Maximum number of labels to display on the x-axis.
+        safe: If True, will not display more than 20 labels to avoid clutter. Set to False to disable this check.
+        log_scale: Whether to use a logarithmic scale for the y-axis. Defaults to False.
+        title: Title of the plot. Defaults to None.
+    Returns:
+        The figure object containing the plot.
+    """
+    if max_num_labels is not None and max_num_labels > len(probabilities):
+        raise ValueError(f"max_num_labels ({max_num_labels}) exceeds the number of probabilities ({len(probabilities)}).")
+    if max_num_labels is None:
+        max_num_labels = len(probabilities)
+        if max_num_labels > 20 and safe:
+            print(f"Warning: Displaying all {max_num_labels} labels may result in a cluttered plot. Defaulting to 20 labels. To forcefully display all labels, set safe=False to disable this warning.")
+            max_num_labels = 20
+    
+    sorted_probs = sorted(probabilities.items(), key=lambda x: x[1], reverse=True)
+    # Sort probabilities in descending order and keep only the top max_num_labels
+    sorted_probs = sorted_probs[:max_num_labels]
+    probabilities = dict(sorted_probs)
+    labels = list(probabilities.keys())
+    probs = list(probabilities.values())
+
+    figure = plt.figure(figsize=(10, 6), dpi=200)
+    plt.bar(labels, probs, color=COLOUR_PALETTE)
+    if log_scale:
+        plt.yscale('log')
+    plt.xlabel('Pauli Operators')
+    plt.ylabel('Probability')
+    plt.title(title)
+    plt.xticks(rotation=45)
+    plt.grid(axis='y')
+    plt.tight_layout()
+    plt.show()
+    return figure
+
+def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, title: str = None, log_scale: bool = True) -> plt.Figure:
+    """
+    Plot the histogram of probabilities by Pauli weight.
+
+    Args:
+        histogram: Dictionary mapping Pauli weight to total probability.
+        ascending: Whether to sort the histogram by weight in ascending order. Defaults to True.
+        title: Title of the plot.
+        log_scale: Whether to use a logarithmic scale for the y-axis. Defaults to True.
+
+    
+    Returns:
+        The figure object containing the plot.
+    """
+
+    weights = sorted(histogram.keys(), reverse=not ascending)
+    probabilities = [histogram[w] for w in weights]
+
+    figure = plt.figure(figsize=(6, 4), dpi=250)
+    plt.bar(weights, probabilities, color=COLOUR_PALETTE)
+    plt.xlabel('Pauli Weight')
+    plt.ylabel('Total Probability')
+    plt.title(title)
+    plt.xticks(weights)
+    if log_scale:
+        plt.yscale('log')
+    plt.grid(axis='y')
+    plt.show()
+    return figure
