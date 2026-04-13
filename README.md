@@ -1,5 +1,20 @@
 # IQM Benchmarks
 
+**DISCLAIMER: This repository is ARCHIVED and is no longer maintained.**
+------------------------------------------------------------------------
+
+This repository is **superseded** by the identically named IQM-Benchmarks package which is now internally developed at IQM. This step was taken
+in order to unify the development of IQM-Benchmarks with the rest of the IQM-SDK, which leads to better version compatibility and generally improved interoperability with other IQM packages.
+
+Key points to note:
+- The code is still open source and can be viewed via the [IQM-SDK](https://github.com/iqm-finland/sdk) repository on Gitlab. 
+- The documentation for the latest version is available via [IQM-Docs](https://docs.meetiqm.com/). 
+- As before, the latest version is available on PyPI and can be installed with ``pip install iqm-benchmarks``. 
+- Issues against IQM-Benchmarks can be opened via https://github.com/iqm-finland/sdk/issues.
+
+
+## Overview
+
 IQM Benchmarks is a suite of Quantum Characterization, Verification, and Validation (QCVV) tools for quantum computing. It is designed to be a comprehensive tool for benchmarking quantum hardware. The suite is designed to be modular, allowing users to easily add new benchmarks and customize existing ones. The suite is designed to be easy to use, with a simple API that allows users to run benchmarks with a single command.
 
 
@@ -22,7 +37,7 @@ Below is a list of the benchmarks currently available in the suite:
 The project is split into different benchmarks, all sharing the `Benchmark` class or the legacy `BenchmarkBase` class. Each individual benchmark takes as an argument their own `BenchmarkConfigurationBase` class. All the (legacy) benchmarks executed at once are wrapped by the `BenchmarkExperiment` class, which handles dependencies among the benchmarks, storing the results, producing the plots...
 
 
-## Installation _(latest release)_
+## Installation 
 
 [uv](https://docs.astral.sh/uv/) is highly recommended for practical Python environment and package management.
 With uv installed in your system, start a terminal in your machine and create a new Python environment
