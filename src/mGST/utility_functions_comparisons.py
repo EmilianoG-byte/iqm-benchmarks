@@ -1351,7 +1351,7 @@ def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple
         n = num_povm * rank_povm
         p = dim
     elif operator_type == "kraus":
-        _, rank_kraus, dim, _ = tensor.shape # num_gates, kraus_rank, dim_out, dim_in
+        *_, rank_kraus, dim, _ = tensor.shape # (num_gates), kraus_rank, dim_out, dim_in
         n = rank_kraus * dim
         p = dim
     else:
