@@ -19,7 +19,6 @@ COLOUR_PALETTE = [
 ]
 MARKERS = [
     "o",
-    "x",
     "s",
     "D",
     "^",
@@ -30,6 +29,7 @@ MARKERS = [
     "*",
     "h",
     "+",
+    "x",
 ]  # Extend as needed
 
 
@@ -278,10 +278,13 @@ def plot_many_sets_wall_time(
     title: str = "Wall Time Comparison",
     xlabel: str = "Number of qubits",
     ylabel: str = "Wall time [s]",
+    comparison_data: dict[str, tuple[list, list]] = None,
     logscale: str | None = None,
+    different_lengths_allowed: bool = False,
     label_fontsize: int = 12,
     legend_fontsize: int = 10,
-) -> None:
+    legend_loc: str = "best",
+) -> plt.Figure:
     """Plot wall time for multiple sets of timing data on a single figure.
 
     Methods share the same color across datasets (determined by their order in COLOUR_PALETTE).
@@ -296,15 +299,17 @@ def plot_many_sets_wall_time(
         title: Title of the plot.
         xlabel: Label for the x-axis.
         ylabel: Label for the y-axis.
+        comparison_data: Optional dictionary mapping method names to (x, y) data for additional comparison curves.
         logscale: 'x', 'y', or 'xy' for logarithmic scale on the respective axes, or None for linear.
+        different_lengths_allowed: If True, allows time_data_sets entries to have different lengths than x_values.
         label_fontsize: Font size for axis labels and title.
         legend_fontsize: Font size for the legend.
         legend_loc: Location string for the legend (passed directly to matplotlib).
-    """
-    # Lightest alpha for the first set, fully opaque for the last
-    # alphas = [1.0] if n_sets == 1 else [0.35 + 0.65 * j / (n_sets - 1) for j in range(n_sets)]
 
-    plt.figure(figsize=(9, 5), dpi=250)
+    Returns:
+        The figure object containing the plot.
+    """
+    figure = plt.figure(figsize=(8, 5), dpi=250)
     if logscale == "y":
         plot_function = plt.semilogy
     elif logscale == "x":
@@ -316,10 +321,16 @@ def plot_many_sets_wall_time(
 
     n_sets = len(time_data_sets)
     
-    alphas = [1.0] if n_sets == 1 else [0.35 + 0.65 * j / (n_sets - 1) for j in range(n_sets)]
-    
     for j, time_data in enumerate(time_data_sets):
         for i, (method, results) in enumerate(time_data.items()):
+            if len(results) != len(x_values):
+                if not different_lengths_allowed:
+                    raise ValueError(f"Number of timing results for '{method}' doesn't match number of x values")
+                else:
+                    x_values_method = x_values[:len(results)]
+            else:
+                x_values_method = x_values
+                
             color = COLOUR_PALETTE[i % len(COLOUR_PALETTE)]
             marker = MARKERS[i % len(MARKERS)]
             means = jnp.array([r[0] for r in results])
@@ -328,7 +339,7 @@ def plot_many_sets_wall_time(
             facecolor = idx_and_color_to_face_color(j, n_sets, color)
 
             plot_function(
-                x_values,
+                x_values_method,
                 means,
                 label=f"{method}",
                 color=facecolor,
@@ -336,27 +347,35 @@ def plot_many_sets_wall_time(
                 linestyle="-",
                 linewidth=2,
                 markersize=6,
-                # alpha=alphas[j],
-                # markerfacecolor=facecolor,
                 markeredgecolor="black",
             )
             plt.fill_between(
-                x_values,
+                x_values_method,
                 means - stds,
                 means + stds,
                 color=color,
-                alpha= 0.2,
+                alpha=0.2,
+            )
+
+    if comparison_data is not None:
+        for label, (comp_x, comp_y) in comparison_data.items():
+            plot_function(
+                comp_x,
+                comp_y,
+                linestyle="--",
+                label=label,
+                color="#E71D36",
+                linewidth=2,
             )
 
     plt.xlabel(xlabel, fontsize=label_fontsize)
     plt.ylabel(ylabel, fontsize=label_fontsize)
     plt.title(title, fontsize=label_fontsize)
     plt.grid(alpha=0.3)
-    plt.legend(
-        loc="upper left", bbox_to_anchor=(1.01, 1.0), borderaxespad=0.0, fontsize=legend_fontsize
-    )
-    plt.tight_layout()
+    plt.legend(loc=legend_loc, fontsize=legend_fontsize)
+    figure.tight_layout()
     plt.show()
+    return figure
     
         
 def plot_wall_time(
@@ -621,7 +640,7 @@ def plot_pauli_probabilities_labeled(probabilities: dict[str, float], max_num_la
     plt.show()
     return figure
 
-def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, title: str = None, log_scale: bool = True) -> plt.Figure:
+def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, title: str = None, log_scale: bool = True, ylabel:str = None, xlabel:str = None) -> plt.Figure:
     """
     Plot the histogram of probabilities by Pauli weight.
 
@@ -635,14 +654,18 @@ def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, t
     Returns:
         The figure object containing the plot.
     """
+    if ylabel is None:
+        ylabel = "Probability"
+    if xlabel is None:
+        xlabel = "Pauli Weight"
 
     weights = sorted(histogram.keys(), reverse=not ascending)
     probabilities = [histogram[w] for w in weights]
 
     figure = plt.figure(figsize=(6, 4), dpi=250)
     plt.bar(weights, probabilities, color=COLOUR_PALETTE)
-    plt.xlabel('Pauli Weight')
-    plt.ylabel('Total Probability')
+    plt.xlabel(xlabel, fontsize=10)
+    plt.ylabel(ylabel, fontsize=10)
     plt.title(title)
     plt.xticks(weights)
     if log_scale:
