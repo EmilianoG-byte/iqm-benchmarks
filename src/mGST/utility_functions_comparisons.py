@@ -410,9 +410,9 @@ def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
     return kraus_tensor
 
 def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, rank_povm:int = None, rank_state:int = None)->tuple[jnp.ndarray, jnp.ndarray]:
-    """Get the compressed representation of the MGST operators using cholesky factorization.
+    """Get the compressed representation of the MGST operators using cholesky factorization + SVD decomposition if ranks are specified.
     
-    This is the implementation used in the original mGST code.
+    This is the implementation used in the original mGST code + my SVD decomposition.
     
     For the Kraus function see `get_compressed_perturbed_kraus_from_superop`.
     
@@ -432,6 +432,19 @@ def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp
         )
     state_mgst_offset = state_mgst + 1e-14 * jnp.eye(dim).reshape(-1)
     state_psd = jnp.linalg.cholesky(state_mgst_offset.reshape(dim, dim))
+    
+    # The following is dumb, but it works.
+    # Doing it this way because I didn't want to change the cholesky from before
+    # TODO: change cholesky with factorize_psd_truncated if possible. Wasn't trivial last time I tried.
+    if rank_povm is not None:
+        povm_mgst_perturbed = povm_psd_to_mgst(povm_psd).reshape(num_povm, dim, dim) # (num_povm, dim_out, dim_out*)
+        povm_psd_compressed = factorize_psd_truncated(povm_mgst_perturbed, max_rank=rank_povm).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_in
+        povm_psd = povm_psd_compressed
+    if rank_state is not None:
+        state_mgst_perturbed = state_psd_to_mgst(state_psd).reshape(dim, dim) # dim_out, dim_out*
+        state_psd_compressed = factorize_psd_truncated(state_mgst_perturbed, max_rank=rank_state) # dim_out, rank_state
+        state_psd = state_psd_compressed
+    
     return povm_psd, state_psd
 
 def perturb_povm(povm_mgst:jnp.ndarray, epsilon:float = 1e-14)->jnp.ndarray:
