@@ -5,7 +5,7 @@ from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_p
 from mGST.typing import Tensor, Matrix, Vector
 import jax.numpy as jnp
 
-def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list[int], prune_negatives:bool=True) -> list[list[int]]:
+def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list[int]) -> dict[str, list[list[int]]]:
     """Generate a sequence of gate indices
 
     This code is adpated from `compressive_gst.generate_meas_circuits`
@@ -14,10 +14,9 @@ def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list
         num_gates: Number of gates in the circuit.
         num_circuits: Number of circuits to generate.
         seq_len_list: List of three integers representing the minimum, cut, and maximum sequence lengths.
-        prune_negatives: If True (default), we get rid of the -1 in the indices list.
 
     Returns:
-        A list of lists, where each inner list contains the gate indices for a circuit.
+        A dictionary containing the gate indices and the gate indices with negative values.
     """
 
     # Calculate number of short and long circuits
@@ -25,10 +24,33 @@ def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list
     N_long = int(jnp.floor(num_circuits / 2))
     L_MIN, L_CUT, L_MAX = seq_len_list
 
-    gate_indices = additional_fns.random_seq_design(num_gates, L_MIN, L_CUT, L_MAX, N_short, N_long)
-    if prune_negatives:
-        gate_indices = [list(seq[seq >= 0]) for seq in gate_indices]
-    return gate_indices
+    gate_indices_with_negs = additional_fns.random_seq_design(num_gates, L_MIN, L_CUT, L_MAX, N_short, N_long)
+    gate_indices = [list(seq[seq >= 0]) for seq in gate_indices_with_negs]
+    return {"gate_indices": gate_indices, "gate_indices_with_negs": gate_indices_with_negs}
+
+def add_negative_padding(
+    gate_indices: list[list[int]],
+    target_length: int,
+):
+    """Reconstruct fixed-length sequences by right-padding with -1.
+
+    This inverts:
+        [list(seq[seq >= 0]) for seq in gate_indices_with_negs]
+    when the original had only trailing -1 padding.
+    """
+    pad_value = -1
+    if target_length < 0:
+        raise ValueError("target_length must be non-negative.")
+
+    restored = []
+    for seq in gate_indices:
+        if len(seq) > target_length:
+            raise ValueError(
+                f"Found sequence of length {len(seq)} > target_length={target_length}."
+            )
+        restored.append(seq + [pad_value] * (target_length - len(seq)))
+
+    return jnp.array(restored)
 
 def compute_probability_matrices(gate_indices: list[list[int]], kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, num_shots:int, seed:int=42) -> dict[str, Matrix]:
     """Compute the exact and sampled probability matrices for a given set of gate indices and gate set (kraus, povm, and state).
