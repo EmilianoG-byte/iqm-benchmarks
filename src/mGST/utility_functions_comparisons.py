@@ -438,11 +438,11 @@ def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp
     # TODO: change cholesky with factorize_psd_truncated if possible. Wasn't trivial last time I tried.
     if rank_povm is not None:
         povm_mgst_perturbed = povm_psd_to_mgst(povm_psd).reshape(num_povm, dim, dim) # (num_povm, dim_out, dim_out*)
-        povm_psd_compressed = factorize_psd_truncated(povm_mgst_perturbed, max_rank=rank_povm).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_in
+        povm_psd_compressed = factorize_psd_truncated(povm_mgst_perturbed, max_rank=rank_povm).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_out
         povm_psd = povm_psd_compressed
     if rank_state is not None:
-        state_mgst_perturbed = state_psd_to_mgst(state_psd).reshape(dim, dim) # dim_out, dim_out*
-        state_psd_compressed = factorize_psd_truncated(state_mgst_perturbed, max_rank=rank_state) # dim_out, rank_state
+        state_mgst_perturbed = state_psd_to_mgst(state_psd).reshape(dim, dim) # dim_in, dim_in*
+        state_psd_compressed = factorize_psd_truncated(state_mgst_perturbed, max_rank=rank_state) # dim_in, rank_state
         state_psd = state_psd_compressed
     
     return povm_psd, state_psd

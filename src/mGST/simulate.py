@@ -1,7 +1,7 @@
 """Functions used to simulate samples for testing purposes"""
 from mGST import additional_fns
 from mGST.low_level_jit import contract_mps_all_povm
-from mGST.utility_functions_comparisons import kraus_tensor_to_mgst
+from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated
 from mGST.typing import Tensor, Matrix, Vector
 import jax.numpy as jnp
 
@@ -54,17 +54,17 @@ def compute_probability_matrices(gate_indices: list[list[int]], kraus_tensor:Ten
     return {"exact": prob_matrix_exact, "sampled": prob_matrix_sampled}
 
 
-def get_perturbed_state(state_matrix: Matrix, rank:int, epsilon: float, seed: int=42) -> Vector:
+def get_perturbed_state_matrix(state_matrix: Matrix, rank:int, epsilon: float, seed: int=42) -> Vector:
     """Get a perturbed state vector by applying a random Kraus operator to the original state vector.
     
     Args:
-        state_vect: The original state vector of shape (dim_in, dim_in*).
+        state_matrix: The original state matrix of shape (dim_in, dim_in*).
         rank: The rank of the Kraus operator to be applied. This will be the new rank of the perturbed state as the original state is assumed to be rank 1.
         epsilon: The perturbation strength.
         seed: The random seed for generating the Kraus operator.
         
     Returns:
-        The perturbed state vector of shape (dim_in, dim_in*).
+        The perturbed state matrix of shape (dim_in, dim_in*).
     """
     dim = state_matrix.shape[0]
     kraus_perturbed = additional_fns.randKrausSet(1, dim, rank_kraus=rank, a=epsilon, seed=seed)
@@ -75,8 +75,23 @@ def get_perturbed_state(state_matrix: Matrix, rank:int, epsilon: float, seed: in
     state_perturbed = jnp.dot(kraus_perturbed_superop, state_vect) # dim^2
     return state_perturbed.reshape((dim, dim)) # dim_in, dim_in*
 
-def get_perturbed_povm(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=42) -> Tensor:
-    """Get a perturbed POVM vector by applying a random Kraus operator to the original POVM vector.
+def get_perturbed_compressed_state_tensor(state_matrix: Matrix, rank:int, epsilon: float, seed: int=42) -> Matrix:
+    """Get a perturbed compressed sttate tensor by applying a random Kraus operator to the original state tensor.
+    
+    Args:
+        state_matrix: The original state matrix of shape (dim_in, dim_in*).
+        rank: The rank of the Kraus operator to be applied. This will be the new rank of the perturbed state as the original state is assumed to be rank 1.
+        epsilon: The perturbation strength.
+        seed: The random seed for generating the Kraus operator.
+    Returns:
+        The perturbed compressed state tensor of shape (dim_in, rank_state).
+    """
+    perturbed_state_matrix = get_perturbed_state_matrix(state_matrix, rank, epsilon, seed)
+    state_psd_perturbed = factorize_psd_truncated(perturbed_state_matrix, max_rank=rank) # dim_in, rank_state
+    return state_psd_perturbed
+
+def get_perturbed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=42) -> Tensor:
+    """Get a perturbed POVM tensor by applying a random Kraus operator to the original POVM tensor.
     
     Args:
         povm_tensor: The original POVM tensor of shape (num_povm, dim_out, dim_out*).
@@ -85,7 +100,7 @@ def get_perturbed_povm(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=
         seed: The random seed for generating the Kraus operator.
         
     Returns:
-        The perturbed POVM vector of shape (num_povm, dim_out, dim_out*).
+        The perturbed POVM tensor of shape (num_povm, dim_out, dim_out*).
     """
     num_povm, dim, dim = povm_tensor.shape
     kraus_perturbed = additional_fns.randKrausSet(1, dim, rank_kraus=rank, a=epsilon, seed=seed)
@@ -95,3 +110,18 @@ def get_perturbed_povm(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=
     povm_vect = povm_tensor.reshape((num_povm, dim*dim)) # num_povm, dim_out * dim_out*
     povm_perturbed = jnp.einsum('ij, jk -> ik', povm_vect, kraus_perturbed_superop) # num_povm, dim_in * dim_in*
     return povm_perturbed.reshape((num_povm, dim, dim)) # num_povm, dim_out, dim_out*
+
+def get_perturbed_compressed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=42) -> Tensor:
+    """Get a perturbed compressed POVM tensor by applying a random Kraus operator to the original POVM tensor.
+    
+    Args:
+        povm_tensor: The original POVM tensor of shape (num_povm, dim_out, dim_out*).
+        rank: The rank of the Kraus operator to be applied. This will be the new rank of the perturbed POVM as the original POVM is assumed to be rank 1.
+        epsilon: The perturbation strength.
+        seed: The random seed for generating the Kraus operator.
+    Returns:
+        The perturbed compressed POVM tensor of shape (num_povm, rank_povm, dim_out).
+    """
+    perturbed_povm_tensor = get_perturbed_povm_tensor(povm_tensor, rank, epsilon, seed)
+    povm_psd_perturbed = factorize_psd_truncated(perturbed_povm_tensor, max_rank=rank).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_out
+    return povm_psd_perturbed
