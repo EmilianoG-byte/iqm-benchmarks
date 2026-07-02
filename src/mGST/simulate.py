@@ -93,9 +93,25 @@ def get_perturbed_state_matrix(state_matrix: Matrix, rank:int, epsilon: float, s
     kraus_perturbed_superop = kraus_tensor_to_mgst(kraus_perturbed) # num_gates, dim_out^2, dim_in^2
     # squeeze the num_gates out
     kraus_perturbed_superop = kraus_perturbed_superop.squeeze(axis=0) # dim^2, dim^2
-    state_vect = state_matrix.flatten()
-    state_perturbed = jnp.dot(kraus_perturbed_superop, state_vect) # dim^2
-    return state_perturbed.reshape((dim, dim)) # dim_in, dim_in*
+    return apply_single_superop_to_state_matrix(state_matrix, kraus_perturbed_superop)
+
+def apply_single_superop_to_state_matrix(state_matrix: Matrix, superop: Matrix | Tensor) -> Matrix:
+    """Apply a single superoperator to a state matrix.
+
+    Args:
+        state_matrix: The original state matrix of shape (dim_in, dim_in*).
+        superop: The superoperator to apply of shape (dim_in*dim_in, dim_in*dim_in).
+
+    Returns:
+        The transformed state matrix of shape (dim_in, dim_in*).
+    """
+    if superop.ndim == 3:
+        superop = superop.squeeze(axis=0) # dim^2, dim^2
+    
+    dim = state_matrix.shape[0]
+    state_vect = state_matrix.flatten()  # dim^2
+    state_perturbed = jnp.dot(superop, state_vect)  # dim^2
+    return state_perturbed.reshape((dim, dim))  # dim_in, dim_in*
 
 def get_perturbed_compressed_state_tensor(state_matrix: Matrix, rank:int, epsilon: float, seed: int=42) -> Matrix:
     """Get a perturbed compressed sttate tensor by applying a random Kraus operator to the original state tensor.
@@ -129,9 +145,24 @@ def get_perturbed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, see
     kraus_perturbed_superop = kraus_tensor_to_mgst(kraus_perturbed) # num_gates, dim_out^2, dim_in^2*
     # squeeze the num_gates out
     kraus_perturbed_superop = kraus_perturbed_superop.squeeze(axis=0) # dim_out^2, dim_in^2*
-    povm_vect = povm_tensor.reshape((num_povm, dim*dim)) # num_povm, dim_out * dim_out*
-    povm_perturbed = jnp.einsum('ij, jk -> ik', povm_vect, kraus_perturbed_superop) # num_povm, dim_in * dim_in*
-    return povm_perturbed.reshape((num_povm, dim, dim)) # num_povm, dim_out, dim_out*
+    return apply_single_superop_to_povm_tensor(povm_tensor, kraus_perturbed_superop)
+
+def apply_single_superop_to_povm_tensor(povm_tensor: Tensor, superop: Matrix | Tensor) -> Tensor:
+    """Apply a single superoperator to a POVM tensor.
+
+    Args:
+        povm_tensor: The original POVM tensor of shape (num_povm, dim_out, dim_out*).
+        superop: The superoperator to apply of shape (dim_out*dim_out, dim_out*dim_out).
+
+    Returns:
+        The transformed POVM tensor of shape (num_povm, dim_out, dim_out*).
+    """
+    if superop.ndim == 3:
+        superop = superop.squeeze(axis=0) # dim^2, dim^2
+    num_povm, dim, _ = povm_tensor.shape
+    povm_vect = povm_tensor.reshape((num_povm, dim * dim))  # num_povm, dim_out * dim_out
+    povm_vect = jnp.einsum('ij, jk -> ik', povm_vect, superop)  # num_povm, dim_out * dim_out
+    return povm_vect.reshape((num_povm, dim, dim))  # num_povm, dim_out, dim_out*
 
 def get_perturbed_compressed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=42) -> Tensor:
     """Get a perturbed compressed POVM tensor by applying a random Kraus operator to the original POVM tensor.
@@ -147,3 +178,109 @@ def get_perturbed_compressed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon:
     perturbed_povm_tensor = get_perturbed_povm_tensor(povm_tensor, rank, epsilon, seed)
     povm_psd_perturbed = factorize_psd_truncated(perturbed_povm_tensor, max_rank=rank).transpose(0, 2, 1).conj() # num_povm, rank_povm, dim_out
     return povm_psd_perturbed
+
+
+def depolarizing_kraus_operators(p:float, num_qubits:int)-> Tensor:
+    """
+    Generate Kraus operators for the depolarizing channel.
+    
+    Args:
+        p: Error rate (depolarizing probability)
+        num_qubits: Number of qubits (1 or 2)
+    
+    Returns:
+        List of Kraus operators as JAX arrays
+    """
+    if num_qubits == 1:
+        # Single qubit Pauli matrices
+        I = jnp.array([[1, 0], [0, 1]], dtype=complex)
+        X = jnp.array([[0, 1], [1, 0]], dtype=complex)
+        Y = jnp.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = jnp.array([[1, 0], [0, -1]], dtype=complex)
+        
+        # Kraus operators
+        K0 = jnp.sqrt(1 - 3*p/4) * I
+        K1 = jnp.sqrt(p/4) * X
+        K2 = jnp.sqrt(p/4) * Y
+        K3 = jnp.sqrt(p/4) * Z
+        
+        return [K0, K1, K2, K3]
+    
+    elif num_qubits == 2:
+        # Two-qubit Pauli matrices (tensor products)
+        I = jnp.array([[1, 0], [0, 1]], dtype=complex)
+        X = jnp.array([[0, 1], [1, 0]], dtype=complex)
+        Y = jnp.array([[0, -1j], [1j, 0]], dtype=complex)
+        Z = jnp.array([[1, 0], [0, -1]], dtype=complex)
+        
+        paulis = [I, X, Y, Z]
+        two_qubit_paulis = [jnp.kron(P1, P2) for P1 in paulis for P2 in paulis]
+        
+        # For 2-qubit depolarizing: 1 identity + 15 non-identity Paulis
+        K0 = jnp.sqrt(1 - 15*p/16) * two_qubit_paulis[0]  # Identity
+        kraus_ops = [K0]
+        for pauli in two_qubit_paulis[1:]:  # Non-identity Paulis
+            kraus_ops.append(jnp.sqrt(p/16) * pauli)
+        
+        return jnp.array(kraus_ops)
+
+def amplitude_damping_kraus_operators(gamma: float, num_qubits:int) -> Tensor:
+    """
+    Generate Kraus operators for the amplitude damping channel.
+    
+    Args:
+        gamma: Decay rate (amplitude damping parameter)
+        num_qubits: Number of qubits (1 or 2)
+    
+    Returns:
+        List of Kraus operators as JAX arrays
+    """
+    if num_qubits == 1:
+        # Single qubit amplitude damping
+        K0 = jnp.array([[1, 0], [0, jnp.sqrt(1 - gamma)]], dtype=complex)
+        K1 = jnp.array([[0, jnp.sqrt(gamma)], [0, 0]], dtype=complex)
+        
+        return [K0, K1]
+    
+    elif num_qubits == 2:
+        # Two-qubit amplitude damping (independent on each qubit)
+        K0_1q = jnp.array([[1, 0], [0, jnp.sqrt(1 - gamma)]], dtype=complex)
+        K1_1q = jnp.array([[0, jnp.sqrt(gamma)], [0, 0]], dtype=complex)
+        
+        # Tensor products for both qubits
+        kraus_ops = []
+        for K_a in [K0_1q, K1_1q]:
+            for K_b in [K0_1q, K1_1q]:
+                kraus_ops.append(jnp.kron(K_a, K_b))
+        
+        return jnp.array(kraus_ops)
+    
+
+def get_initial_state_and_measurement(dim: int) -> tuple[Matrix, Tensor]:
+    """Get the initial density matrix and POVM for a GST experiment given a physical dimension
+
+    Args:
+        dim: The physical dimension of the system (e.g., 2 for a qubit, 4 for two qubits).
+
+    Returns:
+        tuple[Matrix, Tensor]: The initial density matrix and the POVM for the GST experiment.
+    """
+    state = (
+                jnp.kron(additional_fns.basis(dim, 0).T.conj(), additional_fns.basis(dim, 0))
+                .astype(jnp.complex128)
+            )
+    
+    state = state.reshape((dim, dim))  # Reshape to (dim, dim) for density matrix            
+    # Computational basis measurement:
+    povm = jnp.array(
+        [
+            jnp.kron(
+                additional_fns.basis(dim, i).T.conj(), additional_fns.basis(dim, i)
+            )
+            for i in range(dim)
+        ]
+    ).astype(jnp.complex128)
+
+    num_povm_elements = povm.shape[0]
+    povm = povm.reshape((num_povm_elements, dim, dim))  # Reshape to (num_povm_elements, dim_out, dim_in)
+    return state, povm

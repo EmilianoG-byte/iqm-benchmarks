@@ -673,3 +673,72 @@ def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, t
     plt.grid(axis='y')
     plt.show()
     return figure
+
+def plot_mean_std_vs_x(
+    data: dict[str, dict[str, float]],
+    title: str = "Mean and Std vs Number of Sequences",
+    xlabel: str = "Number of sequences",
+    ylabel: str = "Distance",
+    use_log_scale: bool = False,
+    dpi: int = 250,
+) -> plt.Figure:
+    """
+    Plot a dictionary of the form:
+    {
+        "100": {"mean": ..., "std": ...},
+        "200": {"mean": ..., "std": ...},
+        ...
+    }
+
+    Uses the project's COLOUR_PALETTE and MARKERS.
+    """
+    if not data:
+        raise ValueError("Input data is empty.")
+
+    # Sort numerically by x key even if keys are strings
+    x_labels = sorted(data.keys(), key=lambda k: float(k))
+    x_vals = np.array([float(k) for k in x_labels], dtype=float)
+
+    # Convert possible JAX scalars to Python floats
+    means = np.array([float(data[k]["mean"]) for k in x_labels], dtype=float)
+    stds = np.array([float(data[k]["std"]) for k in x_labels], dtype=float)
+
+    figure, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
+
+    color = COLOUR_PALETTE[0]
+    marker = MARKERS[0]
+
+    ax.plot(
+        x_vals,
+        means,
+        color=color,
+        marker=marker,
+        linewidth=2,
+        markersize=7,
+        markeredgecolor="black",
+        label="Mean distance",
+    )
+
+    ax.fill_between(
+        x_vals,
+        means - stds,
+        means + stds,
+        color=color,
+        alpha=0.2,
+        label="±1 std",
+    )
+
+    ax.set_xlabel(xlabel, fontsize=12)
+    ax.set_ylabel(ylabel, fontsize=12)
+    ax.set_title(title, fontsize=14)
+    ax.set_xticks(x_vals)
+    ax.set_xticklabels(x_labels)
+
+    if use_log_scale:
+        ax.set_yscale("log")
+
+    ax.grid(alpha=0.3, linestyle="--", linewidth=0.5)
+    ax.legend(fontsize=10)
+    figure.tight_layout()
+    plt.show()
+    return figure
