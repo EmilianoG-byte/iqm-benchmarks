@@ -681,6 +681,7 @@ def plot_mean_std_vs_x(
     ylabel: str = "Distance",
     use_log_scale: bool = False,
     dpi: int = 250,
+    comparison_value: tuple[str, float] = None,
 ) -> plt.Figure:
     """
     Plot a dictionary of the form:
@@ -739,6 +740,12 @@ def plot_mean_std_vs_x(
 
     ax.grid(alpha=0.3, linestyle="--", linewidth=0.5)
     ax.legend(fontsize=10)
+    
+    if comparison_value is not None:
+        comp_label, comp_y = comparison_value
+        ax.axhline(y=comp_y, color="red", linestyle="--", label=comp_label)
+        ax.legend(fontsize=10)
+    
     figure.tight_layout()
     plt.show()
     return figure
