@@ -300,7 +300,7 @@ def get_initial_state_and_measurement(dim: int) -> tuple[Matrix, Tensor]:
     povm = povm.reshape((num_povm_elements, dim, dim))  # Reshape to (num_povm_elements, dim_out, dim_in)
     return state, povm
 
-def get_default_optimization_options():
+def get_default_optimization_options() -> tuple[dict[str, OperatorSchedule], int, float]:
     """Get default optimization options for the Riemannian optimization workflow."""
     num_iterations_outer = 5
     num_iterations_tr = 10
@@ -318,8 +318,9 @@ def get_default_optimization_options():
     }
     
     relative_precision = 1e-5
-    
-    return optimization_schedule_all_tr, num_iterations_outer, relative_precision
+    global_gradient_norm_tol = 1e-6
+
+    return optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol
 
 
 def check_operators_dictionaries(*dicts)-> None:
@@ -333,7 +334,7 @@ def check_operators_dictionaries(*dicts)-> None:
             raise ValueError(f"Dictionary keys {dict.keys()} do not match expected keys {EXPECTED_KEYS}.")
 
 
-def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_noisy:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False):
+def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_noisy:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None):
     """
     Run the optimization workflow for the Riemannian optimization of the GST operators.
     
@@ -344,6 +345,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         operators_psd_noisy: Dictionary containing the noisy operators (kraus, povm, state).
         target_superops: Dictionary containing the target superoperators (kraus, povm, state).
         use_exact_probabilities: Whether to use exact probabilities or sampled probabilities for the cost function optimization. If True, exact probabilities are used (infinite shots); if False, sampled probabilities are used.
+        relative_precision: Relative precision for the optimization stopping criterion.
 
     Returns:
         A dictionary containing the optimized operators, gauged superoperators, target model, cost function history, probability matrices, times for optimization and gauging, and indices dictionary.
@@ -377,7 +379,15 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         "jit": True,
     }
     
-    optimization_schedule_all_tr, num_iterations_outer, relative_precision = get_default_optimization_options()
+    if optimization_options is None:
+        optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol = get_default_optimization_options()
+    else:
+        if ["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol"] != list(optimization_options.keys()):
+            raise ValueError(f"Optimization options must contain keys: ['schedule', 'num_iterations_outer', 'relative_precision', 'global_gradient_norm_tol'], but got {list(optimization_options.keys())}.")
+        optimization_schedule_all_tr = optimization_options["schedule"]
+        num_iterations_outer = optimization_options["num_iterations_outer"]
+        relative_precision = optimization_options["relative_precision"]
+        global_gradient_norm_tol = optimization_options["global_gradient_norm_tol"]
     
     # start timer
     start_time = time.time()
@@ -392,6 +402,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         save_intermediate_cost_values=True,
         noise_threshold=None,
         relative_precision=relative_precision,
+        global_gradient_norm_tol=global_gradient_norm_tol,
         verbose=True,
     )
     

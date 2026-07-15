@@ -32,8 +32,8 @@ class TrustRegionOptions(BaseOptimizationOptions):
     quotient_trust: float = 0.125
     tol_grad: float = 1e-6
     num_iterations_cg: int = 10
-    theta_cg: float | None = None
-    kappa_cg: float | None = None
+    theta_cg: float | None = 1 # before by mistake we set it to 0.5 (WRONG). Based on book suggestions
+    kappa_cg: float | None = 1/10 # decided to set it as default based on experimentation and book suggestions.
     verbose_cg: bool = False
 
 @dataclass
