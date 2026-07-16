@@ -83,21 +83,10 @@ def initialize_mgst_parameters(dataset, target_init:bool = True, seed:int = 42):
             (dataset.attrs["num_gates"], dataset.attrs["pdim"] ** 2, dataset.attrs["pdim"] ** 2)
         )  # tensor of superoperators
         
-        rho = (
-            jnp.kron(additional_fns.basis(dataset.attrs["pdim"], 0).T.conj(), additional_fns.basis(dataset.attrs["pdim"], 0))
-            .reshape(-1)
-            .astype(jnp.complex128)
-        )
+        rho = (generate_target_state(dataset.attrs["pdim"]).reshape(-1))
         
         # Computational basis measurement:
-        E = jnp.array(
-            [
-                jnp.kron(
-                    additional_fns.basis(dataset.attrs["pdim"], i).T.conj(), additional_fns.basis(dataset.attrs["pdim"], i)
-                ).reshape(-1)
-                for i in range(dataset.attrs["pdim"])
-            ]
-        ).astype(jnp.complex128)
+        E = generate_target_povm(dataset.attrs["pdim"])
         
         
         K = additional_fns.perturbed_target_init(X_target, dataset.attrs["rank"], seed=seed)
@@ -106,6 +95,35 @@ def initialize_mgst_parameters(dataset, target_init:bool = True, seed:int = 42):
         K, X, E, rho = random_gs(d, r, rK, n_povm)
         
     return K, X, E, rho
+
+def generate_target_state(dim:int)->jnp.ndarray:
+    """Generate the target state density matrix for a given dimension.
+    
+    Args:
+        dim: Dimension of the target state.
+
+    Returns:
+        Target state density matrix of dimensions (dim, dim).
+    """
+    return jnp.kron(additional_fns.basis(dim, 0).T.conj(), additional_fns.basis(dim, 0)).astype(jnp.complex128)
+
+def generate_target_povm(dim:int)->jnp.ndarray:
+    """Generate the target POVM operators for a given dimension.
+    
+    Args:
+        dim: Dimension of the target POVM.
+    
+    Returns:
+        Target POVM operators of dimensions (dim, dim^2).
+    """
+    return jnp.array(
+            [
+                jnp.kron(
+                    additional_fns.basis(dim, i).T.conj(), additional_fns.basis(dim, i)
+                ).reshape(-1)
+                for i in range(dim)
+            ]
+        ).astype(jnp.complex128)
 
 def get_compressed_perturbed_kraus_from_superop(superop:jnp.ndarray, rank:int, seed:int = 42)->dict[str, jnp.ndarray]:
     """Get a perturbed Kraus representation from a superoperator.
@@ -186,7 +204,18 @@ def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backe
     benchmark = CompressiveGST(backend, configuration)
     gate_set = benchmark.gate_set
     gate_labels = benchmark.gate_labels
-    return qiskit_gate_to_operator(gate_set), gate_labels    
+    return qiskit_gate_to_operator(gate_set), gate_labels
+
+def all_operators_from_configuration(configuration:GSTConfiguration, backend:str = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, list[str]]:
+    if backend is None:
+        warnings.warn("No backend specified. Using 'iqmfakeapollo' as default backend.")
+    kraus_tensor_target, gate_labels = target_kraus_tensor_from_configuration(configuration, backend)
+    
+    benchmark = CompressiveGST(backend, configuration)
+    dim = benchmark.pdim
+    povm_target = generate_target_povm(dim)
+    state_target = generate_target_state(dim)
+    return {"kraus": kraus_tensor_target, "povm": povm_target, "state": state_target, "gate_labels": gate_labels}
 
 def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_gates_per_batch:int | None = None, max_circuits_per_batch:int | None = None, seq_len_list:list | None = None) -> GSTConfiguration:
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
@@ -357,7 +386,7 @@ def state_psd_to_mgst(state_psd:jnp.ndarray)->jnp.ndarray:
 
 def kraus_tensor_to_mgst(kraus_tensor:jnp.ndarray)->jnp.ndarray:
     """Convert the Kraus operators from their PSD representation to the MGST representation (superoperator).
-    
+        
     Args:
         kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
     Returns:

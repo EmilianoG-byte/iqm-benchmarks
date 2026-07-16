@@ -3,7 +3,8 @@ import time
 
 from mGST import additional_fns
 from mGST.low_level_jit import contract_mps_all_povm
-from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation
+from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation, generate_target_state, generate_target_povm
+
 from mGST.typing import Tensor, Matrix, TrustRegionOptions, Vector
 import jax.numpy as jnp
 import numpy as np
@@ -270,7 +271,6 @@ def amplitude_damping_kraus_operators(gamma: float, num_qubits:int) -> Tensor:
         
         return jnp.array(kraus_ops)
     
-
 def get_initial_state_and_measurement(dim: int) -> tuple[Matrix, Tensor]:
     """Get the initial density matrix and POVM for a GST experiment given a physical dimension
 
@@ -280,21 +280,11 @@ def get_initial_state_and_measurement(dim: int) -> tuple[Matrix, Tensor]:
     Returns:
         tuple[Matrix, Tensor]: The initial density matrix and the POVM for the GST experiment.
     """
-    state = (
-                jnp.kron(additional_fns.basis(dim, 0).T.conj(), additional_fns.basis(dim, 0))
-                .astype(jnp.complex128)
-            )
+    state = generate_target_state(dim)
     
     state = state.reshape((dim, dim))  # Reshape to (dim, dim) for density matrix            
     # Computational basis measurement:
-    povm = jnp.array(
-        [
-            jnp.kron(
-                additional_fns.basis(dim, i).T.conj(), additional_fns.basis(dim, i)
-            )
-            for i in range(dim)
-        ]
-    ).astype(jnp.complex128)
+    povm = generate_target_povm(dim)
 
     num_povm_elements = povm.shape[0]
     povm = povm.reshape((num_povm_elements, dim, dim))  # Reshape to (num_povm_elements, dim_out, dim_in)
@@ -334,7 +324,7 @@ def check_operators_dictionaries(*dicts)-> None:
             raise ValueError(f"Dictionary keys {dict.keys()} do not match expected keys {EXPECTED_KEYS}.")
 
 
-def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_noisy:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None):
+def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False):
     """
     Run the optimization workflow for the Riemannian optimization of the GST operators.
     
@@ -342,30 +332,30 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         num_sequences: Number of sequences to generate.
         num_shots: Number of shots for sampling.
         init_operators: Dictionary containing the initial operators (kraus, povm, state).
-        operators_psd_noisy: Dictionary containing the noisy operators (kraus, povm, state).
+        operators_psd_true: Dictionary containing the true operators (kraus, povm, state), namely the operators that generate the probability matrices used for the cost function optimization. In other words, these are the operators that generate the "experimental" data.
         target_superops: Dictionary containing the target superoperators (kraus, povm, state).
         use_exact_probabilities: Whether to use exact probabilities or sampled probabilities for the cost function optimization. If True, exact probabilities are used (infinite shots); if False, sampled probabilities are used.
-        relative_precision: Relative precision for the optimization stopping criterion.
+        optimization_options: Dictionary containing optimization options. If None, default options are used.
 
     Returns:
         A dictionary containing the optimized operators, gauged superoperators, target model, cost function history, probability matrices, times for optimization and gauging, and indices dictionary.
     """
-    check_operators_dictionaries(operators_psd_noisy, target_superops, init_operators)    
+    check_operators_dictionaries(operators_psd_true, target_superops, init_operators)    
     
     seq_len_list = [1, 8, 14]
-    kraus_tensor_noisy = operators_psd_noisy["kraus"]
-    povm_psd_noisy = operators_psd_noisy["povm"]
-    state_psd_noisy = operators_psd_noisy["state"]
+    kraus_tensor_true = operators_psd_true["kraus"]
+    povm_psd_true = operators_psd_true["povm"]
+    state_psd_true = operators_psd_true["state"]
     
     # we can get the number of gates from any of the kraus tensors
-    num_gates = kraus_tensor_noisy.shape[0]
+    num_gates = kraus_tensor_true.shape[0]
     
     # return this one
     indices_dict = generate_sequence_indices(num_gates=num_gates, num_circuits=num_sequences, seq_len_list=seq_len_list)
     indices_list = indices_dict["gate_indices"]
 
     # return this one
-    probability_matrices = compute_probability_matrices(kraus_tensor=kraus_tensor_noisy, povm_psd=povm_psd_noisy, state_psd=state_psd_noisy, gate_indices=indices_list, num_shots=num_shots, seed=42)
+    probability_matrices = compute_probability_matrices(kraus_tensor=kraus_tensor_true, povm_psd=povm_psd_true, state_psd=state_psd_true, gate_indices=indices_list, num_shots=num_shots, seed=42)
     
     if use_exact_probabilities:
         print("Using exact probabilities 🔪")
@@ -388,6 +378,12 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         num_iterations_outer = optimization_options["num_iterations_outer"]
         relative_precision = optimization_options["relative_precision"]
         global_gradient_norm_tol = optimization_options["global_gradient_norm_tol"]
+    
+    if warmup_run:
+        start_compilation_time = time.time()
+        print("🏎️ Warming up the cost function ...")
+        initial_cost_value = cost_function_jax_mps(*init_operators.values(), **cost_fn_kwargs)
+        print(f"Initial cost value: {initial_cost_value}")
     
     # start timer
     start_time = time.time()
@@ -420,7 +416,13 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         "state": state_vect_gauged
     }
     
-    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": {"optimization_time": optimization_time, "gauge_time": gauge_time}}
+    times = {"optimization_time": optimization_time, "gauge_time": gauge_time}
+    
+    if warmup_run:
+        compilation_time = start_time - start_compilation_time
+        times["compilation_time"] = compilation_time
+    
+    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": times}
     
 def perform_gauge(optimized_operators:dict[jnp.ndarray], target_superops:dict[jnp.ndarray], num_gates:int):
     """
