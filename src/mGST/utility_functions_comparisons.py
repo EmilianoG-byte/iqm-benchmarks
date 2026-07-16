@@ -207,6 +207,7 @@ def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backe
     return qiskit_gate_to_operator(gate_set), gate_labels
 
 def all_operators_from_configuration(configuration:GSTConfiguration, backend:str = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, list[str]]:
+    """Get the target Kraus, POVM, and State operators from a given configuration."""
     if backend is None:
         warnings.warn("No backend specified. Using 'iqmfakeapollo' as default backend.")
     kraus_tensor_target, gate_labels = target_kraus_tensor_from_configuration(configuration, backend)

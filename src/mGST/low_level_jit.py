@@ -264,8 +264,8 @@ def contract_mps_all_povm_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarra
     contracted_tensor = povm_psd @ right_tensor # num_povm, rank_povm, rank_state
     return jnp.einsum("ijk, ijk -> i", contracted_tensor, contracted_tensor.conj()) # num_povm
 
-def cost_function_mps_single_gate_sequence_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
-    """Compute the full cost function for a single set of gate indices and a single probability vector, assuming coherent quantum channels (i.e. kraus rank = 1).
+def least_squares_mps_single_gate_sequence_coherent(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
+    """Compute the full least squares for a single set of gate indices and a single probability vector, assuming coherent quantum channels (i.e. kraus rank = 1).
     
     The equation for this looks like: 
     C = sum_{i=1}^{num_povm} | <povm_i| K_{j_n} ... K_{j_1} |state> - p_i |^2
@@ -280,15 +280,15 @@ def cost_function_mps_single_gate_sequence_coherent(kraus_tensor:jnp.ndarray, po
         gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
         prob_vector: tensor of dimension: (num_povm)
     Returns:
-        jnp.ndarray: scalar corresponding to the cost function value for the given gate sequence and probability vector.
+        scalar corresponding to the least squares cost function value for the given gate sequence and probability vector.
     """
     inner_prod_vector = contract_mps_all_povm_coherent(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
     return mean_square_error_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
 
-cost_function_mps_single_gate_sequence_coherent_jit = jax.jit(cost_function_mps_single_gate_sequence_coherent)
+least_squares_single_gate_sequence_coherent_jit = jax.jit(least_squares_mps_single_gate_sequence_coherent)
 
-def cost_function_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
-    """Compute the full cost function for a single set of gate indices and a single probability vector.
+def least_squares_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
+    """Compute the least squares least squares for a single set of gate indices and a single probability vector.
     
     The equation for this looks like: 
     C = sum_{i=1}^{num_povm} | <povm_i| K_{j_n} ... K_{j_1} |state> - p_i |^2
@@ -302,12 +302,47 @@ def cost_function_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jn
         prob_vector: tensor of dimension: (num_povm)
         
     Returns:
-        jnp.ndarray: scalar corresponding to the cost function value for the given gate sequence and probability vector.
+       scalar corresponding to the least squares for the given gate sequence and probability vector.
     """
     inner_prod_vector = contract_mps_all_povm(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
     return mean_square_error_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
 
-cost_function_mps_single_gate_sequence_jit = jax.jit(cost_function_mps_single_gate_sequence)
+least_squares_mps_single_gate_sequence_jit = jax.jit(least_squares_mps_single_gate_sequence)
+
+def log_likelihood_mps_single_gate_sequence(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, gates_indices:list[int], prob_vector:jnp.ndarray):
+    """Compute the log-likelihood for a single set of gate indices and a single probability vector.
+    
+    The equation for this looks like: 
+    L = sum_{i=1}^{num_povm} log(<povm_i| K_{j_n} ... K_{j_1} |state>) * p_i
+
+    Args:
+        kraus_tensor: tensor of dimensions: (num_gates, kraus_rank, dim_out, dim_in)
+        povm_psd: Positive-semidefinite (PSD) root of the POVM tensor of dimensions: (num_povm, rank_povm, dim)
+        state_psd: Positive-semidefinite (PSD) root of the state tensor of dimensions: (dim, rank_state)
+            (see B in Eq. 9 of mGST paper)
+        gates_indices: list of indices that dictate which kraus_tensor[idx] will be chosen for each contraction loop.
+        prob_vector: tensor of dimension: (num_povm)
+        
+    Returns:
+        jnp.ndarray: scalar corresponding to the log-likelihood for the given gate sequence and probability vector.
+    """
+    inner_prod_vector = contract_mps_all_povm(kraus_tensor, povm_psd, state_psd, gates_indices) # num_povm
+    return log_likelihood_vectors(inner_prod_vector, prob_vector) # num_povm -> scalar
+
+log_likelihood_mps_single_gate_sequence_jit = jax.jit(log_likelihood_mps_single_gate_sequence)
+
+def log_likelihood_vectors(estimate:jnp.ndarray, target:jnp.ndarray)->float:
+    """Compute the log-likelihood between the estimate and target vectors.
+    
+    Args:
+        estimate: vector of the estimate operator
+        target: vector of the target operator
+    Returns:
+        The log-likelihood between the two vectors.
+    """
+    # we take the absolute value for numerical stabillity.
+    cost_vector = jnp.log(jnp.abs(estimate)) * target # num_povm
+    return jnp.sum(cost_vector) # num_povm -> scalar
 
 def mean_square_error_vectors(estimate:jnp.ndarray, target:jnp.ndarray)->float:
     """Compute the mean square error between the estimate and target vectors.
@@ -618,7 +653,7 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
 import warnings
 
 
-def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False):
+def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False, use_log_likelihood:bool=False, num_shots:int=None):
     """Compute the cost function using jax and mps contraction strategy.
     
     Optimized using the most scalable jnp functions.
@@ -630,17 +665,29 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
             (see B in Eq. 9 of mGST paper)
         indices_list: list of length num_gate_sequences, where each elements is a list of indices corresponding to a gate sequence.
         prob_matrix: tensor of dimensions (num_povm, num_gate_sequences)
+        use_log_likelihood: If True, use the log-likelihood cost function instead of the least squares cost function.
     """
     cost_value = 0
     num_gate_sequences = len(indices_list)
     num_povm = povm_psd.shape[0]
     num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape    
     
+    if use_log_likelihood and num_shots is None:
+        raise ValueError("num_shots must be provided when using log-likelihood cost function.")
+    
     if kraus_rank == 1: # coherent channels. Can use specialized contraction path.
         warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
-        inner_function = cost_function_mps_single_gate_sequence_coherent_jit if jit else cost_function_mps_single_gate_sequence_coherent
+        if use_log_likelihood:
+            # TODO: implement the coherent version once I know this works well.
+            inner_function = log_likelihood_mps_single_gate_sequence_jit if jit else log_likelihood_mps_single_gate_sequence
+        else:
+            inner_function = least_squares_single_gate_sequence_coherent_jit if jit else least_squares_mps_single_gate_sequence_coherent
     else:
-        inner_function = cost_function_mps_single_gate_sequence_jit if jit else cost_function_mps_single_gate_sequence
+        
+        if use_log_likelihood:
+            inner_function = log_likelihood_mps_single_gate_sequence_jit if jit else log_likelihood_mps_single_gate_sequence
+        else:
+            inner_function = least_squares_mps_single_gate_sequence_jit if jit else least_squares_mps_single_gate_sequence
       
     if jit:
         previous_count = inner_function._cache_size()
@@ -655,8 +702,13 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
             if new_count != previous_count:
                 print(f'at iteration {idx} the new count changed to: {new_count}')
                 previous_count = new_count
+
+    if use_log_likelihood:
+        factor = -num_shots
+    else:
+        factor = 1 / (num_gate_sequences * num_povm)
                 
-    return cost_value / (num_gate_sequences * num_povm)
+    return factor * cost_value
 
 def cost_function_jax(kraus_contracted, povm_matrix, state_vector, indices_list, prob_matrix):
     """Implementation of the cost_function_jax_mps used with the input of the rest of the mGST code.

@@ -68,7 +68,7 @@ def add_negative_padding(
 
     return jnp.array(restored)
 
-def compute_probability_matrices(gate_indices: list[list[int]], kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, num_shots:int, seed:int=42) -> dict[str, Matrix]:
+def compute_probability_matrices(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, gate_indices: list[list[int]], num_shots:int, seed:int=42) -> dict[str, Matrix]:
     """Compute the exact and sampled probability matrices for a given set of gate indices and gate set (kraus, povm, and state).
     
     Args:
