@@ -6,6 +6,7 @@ import os
 
 from numba import njit, prange
 import numpy as np
+import warnings
 
 
 def kill_files(folder):
@@ -649,9 +650,6 @@ def compute_regularized_value_all_operators(kraus_tensor_est, povm_psd_est, stat
     regularized_value += kraus_metric(kraus_tensor_est, kraus_tensor_target)
     
     return regularized_value
-    
-import warnings
-
 
 def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_matrix, jit:bool=False, verbose:bool=False, use_log_likelihood:bool=False, num_shots:int=None):
     """Compute the cost function using jax and mps contraction strategy.

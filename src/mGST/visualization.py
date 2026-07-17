@@ -33,9 +33,9 @@ MARKERS = [
 ]  # Extend as needed
 
 
-def default_cost_function_formatting(title:str):
-    plt.xlabel("Iteration", fontsize=14)
-    plt.ylabel("Cost Value", fontsize=14)
+def default_cost_function_formatting(title:str, ylabel:str = "Cost Value", xlabel:str = "Iteration"):
+    plt.xlabel(xlabel, fontsize=14)
+    plt.ylabel(ylabel, fontsize=14)
     plt.title(title, fontsize=16, wrap=True)
     plt.grid(color="lightgray", linestyle="--", linewidth=0.5)
     plt.legend(fontsize=12)
@@ -49,6 +49,8 @@ def plot_cost_function(
     labels: list[str] = None,
     comparison_yline: int | None = None,
     comparison_label: str | None = None,
+    ylabel: str = "Cost Value",
+    xlabel: str = "Iteration",
 ):
     """Plot the cost function values over training iterations.
 
@@ -83,7 +85,7 @@ def plot_cost_function(
         label = comparison_label if comparison_label else "Comparison Point"
         plt.axhline(y=comparison_yline, color="red", linestyle="--", label=label)
 
-    default_cost_function_formatting(title=title)
+    default_cost_function_formatting(title=title, ylabel=ylabel, xlabel=xlabel)
     
     
 def plot_bars_with_error(
@@ -749,3 +751,89 @@ def plot_mean_std_vs_x(
     figure.tight_layout()
     plt.show()
     return figure
+
+from mGST.analysis import generate_weighted_fitted_values, generate_fitted_values
+
+def plot_mve_multiple_seq_lengths_with_error_bars(mve_dict: dict[int, list[tuple]], shots_list: jnp.ndarray, title: str | None = None):
+    """Plot the MVE against number of shots for different sequence lengths, with error bars and weighted fit."""
+    parameters_dict = {}
+    handles, labels = [], []
+
+    fig, ax = plt.subplots(figsize=(10, 7), dpi=200)
+    colours = plt.cm.viridis(np.linspace(0, 1, len(mve_dict.keys())))
+
+    for seq_length, colour in zip(mve_dict.keys(), colours):
+        mve_vs_shots = mve_dict[seq_length] # list of tuples (avg, std)
+
+        y_fit, slope, intercept, slope_std, *_ = generate_weighted_fitted_values(
+            x=shots_list, y_avg_std=mve_vs_shots, base=10
+        )
+
+        parameters_dict[seq_length] = (slope, intercept, slope_std)
+
+        mve_avg = jnp.array([val for val, _ in mve_vs_shots])
+        mve_std = jnp.array([std for _, std in mve_vs_shots])
+
+        error_bar = ax.errorbar(
+            shots_list, mve_avg, yerr=mve_std,
+            fmt='o', markersize=8, capsize=4, linewidth=1.5,
+            color=colour
+        )
+        line, = ax.loglog(shots_list, y_fit, '--', linewidth=2, color=colour)
+
+        handles += [error_bar, line]
+        labels += [
+            f'seq_len={seq_length} (data ± std)',
+            f'seq_len={seq_length} (weighted fit, slope={slope:.3f}±{slope_std:.3f})',
+        ]
+
+    
+    ax.set_xlabel('Number of Shots', fontsize=14)
+    ax.set_ylabel('Mean Variation Error', fontsize=14)
+    ax.set_title(title, fontsize=14)
+    ax.grid(True, which='both', alpha=0.3)
+    ax.legend(handles, labels, fontsize=10, loc='best')
+    ax.set_xlim(shots_list[0] * 0.5, shots_list[-1] * 2)  # <-- add this
+
+    plt.tight_layout()
+    plt.show()
+
+    return fig, parameters_dict
+
+def plot_mve_multiple_seq_lengths(mve_dict:dict[int, list[tuple]], shots_list:jnp.ndarray, title:str|None=None):
+    """Plot the MVE against number of shots for different number of sequences."""
+    parameters_dict = {}
+
+    fig, ax = plt.subplots(figsize=(10, 7), dpi=200)
+    # Color palette for different sequence lengths
+    colours = plt.cm.viridis(np.linspace(0, 1, len(mve_dict.keys())))
+    
+    for seq_length, colour in zip(mve_dict.keys(), colours):
+        
+        mve_vs_shots = mve_dict[seq_length]
+        if isinstance(mve_vs_shots[0], tuple):
+            # we are taking only the avg out of a tuple (avg, std)
+            mve_vs_shots = [result[0] for result in mve_vs_shots]
+        mve_vs_shots = jnp.array(mve_vs_shots)
+        
+        y_fit, slope, intercept = generate_fitted_values(x=shots_list, y=mve_vs_shots, base=10)
+        
+        parameters_dict[seq_length] = (slope, intercept)
+        
+        
+        # Plot data and fit for this sequence length
+        ax.loglog(shots_list, mve_vs_shots, 'o', linewidth=2, markersize=8,
+                 color=colour, label=f'seq_len={seq_length} (data)')
+        ax.loglog(shots_list, y_fit, '--', linewidth=2, color=colour,
+                 label=f'seq_len={seq_length} (fit, slope={slope:.3f})')
+        
+    ax.set_xlabel('Number of Shots', fontsize=14)
+    ax.set_ylabel('Mean Variation Error', fontsize=14)
+    ax.set_title(title, fontsize=14)
+    ax.grid(True, which='both', alpha=0.3)
+    ax.legend(fontsize=10, loc='best')
+
+    plt.tight_layout()
+    plt.show()
+    
+    return fig, parameters_dict
