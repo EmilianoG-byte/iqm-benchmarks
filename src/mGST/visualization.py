@@ -2,6 +2,8 @@
 Utility functions for visualization purposes.
 """
 
+from collections.abc import Sequence
+
 import matplotlib.pyplot as plt
 import jax.numpy as jnp
 import numpy as np
@@ -61,7 +63,7 @@ def plot_cost_function(
     plt.figure(figsize=(10, 6), dpi=250)
     plot_function = plt.semilogy if use_semilogy else plt.plot
 
-    if not isinstance(cost_array[0], list):
+    if not isinstance(cost_array[0], (Sequence, jnp.ndarray, np.ndarray)):
         labels = [labels] if labels else ["Cost"]
         cost_array = [cost_array]
         

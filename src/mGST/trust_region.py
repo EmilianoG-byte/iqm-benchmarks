@@ -577,7 +577,8 @@ def run_riemannian_optimization(
     relative_precision: float|None = 1e-5,
     global_gradients_norm_init: dict[str, float] | None = None,
     global_gradient_norm_tol: float = 1e-6,
-    verbose:bool=True
+    verbose:bool=True,
+    compute_least_squares:bool=False,
     )-> tuple[dict[str, jnp.ndarray], list[float]]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -601,6 +602,7 @@ def run_riemannian_optimization(
         global_gradients_norm_init: A dictionary containing the initial gradient norms for each operator type to be used in the stopping criteria based on gradient norms. The keys should be "kraus", "povm", and "state". If None, the initial gradient norms will be computed from the initial points within each optimization step.
         global_gradient_norm_tol: The tolerance for the gradient norm stopping criterion. If the norm of the gradient falls below this value, the optimization will stop.
         verbose: Whether to print information during the optimization
+        compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
         
     Returns:
         A tuple containing:
@@ -611,6 +613,9 @@ def run_riemannian_optimization(
     optimization_schedule = validate_optimization_schedule(optimization_schedule=optimization_schedule, num_iterations=num_iterations)
     
     cost_fn_history = []
+    if compute_least_squares:
+        print("⚠️ Computing least squares values during optimization. This may add additional computational overhead. ⚠️")
+        cost_fn_least_squares = []
     kraus_tensor_k = kraus_tensor_init
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
@@ -694,6 +699,16 @@ def run_riemannian_optimization(
             state_psd_k, cost_values_state, gradient_norm_k_state = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state
             )
+            # only compute the least squares at the end.
+            if compute_least_squares:
+                cost_fn_kwargs_least_squares = cost_fn_kwargs.copy()
+                cost_fn_kwargs_least_squares["use_log_likelihood"] = False  # Ensure we compute least squares, not log-likelihood
+                cost_fn_kwargs_least_squares.pop("num_shots", None)  # Remove num_shots if present
+                least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
+                cost_fn_least_squares.append(least_squares_value)
+                print(f"👾 Least squares value at iteration {idx + 1}: {least_squares_value:.6e} 👾")
+            
+            
             # Saved the final cost value from this iteration for convergence check
             cost_fn_current_k = cost_values_state[-1]
             cost_fn_history.extend(cost_values_state)
@@ -729,6 +744,8 @@ def run_riemannian_optimization(
         "povm": povm_psd_k,
         "state": state_psd_k,
     }
+    if compute_least_squares:
+        return optimized_operators, {"cost_fn_history": cost_fn_history, "cost_fn_least_squares": cost_fn_least_squares}
     return optimized_operators, cost_fn_history
 
 

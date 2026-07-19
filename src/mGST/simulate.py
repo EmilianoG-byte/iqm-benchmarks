@@ -321,8 +321,7 @@ def check_operators_dictionaries(*dicts)-> None:
         if set(dict.keys()) != EXPECTED_KEYS:
             raise ValueError(f"Dictionary keys {dict.keys()} do not match expected keys {EXPECTED_KEYS}.")
 
-
-def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, optimization_verbose:bool=True) -> dict[str, Any]:
+def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, optimization_verbose:bool=True, compute_least_squares:bool=False) -> dict[str, Any]:
     """
     Run the optimization workflow for the Riemannian optimization of the GST operators.
     
@@ -335,6 +334,9 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         use_exact_probabilities: Whether to use exact probabilities or sampled probabilities for the cost function optimization. If True, exact probabilities are used (infinite shots); if False, sampled probabilities are used.
         optimization_options: Dictionary containing optimization options. If None, default options are used.
         use_log_likelihood: Whether to use log-likelihood or least-squares for the cost function optimization. If True, log-likelihood is used; if False, least-squares is used.
+        warmup_run: Whether to perform a warmup run of the cost function before the optimization. This can help with JIT compilation and caching.
+        optimization_verbose: Whether to print information during the optimization.
+        compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
 
     Returns:
         A dictionary containing the optimized operators, gauged superoperators, target model, cost function history, probability matrices, times for optimization and gauging, and indices dictionary.
@@ -393,7 +395,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
     
     # start timer
     start_time = time.time()
-    
+        
     # return these ones
     optimized_operators, cost_fn_history = run_riemannian_optimization(
         *init_operators.values(),
@@ -406,6 +408,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         relative_precision=relative_precision,
         global_gradient_norm_tol=global_gradient_norm_tol,
         verbose=optimization_verbose,
+        compute_least_squares=compute_least_squares,
     )
     
     time_after_opt = time.time()
