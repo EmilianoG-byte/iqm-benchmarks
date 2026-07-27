@@ -578,8 +578,8 @@ def run_riemannian_optimization(
     global_gradients_norm_init: dict[str, float] | None = None,
     global_gradient_norm_tol: float = 1e-6,
     verbose:bool=True,
-    compute_least_squares:bool=False,
-    )-> tuple[dict[str, jnp.ndarray], list[float]]:
+    compute_least_squares:bool| int = False,
+    )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
     
@@ -603,11 +603,13 @@ def run_riemannian_optimization(
         global_gradient_norm_tol: The tolerance for the gradient norm stopping criterion. If the norm of the gradient falls below this value, the optimization will stop.
         verbose: Whether to print information during the optimization
         compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
+            If this is any integer, we assume that we want to compute after every operator.
         
     Returns:
         A tuple containing:
         - A dictionary with the optimized operators: {"kraus": kraus_tensor, "povm": povm_psd, "state": state_psd}.
         - A list of the cost function values at each optimization step.
+        - The reason for convergence (if any).
     """
     # Validate optimization options
     optimization_schedule = validate_optimization_schedule(optimization_schedule=optimization_schedule, num_iterations=num_iterations)
@@ -616,6 +618,14 @@ def run_riemannian_optimization(
     if compute_least_squares:
         print("⚠️ Computing least squares values during optimization. This may add additional computational overhead. ⚠️")
         cost_fn_least_squares = []
+        cost_fn_kwargs_least_squares = cost_fn_kwargs.copy()
+        cost_fn_kwargs_least_squares["use_log_likelihood"] = False  # Ensure we compute least squares, not log-likelihood
+        cost_fn_kwargs_least_squares.pop("num_shots", None)  # Remove num_shots if present
+        
+        compute_ls_every_step = False
+        if isinstance(compute_least_squares, int):
+            compute_ls_every_step = True
+        
     kraus_tensor_k = kraus_tensor_init
     povm_psd_k = povm_psd_init
     state_psd_k = state_psd_init
@@ -661,6 +671,13 @@ def run_riemannian_optimization(
             povm_psd_k, cost_values_povm, gradient_norm_k_povm = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm
             )
+            
+            # only compute the least squares at the end.
+            if compute_least_squares and compute_ls_every_step:
+                least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
+                cost_fn_least_squares.append(least_squares_value)
+                print(f"👾 Least squares value after POVM: {least_squares_value:.6e} 👾")
+            
             # Save the initial cost value from this iteration for convergence check
             cost_fn_init_k = cost_values_povm[0]
             cost_fn_current_k = cost_values_povm[-1]
@@ -681,6 +698,13 @@ def run_riemannian_optimization(
             kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus = _optimize_single_operator(
                 kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus
             )
+            
+            # only compute the least squares at the end.
+            if compute_least_squares and compute_ls_every_step:
+                least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
+                cost_fn_least_squares.append(least_squares_value)
+                print(f"👾 Least squares value after Kraus: {least_squares_value:.6e} 👾")
+            
             cost_fn_current_k = cost_values_kraus[-1]
             cost_fn_history.extend(cost_values_kraus)
             # Check cost fn convergence
@@ -701,12 +725,9 @@ def run_riemannian_optimization(
             )
             # only compute the least squares at the end.
             if compute_least_squares:
-                cost_fn_kwargs_least_squares = cost_fn_kwargs.copy()
-                cost_fn_kwargs_least_squares["use_log_likelihood"] = False  # Ensure we compute least squares, not log-likelihood
-                cost_fn_kwargs_least_squares.pop("num_shots", None)  # Remove num_shots if present
                 least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
                 cost_fn_least_squares.append(least_squares_value)
-                print(f"👾 Least squares value at iteration {idx + 1}: {least_squares_value:.6e} 👾")
+                print(f"👾 Least squares value after State at iteration {idx + 1}: {least_squares_value:.6e} 👾")
             
             
             # Saved the final cost value from this iteration for convergence check
@@ -744,9 +765,10 @@ def run_riemannian_optimization(
         "povm": povm_psd_k,
         "state": state_psd_k,
     }
+    
     if compute_least_squares:
-        return optimized_operators, {"cost_fn_history": cost_fn_history, "cost_fn_least_squares": cost_fn_least_squares}
-    return optimized_operators, cost_fn_history
+        return optimized_operators, {"main": cost_fn_history, "least_squares": cost_fn_least_squares}, convergence_reason
+    return optimized_operators, cost_fn_history, convergence_reason
 
 
 def convergence_criteria_from_gradients_norms(*gradients_norms, threshold:float = 1e-6)-> tuple[bool, str]:

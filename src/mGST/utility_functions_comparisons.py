@@ -22,7 +22,7 @@ from mGST.typing import Tensor, Matrix, Scalar
 from mGST.riemannian import project_onto_tangent_space, canonical_gradient, riemannian_metric
 
 from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
-from mGST.additional_fns import random_gs, perturbed_target_init
+from mGST.additional_fns import random_gs
 
 from iqm.qiskit_iqm import IQMCircuit as QuantumCircuit
 from qiskit.circuit.library import CZGate, RGate
@@ -38,6 +38,30 @@ from typing import Sequence
 import warnings
 
 backend = "iqmfakeapollo"
+
+def get_initial_gate_set_for_optimization(target_superops:dict[str, jnp.ndarray], kraus_rank:int, povm_rank:int, state_rank:int, seed:int=42) -> dict[str, jnp.ndarray]:
+    """Get the initial gate set for optimization, given the target superoperators and the desired ranks for Kraus, POVM, and state.
+    
+    Args:
+        target_superops: A dictionary containing the target superoperators for Kraus, POVM, and state.
+        kraus_rank: Desired rank of the Kraus operators in the compressed representation.
+        povm_rank: Desired rank of the POVM operators in the compressed representation.
+        state_rank: Desired rank of the state operator in the compressed representation.
+        seed: Seed for random perturbation. Defaults to 42.
+    Returns:
+        A dictionary containing the initial gate set for optimization, with keys "kraus", "povm", and "state".
+    """
+    kraus_tensor_init_dict = get_compressed_perturbed_kraus_from_superop(superop=target_superops["kraus"], rank=kraus_rank, seed=seed)
+    kraus_tensor_init = kraus_tensor_init_dict["kraus_tensor"]
+
+    povm_psd_init, state_psd_init = get_compressed_perturbed_rep_from_mgst(target_superops["povm"], target_superops["state"], rank_povm=povm_rank, rank_state=state_rank)
+    
+    return {
+        "kraus": kraus_tensor_init,
+        "povm": povm_psd_init,
+        "state": state_psd_init,
+    }
+
 
 def get_mgst_parameters_from_dataset(dataset, qubit_layout, rK):
     y = dataset_counts_to_mgst_format(dataset, qubit_layout)
@@ -206,8 +230,17 @@ def target_kraus_tensor_from_configuration(configuration:GSTConfiguration, backe
     gate_labels = benchmark.gate_labels
     return qiskit_gate_to_operator(gate_set), gate_labels
 
-def all_operators_from_configuration(configuration:GSTConfiguration, backend:str = None)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, list[str]]:
-    """Get the target Kraus, POVM, and State operators from a given configuration."""
+def all_operators_from_configuration(configuration:GSTConfiguration, backend:str = None)->tuple[dict[str, jnp.ndarray], list[str]]:
+    """Get the target Kraus, POVM, and State operators from a given configuration.
+    
+    Args:
+        configuration: GSTConfiguration object containing the gate set and other parameters.
+        backend: Backend to be used for the benchmark. If None, a warning is issued and 'iqmfakeapollo' is used as default.
+    Returns:
+        A tuple containing:
+        * A dictionary with the target Kraus, POVM, and State operators.
+        * A list of gate labels.
+    """
     if backend is None:
         warnings.warn("No backend specified. Using 'iqmfakeapollo' as default backend.")
     kraus_tensor_target, gate_labels = target_kraus_tensor_from_configuration(configuration, backend)
@@ -216,7 +249,7 @@ def all_operators_from_configuration(configuration:GSTConfiguration, backend:str
     dim = benchmark.pdim
     povm_target = generate_target_povm(dim)
     state_target = generate_target_state(dim)
-    return {"kraus": kraus_tensor_target, "povm": povm_target, "state": state_target, "gate_labels": gate_labels}
+    return {"kraus": kraus_tensor_target, "povm": povm_target, "state": state_target}, gate_labels
 
 def create_4q_gst_config(kraus_rank:int, num_gate_sequences:int, shots:int, max_gates_per_batch:int | None = None, max_circuits_per_batch:int | None = None, seq_len_list:list | None = None) -> GSTConfiguration:
     """Create the configuration to run a 4 qubit Gate set tomography protocol.
@@ -388,13 +421,30 @@ def state_psd_to_mgst(state_psd:jnp.ndarray)->jnp.ndarray:
 def kraus_tensor_to_mgst(kraus_tensor:jnp.ndarray)->jnp.ndarray:
     """Convert the Kraus operators from their PSD representation to the MGST representation (superoperator).
         
+    *This now works with batached dimension.*
+        
     Args:
-        kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
+        kraus_tensor: Kraus tensor of dimensions (..., kraus_rank, dim_out, dim_in)
     Returns:
-        kraus_mgst: Kraus operators from MGST. Dimensions: (num_gates, dim_out x dim_out*, dim_in x dim_in*)
+        kraus_mgst: Kraus superoperator of dimensions (..., dim_out x dim_out*, dim_in x dim_in*)
     """
-    num_gates, kraus_rank, dim_out, dim_in = kraus_tensor.shape
-    return jnp.einsum("ijkl,ijnm -> iknlm", kraus_tensor, kraus_tensor.conj()).reshape((num_gates, dim_in**2, dim_in**2))
+    if kraus_tensor.ndim not in (3, 4):
+        raise ValueError(
+            "kraus_tensor must have shape (kraus_rank, dim_out, dim_in) "
+            "or (num_gates, kraus_rank, dim_out, dim_in). "
+            f"Got shape {kraus_tensor.shape}."
+        )
+    
+    *batch_shape, kraus_rank, dim_out, dim_in = kraus_tensor.shape
+    
+    # Sum over Kraus index; keep optional batch dims (e.g., num_gates).
+    superop_tensor = jnp.einsum(
+        "...jkl,...jnm->...knlm",
+        kraus_tensor,
+        kraus_tensor.conj(),
+    )
+
+    return superop_tensor.reshape(*batch_shape, dim_out**2, dim_in**2)
 
 def get_mgst_tensors_from_psd_representation(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray)->dict[str, np.ndarray]:
     """Get the MGST representation of the operators from their PSD representation.

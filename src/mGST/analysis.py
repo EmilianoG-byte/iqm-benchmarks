@@ -7,6 +7,7 @@ from qiskit.quantum_info import SuperOp
 from qiskit.quantum_info.operators.measures import diamond_norm
 from mGST.additional_fns import MVE
 from mGST.reporting.reporting import MVE_data
+from mGST.typing import Tensor
 from typing import Any
 
 def compute_weighted_linear_fit_of_exponential_data(
@@ -86,18 +87,46 @@ def compute_mean_and_std(array:jnp.ndarray)->tuple[float, float]:
     std = jnp.std(array)
     return mean, std
 
-def diamond_norm_distances(superop1, superop2):
+def diamond_norm_distances(superop1:Tensor, superop2:Tensor)->list[float]:
     """
     Compute the diamond norm distance between two superoperators.
     """
+    # convert both to numpy arrays if they are not already
+    superop1 = np.array(superop1)
+    superop2 = np.array(superop2)
+    
     assert superop1.ndim == superop2.ndim == 3, "Superoperators must have the same number of dimensions."
     assert superop1.shape == superop2.shape, "Superoperators must have the same shape."
     num_gates = superop1.shape[0]
     return [diamond_norm(SuperOp(superop1[i]) - SuperOp(superop2[i])) / 2 for i in range(num_gates)]
 
-def MVE_from_superops(superops_gauged:dict[str, jnp.ndarray], indices_dict:dict[str,Any], prob_matrix_dict:dict[str, jnp.ndarray]):
+def compute_diamond_distances_from_list_of_superops(true_superops:dict[str, Tensor], gst_superops:list[dict[str, Tensor]], operator_type:str="kraus", report:str="mean")->list[float]:
+    """Compute the diamond norm distances for each list of superoperators against the true superoperators."""
+    if operator_type != "kraus":
+        raise NotImplementedError("Currently only 'kraus' operator type is supported for diamond norm distance computation.")
+    
+    if report == "mean":
+        function = jnp.mean
+    elif report == "max":
+        function = jnp.max
+    elif report == "min":
+        function = jnp.min
+    else:
+        raise ValueError("Report must be either 'mean', 'min' or 'max'.")    
+
+    true_kraus = true_superops["kraus"]
+    diamond_values_per_superop = []
+    for idx, gst_dict in enumerate(gst_superops):
+        print(f"💎 Computing diamond norm for superoperator {idx} 💎")
+        gst_kraus = gst_dict["kraus"]
+        distances = jnp.array(diamond_norm_distances(true_kraus, gst_kraus))
+        value = function(distances)
+        diamond_values_per_superop.append((value, jnp.std(distances)))
+    return diamond_values_per_superop
+
+def variational_error_from_superops(superops_gauged:dict[str, jnp.ndarray], indices_dict:dict[str,Any], prob_matrix_dict:dict[str, jnp.ndarray]):
     """
-    Compute the Mean Variational Error (MVE) from superoperators.
+    Compute the Variational Error from superoperators for both the mean (M) and worse-case (W) errors.
     """
     kraus = superops_gauged["kraus"]
     povm = superops_gauged["povm"]
@@ -106,18 +135,17 @@ def MVE_from_superops(superops_gauged:dict[str, jnp.ndarray], indices_dict:dict[
     probability_matrix = prob_matrix_dict["sampled"]
     return MVE_data(X=kraus, E=povm, rho=state, J=indices_list, y=probability_matrix)[0]
 
-def MVE_from_true_and_gst_superops(true_superops:dict[str, jnp.ndarray], gst_superops:dict[str, jnp.ndarray], length:int = 14, samples:int|str=1000)->tuple[float, float]:
+def variational_error_from_true_and_gst_superops(true_superops:dict[str, jnp.ndarray], gst_superops:dict[str, jnp.ndarray], length:int = 14, samples:int|str=1000)->tuple[float, float]:
     """
-    Compute the Mean Variational Error (MVE) from target and GST superoperators.
+    Compute the Variational Error (MVE) from target and GST superoperators for both the mean (MVE) and worst-case (WVE) errors.
 
-    
     Args:
         true_superops: A dictionary containing the true superoperators with keys "kraus", "povm", and "state".
         gst_superops: A dictionary containing the GST superoperators with keys "kraus", "povm", and "state".
         length: The length of the sequences to consider for MVE computation. Default is 14.
         samples: The number of samples to use for MVE computation. Can be an integer or "all" to use all samples. Default is 1000.
     Returns:
-        A tuple containing the lower bound of the mean value error and the maximum distance.
+        A tuple containing the mean variational error (MVE) and the worst-case variational error (WVE).
     """
     # convert the superoperators to numpy since these need to be passed to numba functions
     
@@ -144,44 +172,50 @@ def MVE_from_true_and_gst_superops(true_superops:dict[str, jnp.ndarray], gst_sup
                length=length,
                samples=samples)
     
-def average_and_std_mve(true_superops:dict[str, jnp.ndarray], gst_superops:dict[str, jnp.ndarray], length:int = 14, samples:int|str=1000, num_runs:int=10)->tuple[float, float]:
+def compute_average_and_std_variational_error(true_superops:dict[str, jnp.ndarray], gst_superops:dict[str, jnp.ndarray], length:int = 14, samples:int|str=1000, num_runs:int=10, error_type:str="MVE")->tuple[float, float]:
     """
-    Compute the average and standard deviation of the Mean Variational Error (MVE) over multiple runs.
+    Compute the average and standard deviation of the Variational Error (VE) for the Mean/Worst case (MVE/WVE) over multiple runs.
     
     Args:
         true_superops: A dictionary containing the true superoperators with keys "kraus", "povm", and "state".
         gst_superops: A dictionary containing the GST superoperators with keys "kraus", "povm", and "state".
-        length: The length of the sequences to consider for MVE computation. Default is 14.
-        samples: The number of samples to use for MVE computation. Can be an integer or "all" to use all samples. Default is 1000.
+        length: The length of the sequences to consider for VE computation. Default is 14.
+        samples: The number of samples to use for VE computation. Can be an integer or "all" to use all samples. Default is 1000.
         num_runs: The number of runs to average over. Default is 10.
+        error_type: type of error to compute on each run. Can be either mean (MVE) or worst-case error (WVE).
         
     Returns:
-        A tuple containing the average and standard deviation of the mean value error over the specified number of runs.
+        A tuple containing the average and standard deviation of the chosen type Variational Errors (VE) over the specified number of runs.
     """
-    mve_values = []
+    ve_values = []
     for _ in range(num_runs):
-        mve, _ = MVE_from_true_and_gst_superops(true_superops=true_superops, gst_superops=gst_superops, length=length, samples=samples)
-        mve_values.append(mve)
+        mve, wve = variational_error_from_true_and_gst_superops(true_superops=true_superops, gst_superops=gst_superops, length=length, samples=samples) # mean variational error and worst variational error
+        if error_type == "MVE":
+            ve_values.append(mve)
+        elif error_type == "WVE":
+            ve_values.append(wve)
     
-    return jnp.mean(jnp.array(mve_values)), jnp.std(jnp.array(mve_values))
+    return jnp.mean(jnp.array(ve_values)), jnp.std(jnp.array(ve_values))
     
-def mve_avg_and_std_from_list_of_superops(num_runs:int, true_superops:dict[str, jnp.ndarray], gst_superops:list[dict[str, jnp.ndarray]], length:int=14, samples:int|str=1000)->list[tuple[float, float]]:
+def variational_error_avg_and_std_from_list_of_superops(num_runs:int, true_superops:dict[str, jnp.ndarray], gst_superops:list[dict[str, jnp.ndarray]], length:int=14, samples:int|str=1000, error_type:str="MVE")->list[tuple[float, float]]:
     """
-    Compute the Mean Variational Error (MVE) for a list of GST superoperators against the true superoperators.
+    Compute the Variational Error (VE) for a list of GST superoperators against the true superoperators.
     
     Args:
+        num_runs: The number of runs to average over for each GST superoperator. Default is 10.
         true_superops: A dictionary containing the true superoperators with keys "kraus", "povm", and "state".
-        length: The length of the sequences to consider for MVE computation. Default is 14.
-        samples: The number of samples to use for MVE computation. Can be an integer or "all" to use all samples. Default is 1000.
         gst_superops: A list of dictionaries, each containing GST superoperators with keys "kraus", "povm", and "state".
+        length: The length of the sequences to consider for VE computation. Default is 14.
+        samples: Number of random gate sequences over which the variation error is computed. Can be an integer or "all" to use all samples. Default is 1000.
+        error_type: type of error to compute on each run. Can be either mean (MVE) or worst-case error (WVE).
         
     Returns:
-        A list of floats containing the lower bound of the mean value error for each GST superoperator in the order they were provided.
+        A list of tuples containing the average and standard deviation of the chosen type Variational Errors (VE) for each GST superoperator in the order they were provided.
     """
     mve_results = []
     for idx, superop in enumerate(gst_superops):
         print(f"Processing superop no.: {idx}")
-        mve_results.append(average_and_std_mve(true_superops=true_superops, gst_superops=superop, length=length, samples=samples, num_runs=num_runs))
+        mve_results.append(compute_average_and_std_variational_error(true_superops=true_superops, gst_superops=superop, length=length, samples=samples, num_runs=num_runs, error_type=error_type))
     return mve_results
 
 def compute_linear_fit_of_exponential_data(x:jnp.ndarray, y:jnp.ndarray, base:float=10.0):

@@ -678,14 +678,58 @@ def plot_weight_histogram(histogram: dict[int, float], ascending: bool = True, t
     plt.show()
     return figure
 
+def plot_many_mean_std_vs_x(
+    data: dict[str, dict[str, dict[str, float]]] | Sequence[dict[str, dict[str, float]]],
+    title: str = None,
+    xlabel: str = "Number of sequences",
+    ylabel: str = "Distance",
+    use_log_scale: bool | str = False,
+    dpi: int = 250,
+) -> plt.Figure:
+    
+    unlabeled_curves = False
+    if isinstance(data, Sequence):
+        # Convert list of dicts to with None as keys to not label the curves
+        data = {f"Run {i+1}": curve_data for i, curve_data in enumerate(data)}
+        unlabeled_curves = True
+    
+    figure, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
+    for i, (curve_label, curve_data) in enumerate(data.items()):
+        
+        curve_label = None if unlabeled_curves else curve_label
+        
+        plot_mean_std_vs_x(
+            curve_data,
+            ax=ax,
+            show=False,
+            curve_label=curve_label,
+            color=COLOUR_PALETTE[i % len(COLOUR_PALETTE)],
+            use_log_scale=use_log_scale,
+            dpi=dpi,
+        )
+    ax.set_title(title, fontsize=14)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=12)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=12)
+    ax.legend(fontsize=10)
+    figure.tight_layout()
+    plt.show()
+    return figure
+
 def plot_mean_std_vs_x(
     data: dict[str, dict[str, float]],
     title: str = "Mean and Std vs Number of Sequences",
     xlabel: str = "Number of sequences",
     ylabel: str = "Distance",
-    use_log_scale: bool = False,
+    use_log_scale: bool | str = False,
     dpi: int = 250,
     comparison_value: tuple[str, float] = None,
+    value_type: str = "mean",
+    show:bool = True,
+    ax: plt.Axes | None = None,
+    curve_label: str | None = "mean",
+    color: str | None = None,
 ) -> plt.Figure:
     """
     Plot a dictionary of the form:
@@ -696,42 +740,30 @@ def plot_mean_std_vs_x(
     }
 
     Uses the project's COLOUR_PALETTE and MARKERS.
+    
+    label = None is a completely valid option, in which case the curve will not be labeled in the legend.
     """
     if not data:
         raise ValueError("Input data is empty.")
+    
+    if ax is None:
+        figure, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
+    else:
+        figure = ax.get_figure()
 
-    # Sort numerically by x key even if keys are strings
     x_labels = sorted(data.keys(), key=lambda k: float(k))
     x_vals = np.array([float(k) for k in x_labels], dtype=float)
-
-    # Convert possible JAX scalars to Python floats
-    means = np.array([float(data[k]["mean"]) for k in x_labels], dtype=float)
+    means = np.array([float(data[k][value_type]) for k in x_labels], dtype=float)
     stds = np.array([float(data[k]["std"]) for k in x_labels], dtype=float)
 
-    figure, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
-
-    color = COLOUR_PALETTE[0]
+    std_label = f"{curve_label} (±1 std)" if curve_label else None
+    curve_color = color if color is not None else COLOUR_PALETTE[0]
     marker = MARKERS[0]
 
-    ax.plot(
-        x_vals,
-        means,
-        color=color,
-        marker=marker,
-        linewidth=2,
-        markersize=7,
-        markeredgecolor="black",
-        label="Mean distance",
-    )
-
-    ax.fill_between(
-        x_vals,
-        means - stds,
-        means + stds,
-        color=color,
-        alpha=0.2,
-        label="±1 std",
-    )
+    ax.plot(x_vals, means, color=curve_color, marker=marker, linewidth=2, markersize=7,
+            markeredgecolor="black", label=curve_label)
+    ax.fill_between(x_vals, means - stds, means + stds, color=curve_color, alpha=0.2,
+                    label=std_label)
 
     ax.set_xlabel(xlabel, fontsize=12)
     ax.set_ylabel(ylabel, fontsize=12)
@@ -740,7 +772,10 @@ def plot_mean_std_vs_x(
     ax.set_xticklabels(x_labels)
 
     if use_log_scale:
-        ax.set_yscale("log")
+        if "x" in use_log_scale:
+            ax.set_xscale("log")
+        if "y" in use_log_scale:
+            ax.set_yscale("log")
 
     ax.grid(alpha=0.3, linestyle="--", linewidth=0.5)
     ax.legend(fontsize=10)
@@ -751,7 +786,8 @@ def plot_mean_std_vs_x(
         ax.legend(fontsize=10)
     
     figure.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
     return figure
 
 from mGST.analysis import generate_weighted_fitted_values, generate_fitted_values

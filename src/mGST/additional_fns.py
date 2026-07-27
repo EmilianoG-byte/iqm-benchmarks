@@ -197,12 +197,12 @@ def randU_Haar(n):
     return np.dot(Q, D)
 
 
-def randKrausSet(num_gate_sequences:int, dim:int, rank_kraus:int, a: float =1, seed:int = 42):
+def randKrausSet(num_gates:int, dim:int, rank_kraus:int, a: float =1, seed:int = 42):
     """Generates random set of Kraus operators
 
     Parameters
     ----------
-    num_gate_sequences : Number of gate sequences in the gate set
+    num_gates : Number of gates in the gate set
     dim: Dimension of the Hilbert space the Kraus operators acts on. This is dim = 2**num_qubits
     rank_kraus: Number of Kraus operators per gate ("Kraus rank")
     a : Parameter to control the norm of the hermitian generator and thereby
@@ -219,8 +219,8 @@ def randKrausSet(num_gate_sequences:int, dim:int, rank_kraus:int, a: float =1, s
         by taking the first pdim columns of a random unitary of size rK*pdim.
         The random unitary is generated from a random hermitian matrix.
     """
-    kraus_tensor_perturbed = np.zeros((num_gate_sequences, rank_kraus, dim, dim)).astype(np.complex128)
-    for i in range(num_gate_sequences):
+    kraus_tensor_perturbed = np.zeros((num_gates, rank_kraus, dim, dim)).astype(np.complex128)
+    for i in range(num_gates):
         kraus_tensor_perturbed[i, :, :, :] += randU(dim * rank_kraus, a, seed=seed)[:, :dim].reshape(rank_kraus, dim, dim)
     return kraus_tensor_perturbed
 
@@ -519,7 +519,7 @@ def MVE(X_true, E_true, rho_true, X, E, rho, d, length, n_povm, samples=10000):
     Returns
     -------
     MVE : float
-        Mean varaition error
+        Mean variation error
 
     Notes:
         Sequences are drawn without replacement from initally d**l possibilities.

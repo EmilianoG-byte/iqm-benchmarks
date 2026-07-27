@@ -3,7 +3,7 @@ import time
 
 from mGST import additional_fns
 from mGST.low_level_jit import contract_mps_all_povm
-from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation, generate_target_state, generate_target_povm
+from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation, generate_target_state, generate_target_povm, get_compressed_rep_from_mgst_output
 
 from mGST.typing import Tensor, Matrix, TrustRegionOptions, Vector
 import jax.numpy as jnp
@@ -156,26 +156,26 @@ def get_perturbed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, see
     """
     num_povm, dim, dim = povm_tensor.shape
     kraus_perturbed = additional_fns.randKrausSet(1, dim, rank_kraus=rank, a=epsilon, seed=seed)
-    kraus_perturbed_superop = kraus_tensor_to_mgst(kraus_perturbed) # num_gates, dim_out^2, dim_in^2*
+    kraus_perturbed_superop = kraus_tensor_to_mgst(kraus_perturbed) # 1, dim_out^2, dim_in^2*
     # squeeze the num_gates out
     kraus_perturbed_superop = kraus_perturbed_superop.squeeze(axis=0) # dim_out^2, dim_in^2*
-    return apply_single_superop_to_povm_tensor(povm_tensor, kraus_perturbed_superop)
+    return apply_superops_to_povm_tensor(povm_tensor, kraus_perturbed_superop)
 
-def apply_single_superop_to_povm_tensor(povm_tensor: Tensor, superop: Matrix | Tensor) -> Tensor:
+def apply_superops_to_povm_tensor(povm_tensor: Tensor, superop: Tensor) -> Tensor:
     """Apply a single superoperator to a POVM tensor.
+
+    This now works with superop with batched dimensions.
 
     Args:
         povm_tensor: The original POVM tensor of shape (num_povm, dim_out, dim_out*).
-        superop: The superoperator to apply of shape (dim_out*dim_out, dim_out*dim_out).
+        superop: The superoperator to apply of shape (..., dim_out x dim_out*, dim_in x dim_in*).
 
     Returns:
         The transformed POVM tensor of shape (num_povm, dim_out, dim_out*).
     """
-    if superop.ndim == 3:
-        superop = superop.squeeze(axis=0) # dim^2, dim^2
     num_povm, dim, _ = povm_tensor.shape
     povm_vect = povm_tensor.reshape((num_povm, dim * dim))  # num_povm, dim_out * dim_out
-    povm_vect = jnp.einsum('ij, jk -> ik', povm_vect, superop)  # num_povm, dim_out * dim_out
+    povm_vect = jnp.einsum('...ij, ...jk -> ...ik', povm_vect, superop)  # num_povm, dim_out * dim_out
     return povm_vect.reshape((num_povm, dim, dim))  # num_povm, dim_out, dim_out*
 
 def get_perturbed_compressed_povm_tensor(povm_tensor: Tensor, rank:int, epsilon: float, seed: int=42) -> Tensor:
@@ -203,7 +203,7 @@ def depolarizing_kraus_operators(p:float, num_qubits:int)-> Tensor:
         num_qubits: Number of qubits (1 or 2)
     
     Returns:
-        List of Kraus operators as JAX arrays
+        A kraus tensor of shape (kraus_rank, dim_out, dim_in) where dim_out = dim_in = 2^num_qubits
     """
     if num_qubits == 1:
         # Single qubit Pauli matrices
@@ -218,7 +218,7 @@ def depolarizing_kraus_operators(p:float, num_qubits:int)-> Tensor:
         K2 = jnp.sqrt(p/4) * Y
         K3 = jnp.sqrt(p/4) * Z
         
-        return [K0, K1, K2, K3]
+        return jnp.array([K0, K1, K2, K3])
     
     elif num_qubits == 2:
         # Two-qubit Pauli matrices (tensor products)
@@ -247,7 +247,7 @@ def amplitude_damping_kraus_operators(gamma: float, num_qubits:int) -> Tensor:
         num_qubits: Number of qubits (1 or 2)
     
     Returns:
-        List of Kraus operators as JAX arrays
+        A kraus tensor of shape (kraus_rank, dim_out, dim_in) where dim_out = dim_in = 2^num_qubits
     """
     if num_qubits == 1:
         # Single qubit amplitude damping
@@ -268,6 +268,103 @@ def amplitude_damping_kraus_operators(gamma: float, num_qubits:int) -> Tensor:
                 kraus_ops.append(jnp.kron(K_a, K_b))
         
         return jnp.array(kraus_ops)
+    
+def contract_noiseless_and_noisy_kraus_tensors(kraus_unitary_gates: Tensor, kraus_tensor_noisy: Tensor) -> Tensor:
+    """
+    Contract a noiseless Kraus tensor with a noisy Kraus tensor to produce a new Kraus tensor that represents the combined effect of both channels.
+    
+    Namely: Gate o Noise -> Noisy Gate
+
+    Args:
+        kraus_unitary_gates: The noiseless Kraus tensor of shape (num_gates, dim_out, dim_in) or (num_gates, 1, dim_out, dim_in).
+        kraus_tensor_noisy: The noisy Kraus tensor of shape (kraus_rank, dim_out, dim_in) or (num_gates, kraus_rank, dim_out, dim_in).
+
+    Returns:
+        A new Kraus tensor of shape (num_gates, kraus_rank, dim_out, dim_in) representing the noisy gate.
+    """
+    tensor_rank_noiseless = kraus_unitary_gates.ndim    
+    tensor_rank_noisy = kraus_tensor_noisy.ndim
+    # check they are either 3 or 4 dimensional
+    if tensor_rank_noiseless not in [3, 4]:
+        raise ValueError(f"Noiseless Kraus tensor must be 3 or 4 dimensional, but got {tensor_rank_noiseless}.")
+    if tensor_rank_noisy not in [3, 4]:
+        raise ValueError(f"Noisy Kraus tensor must be 3 or 4 dimensional, but got {tensor_rank_noisy}.")
+    
+    # prune the first kraus dimension if it's 1
+    if kraus_unitary_gates.ndim == 4:
+        # this will raise an error if the first dimension is not 1
+        kraus_unitary_gates = jnp.squeeze(kraus_unitary_gates, axis=1)
+    
+    return jnp.einsum("...kij,...jm->...kim", kraus_tensor_noisy, kraus_unitary_gates) # num_gates, kraus_rank, dim_out, dim_in
+
+def get_random_noisy_kraus_tensors_for_gate_set(num_gates:int, dim:int, rank_kraus:int, noise_strength:float, seed:int|tuple=None) -> dict[str, Tensor]:
+    """Generate 3 random Kraus tensors of the same rank
+    
+    These are meant to be used as the noisy kraus tensors to be applied to a target gate set
+    
+    Args:
+        num_gates: Number of gates in the gate set.
+        dim: Dimension of the Hilbert space the Kraus operators acts on. This is dim = 2**num_qubits
+        rank_kraus: Number of Kraus operators per gate ("Kraus rank")
+        noise_strength: Parameter to control the norm of the hermitian generator and thereby
+            the strength of the noise.
+        seed: Random seed for reproducibility.
+    Returns:
+        A dictionary containing the random Kraus tensors for the gate set.
+    """
+    if seed is None:
+        seed = 42
+    if isinstance(seed, int):
+        seed = (seed, seed+1, seed+2)
+        
+    tensor_for_kraus = additional_fns.randKrausSet(num_gates=num_gates, dim=dim, rank_kraus=rank_kraus, a=noise_strength, seed=seed[0]) # num_gates, kraus_rank, dim_out, dim_in
+    
+    tensor_for_povm = additional_fns.randKrausSet(num_gates=1, dim=dim, rank_kraus=rank_kraus, a=noise_strength, seed=seed[1]).squeeze(axis=0) # kraus_rank, dim_out, dim_out
+    
+    tensor_for_state = additional_fns.randKrausSet(num_gates=1, dim=dim, rank_kraus=rank_kraus, a=noise_strength, seed=seed[2]).squeeze(axis=0) # kraus_rank, dim_out, dim_out
+    
+    return {"kraus": tensor_for_kraus, "povm": tensor_for_povm, "state": tensor_for_state}
+
+def apply_noisy_kraus_tensors_to_target_gate_set(kraus_tensors_noisy:dict[str, Tensor], target_gate_set:dict[str, Tensor])-> dict[str, Tensor]:
+    """Apply noisy Kraus tensors to a target gate set to produce the noisy gate set.
+    
+    Args:
+        kraus_tensors_noisy: A dictionary containing the noisy Kraus tensors for the gate set.
+        target_gate_set: A dictionary containing the target gate set (kraus, povm, state).
+            The POVM and State are assumed to be in the "full representation".
+            Namely, of shapes (num_povm, dim_out*, dim_out) and (dim_in, dim_in*) respectively.
+            On the other hand, the kraus should be the PSD representation of shape (num_gates, kraus_rank, dim_out, dim_in).
+    Returns:
+        A dictionary containing the noisy gate set (kraus, povm, state) in superop/vectorized form.
+        Shapes:
+        * Kraus: (num_gates, dim_out x dim_out, dim_in x dim_in)
+        * POVM: (num_povm, dim_out x dim_out)
+        * State: (dim_in x dim_in)
+    """
+    noise_tensor_kraus = kraus_tensors_noisy["kraus"] # (num_gates, kraus_rank, dim_out, dim_in)
+    noise_tensor_povm = kraus_tensors_noisy["povm"] # (kraus_rank, dim_out*, dim_out)
+    noise_tensor_state = kraus_tensors_noisy["state"] # (kraus_rank, dim_in, dim_in*)
+    
+    noise_superop_povm = kraus_tensor_to_mgst(noise_tensor_povm) # (kraus_rank, dim_out*dim_out, dim_out*dim_out)
+    noise_superop_state = kraus_tensor_to_mgst(noise_tensor_state) # (kraus_rank, dim_in*dim_in, dim_in*dim_in)
+    
+    kraus_tensor_target = target_gate_set["kraus"] # (num_gates, 1, dim_out, dim_in)
+    povm_tensor_target = target_gate_set["povm"] # (num_povm, dim_out*, dim_out)
+    state_tensor_target = target_gate_set["state"] # (dim_in, dim_in*)
+        
+    # apply the noisy Kraus tensors to the target gate set
+    kraus_tensor_noisy = contract_noiseless_and_noisy_kraus_tensors(kraus_tensor_target, noise_tensor_kraus) # (num_gates, kraus_rank, dim_out, dim_in)
+    
+    kraus_superop_noisy = kraus_tensor_to_mgst(kraus_tensor_noisy) # (num_gates, dim_out*dim_out, dim_in*dim_in)
+    
+    povm_tensor_noisy = apply_superops_to_povm_tensor(povm_tensor_target, noise_superop_povm) # (num_povm, dim_out, dim_out)
+    num_povm = povm_tensor_noisy.shape[0]
+    povm_tensor_noisy = povm_tensor_noisy.reshape((num_povm, -1)) # (num_povm, dim_out x dim_out)
+        
+    state_matrix_noisy = apply_single_superop_to_state_matrix(state_tensor_target, noise_superop_state).reshape((-1)) # (dim_in x dim_in)
+    
+    
+    return {"kraus": kraus_superop_noisy, "povm": povm_tensor_noisy, "state": state_matrix_noisy}
     
 def get_initial_state_and_measurement(dim: int) -> tuple[Matrix, Tensor]:
     """Get the initial density matrix and POVM for a GST experiment given a physical dimension
@@ -397,7 +494,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
     start_time = time.time()
         
     # return these ones
-    optimized_operators, cost_fn_history = run_riemannian_optimization(
+    optimized_operators, cost_fn_history, convergence_reason = run_riemannian_optimization(
         *init_operators.values(),
         cost_function=cost_function_jax_mps,
         cost_fn_kwargs=cost_fn_kwargs,
@@ -431,7 +528,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         compilation_time = start_time - start_compilation_time
         times["compilation_time"] = compilation_time
     
-    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": times}
+    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": times, "convergence_reason": convergence_reason}
     
 def perform_gauge(optimized_operators:dict[jnp.ndarray], target_superops:dict[jnp.ndarray], num_gates:int):
     """
