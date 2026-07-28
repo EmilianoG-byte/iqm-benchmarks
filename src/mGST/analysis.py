@@ -187,6 +187,10 @@ def compute_average_and_std_variational_error(true_superops:dict[str, jnp.ndarra
     Returns:
         A tuple containing the average and standard deviation of the chosen type Variational Errors (VE) over the specified number of runs.
     """
+    
+    if error_type not in ["MVE", "WVE"]:
+        raise ValueError("error_type must be either 'MVE' or 'WVE'.")
+    
     ve_values = []
     for _ in range(num_runs):
         mve, wve = variational_error_from_true_and_gst_superops(true_superops=true_superops, gst_superops=gst_superops, length=length, samples=samples) # mean variational error and worst variational error
@@ -197,7 +201,7 @@ def compute_average_and_std_variational_error(true_superops:dict[str, jnp.ndarra
     
     return jnp.mean(jnp.array(ve_values)), jnp.std(jnp.array(ve_values))
     
-def variational_error_avg_and_std_from_list_of_superops(num_runs:int, true_superops:dict[str, jnp.ndarray], gst_superops:list[dict[str, jnp.ndarray]], length:int=14, samples:int|str=1000, error_type:str="MVE")->list[tuple[float, float]]:
+def variational_error_avg_and_std_from_list_of_superops(num_runs:int, true_superops:dict[str, jnp.ndarray], gst_superops:list[dict[str, jnp.ndarray]], length:int=14, samples:int|str=1000, error_type:str="MVE", verbose:bool=False)->list[tuple[float, float]]:
     """
     Compute the Variational Error (VE) for a list of GST superoperators against the true superoperators.
     
@@ -214,7 +218,8 @@ def variational_error_avg_and_std_from_list_of_superops(num_runs:int, true_super
     """
     mve_results = []
     for idx, superop in enumerate(gst_superops):
-        print(f"Processing superop no.: {idx}")
+        if verbose:
+            print(f"Processing superop no.: {idx}")
         mve_results.append(compute_average_and_std_variational_error(true_superops=true_superops, gst_superops=superop, length=length, samples=samples, num_runs=num_runs, error_type=error_type))
     return mve_results
 
@@ -236,3 +241,85 @@ def generate_fitted_values(x:jnp.ndarray, y:jnp.ndarray, base:float=10.0):
     log_y_fit = slope * log_x + intercept
     y_fit = base ** log_y_fit
     return y_fit, slope, intercept
+
+def compute_avg_and_std_along_keys(list_of_errors:list[dict[str, dict[str, float]]]):
+    """
+    Compute the average and standard deviation of errors along the keys of a list of dictionaries.
+    
+    Args:
+        list_of_errors: A list of dictionaries containing error metrics for different keys.
+    Returns:
+        A dictionary containing the mean and standard deviation of errors for each key.
+    """
+    keys = list_of_errors[0].keys()
+    avg_std_dict = {}
+    for key in keys:
+        errors_at_key = jnp.array([error[key]["mean"] for error in list_of_errors])
+        mean = jnp.mean(errors_at_key)
+        std = jnp.std(errors_at_key)
+        avg_std_dict[key] = {"mean": mean, "std": std}
+    return avg_std_dict
+
+def compute_mve_and_wve_for_all_realizations(optimization_results: list[list[dict[str, Any]]], expected_keys: list, true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, verbose:bool=False):
+    """
+    Compute the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) for all realizations of optimization results.
+    
+    Args:
+        optimization_results: A list of lists of result dictionaries returned by `run_optimization_workflow`.
+        expected_keys: A list of expected keys in the optimization results.
+        true_superops: The true superoperators (kraus, povm, state) used to generate the probability matrices.
+        sequence_length: The length of the sequences to use for computing MVE and WVE.
+        num_circuits_sampled: The number of circuits to sample for computing MVE and WVE.
+        num_repetitions: The number of repetitions to perform for computing MVE and WVE.
+
+    Returns:
+        A tuple containing the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) for each realization of optimization results.
+    """
+    mve_results_all_realizations = []
+    wve_results_all_realizations = []
+
+    for realization_results in optimization_results:
+        # create the dictionary from where to compute mve and wve
+        optimization_result_idx = {str(key): res for key, res in zip(expected_keys, realization_results)} 
+
+        mve_results_dict, wve_results_dict = compute_mve_and_wve_from_optimization_results(
+            optimization_results=optimization_result_idx,
+            true_superops=true_superops,
+            sequence_length=sequence_length,
+            num_circuits_sampled=num_circuits_sampled,
+            num_repetitions=num_repetitions,
+            verbose=verbose
+        )
+
+        mve_results_all_realizations.append(mve_results_dict)
+        wve_results_all_realizations.append(wve_results_dict)
+
+    return mve_results_all_realizations, wve_results_all_realizations
+
+def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str, dict[str, Any]], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, verbose:bool=False):
+    """
+    Compute the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) from a dictionary of optimization results.
+    
+    Args:
+        optimization_results: A dictionary of result dictionaries returned by `run_optimization_workflow`.
+        true_superops: The true superoperators (kraus, povm, state) used to generate the probability matrices.
+        sequence_length: The length of the sequences to use for computing MVE and WVE.
+        num_circuits_sampled: The number of circuits to sample for computing MVE and WVE.
+        num_repetitions: The number of repetitions to perform for computing MVE and WVE.
+
+    Returns:
+        A tuple containing the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) for each optimization result.
+    """
+    keys = list(optimization_results.keys())
+        
+    gst_superops_list = [res["superops_gauged"] for res in optimization_results.values()]
+
+    mve_results_over_sequences = variational_error_avg_and_std_from_list_of_superops(num_runs=num_repetitions, true_superops=true_superops, gst_superops=gst_superops_list, length=sequence_length, samples=num_circuits_sampled, error_type="MVE", verbose=verbose)
+    
+    mve_results_dict = {str(key): {"mean": mean, "std": std} for key, (mean, std) in zip(keys, mve_results_over_sequences)}
+    
+    wve_results_over_sequences = variational_error_avg_and_std_from_list_of_superops(num_runs=num_repetitions, true_superops=true_superops, gst_superops=gst_superops_list, length=sequence_length, samples=num_circuits_sampled, error_type="WVE", verbose=verbose)
+    
+    wve_results_dict = {str(key): {"mean": mean, "std": std} for key, (mean, std) in zip(keys, wve_results_over_sequences)}
+
+    return mve_results_dict, wve_results_dict

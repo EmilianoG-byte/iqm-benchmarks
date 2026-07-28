@@ -3,11 +3,10 @@ import time
 
 from mGST import additional_fns
 from mGST.low_level_jit import contract_mps_all_povm
-from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation, generate_target_state, generate_target_povm, get_compressed_rep_from_mgst_output
+from mGST.utility_functions_comparisons import kraus_tensor_to_mgst, factorize_psd_truncated, get_mgst_tensors_from_psd_representation, generate_target_state, generate_target_povm
 
 from mGST.typing import Tensor, Matrix, TrustRegionOptions, Vector
 import jax.numpy as jnp
-import numpy as np
 
 from mGST.typing import OperatorSchedule, TrustRegionOptions
 from mGST.trust_region import run_riemannian_optimization

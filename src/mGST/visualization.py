@@ -685,6 +685,8 @@ def plot_many_mean_std_vs_x(
     ylabel: str = "Distance",
     use_log_scale: bool | str = False,
     dpi: int = 250,
+    main_curve: dict[str, dict[str, float]] = None,
+    main_curve_label: str = "Mean",
 ) -> plt.Figure:
     
     unlabeled_curves = False
@@ -693,26 +695,46 @@ def plot_many_mean_std_vs_x(
         data = {f"Run {i+1}": curve_data for i, curve_data in enumerate(data)}
         unlabeled_curves = True
     
+    # When a main curve is present: all secondary curves share one muted colour,
+    # and the main curve gets COLOUR_PALETTE[0] to stand out.
+    secondary_color = COLOUR_PALETTE[5]  # "#B9C7DF" — soft blue-grey
+    
     figure, ax = plt.subplots(figsize=(8, 5), dpi=dpi)
     for i, (curve_label, curve_data) in enumerate(data.items()):
         
         curve_label = None if unlabeled_curves else curve_label
+        color = secondary_color if main_curve is not None else COLOUR_PALETTE[i % len(COLOUR_PALETTE)]
+
         
         plot_mean_std_vs_x(
             curve_data,
             ax=ax,
             show=False,
             curve_label=curve_label,
-            color=COLOUR_PALETTE[i % len(COLOUR_PALETTE)],
+            color=color,
             use_log_scale=use_log_scale,
             dpi=dpi,
         )
+    if main_curve is not None:
+        unlabeled_curves = False  # main curve should always be labeled
+        plot_mean_std_vs_x(
+            main_curve,
+            ax=ax,
+            show=False,
+            curve_label=main_curve_label,
+            color=COLOUR_PALETTE[0],  # always the first, dominant colour,
+            use_log_scale=use_log_scale,
+            dpi=dpi,
+        )
+        
     ax.set_title(title, fontsize=14)
     if xlabel:
         ax.set_xlabel(xlabel, fontsize=12)
     if ylabel:
         ax.set_ylabel(ylabel, fontsize=12)
-    ax.legend(fontsize=10)
+        
+    if not unlabeled_curves:
+        ax.legend(fontsize=10)
     figure.tight_layout()
     plt.show()
     return figure
@@ -778,7 +800,8 @@ def plot_mean_std_vs_x(
             ax.set_yscale("log")
 
     ax.grid(alpha=0.3, linestyle="--", linewidth=0.5)
-    ax.legend(fontsize=10)
+    if curve_label is not None:
+        ax.legend(fontsize=10)
     
     if comparison_value is not None:
         comp_label, comp_y = comparison_value
