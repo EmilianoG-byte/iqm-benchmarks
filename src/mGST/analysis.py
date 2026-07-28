@@ -323,3 +323,34 @@ def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str
     wve_results_dict = {str(key): {"mean": mean, "std": std} for key, (mean, std) in zip(keys, wve_results_over_sequences)}
 
     return mve_results_dict, wve_results_dict
+
+
+def combine_error_results(*error_results_list):
+    """Combine multiple error result lists by merging per-realization dicts.
+        
+    Args:
+        *error_results_list: Two or more lists of the form list[dict[str, dict[str, float]]],
+            where each outer list has the same number of realizations and the dicts
+            at each index have disjoint keys (sequence counts).
+    
+    Returns:
+        A combined list with merged dicts per realization, sorted by numeric key.
+    """
+    n_realizations = len(error_results_list[0])
+    combined = []
+    for i in range(n_realizations):
+        merged = {}
+        for error_results in error_results_list:
+            #check they all have the same lenghth
+            if len(error_results) != n_realizations:
+                raise ValueError(f"All error result lists must have the same number of realizations. Found {len(error_results)} and {n_realizations}.")
+            
+            # check for disjoint keys before merging
+            if not merged.keys().isdisjoint(error_results[i].keys()):
+                raise ValueError(f"Error result dicts at index {i} have overlapping keys: {merged.keys() & error_results[i].keys()}")
+            
+            merged.update(error_results[i])
+        # Sort keys numerically so plots come out in the right order
+        merged = dict(sorted(merged.items(), key=lambda kv: float(kv[0])))
+        combined.append(merged)
+    return combined

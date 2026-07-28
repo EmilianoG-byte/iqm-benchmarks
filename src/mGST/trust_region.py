@@ -655,14 +655,16 @@ def run_riemannian_optimization(
     # Default convergence reason
     convergence_reason = "Max iterations reached ⏳."
     
+    
     optimization_schedule_print = "\n".join(
     f"{operator}: {str(option)}"
     for operator, option in optimization_schedule.items()
-)
+    )
     
-    print("🔰 Starting Riemannian Optimization 🔰 \n * optimization schedule: \n"
-          f"{optimization_schedule_print} \n"
-          f"{convergence_criteria}")
+    print("🔰 Starting Riemannian Optimization 🔰")
+    if verbose:
+        print(f" * optimization schedule: \n{optimization_schedule_print} \n{convergence_criteria}")
+        
     try:
         for idx in range(num_iterations):
             # Optimize POVM
@@ -676,7 +678,8 @@ def run_riemannian_optimization(
             if compute_least_squares and compute_ls_every_step:
                 least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
                 cost_fn_least_squares.append(least_squares_value)
-                print(f"👾 Least squares value after POVM: {least_squares_value:.6e} 👾")
+                if verbose:
+                    print(f"👾 Least squares value after POVM: {least_squares_value:.6e} 👾")
             
             # Save the initial cost value from this iteration for convergence check
             cost_fn_init_k = cost_values_povm[0]
@@ -703,7 +706,8 @@ def run_riemannian_optimization(
             if compute_least_squares and compute_ls_every_step:
                 least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
                 cost_fn_least_squares.append(least_squares_value)
-                print(f"👾 Least squares value after Kraus: {least_squares_value:.6e} 👾")
+                if verbose:
+                    print(f"👾 Least squares value after Kraus: {least_squares_value:.6e} 👾")
             
             cost_fn_current_k = cost_values_kraus[-1]
             cost_fn_history.extend(cost_values_kraus)
@@ -727,7 +731,8 @@ def run_riemannian_optimization(
             if compute_least_squares:
                 least_squares_value = cost_function(kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, **cost_fn_kwargs_least_squares)
                 cost_fn_least_squares.append(least_squares_value)
-                print(f"👾 Least squares value after State at iteration {idx + 1}: {least_squares_value:.6e} 👾")
+                if verbose:
+                    print(f"👾 Least squares value after State at iteration {idx + 1}: {least_squares_value:.6e} 👾")
             
             
             # Saved the final cost value from this iteration for convergence check
