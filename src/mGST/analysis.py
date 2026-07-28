@@ -354,3 +354,12 @@ def combine_error_results(*error_results_list):
         merged = dict(sorted(merged.items(), key=lambda kv: float(kv[0])))
         combined.append(merged)
     return combined
+
+import json
+
+def to_json_serializable(error_results):
+    """Convert list[dict[str, dict[str, float]]] with JAX arrays to JSON-serializable form."""
+    return [
+        {key: {k: float(v) for k, v in inner.items()} for key, inner in realization.items()}
+        for realization in error_results
+    ]
