@@ -324,7 +324,23 @@ def get_random_noisy_kraus_tensors_for_gate_set(num_gates:int, dim:int, rank_kra
     
     return {"kraus": tensor_for_kraus, "povm": tensor_for_povm, "state": tensor_for_state}
 
-def apply_noisy_kraus_tensors_to_target_gate_set(kraus_tensors_noisy:dict[str, Tensor], target_gate_set:dict[str, Tensor])-> dict[str, Tensor]:
+def _unvectorize_target_gate_set(gate_set:dict[str, Tensor])->dict[str, Tensor]:
+    """Unvectorize the superoperators from a given gate set.
+    
+    Args:
+        gate_set: A dictionary containing the superoperators for Kraus, POVM, and State in vectorized form.
+    Returns:
+        A dictionary containing the unvectorized superoperators for Kraus, POVM, and State.
+    """
+    # we get the dimension from the kraus tensor
+    # assume shape (num_gates, 1, dim, dim)
+    dim = gate_set["kraus"].shape[-1]
+    gate_set_unvect = gate_set.copy()
+    gate_set_unvect["povm"] = gate_set_unvect["povm"].reshape(dim, dim, dim)
+    gate_set_unvect["state"] = gate_set_unvect["state"].reshape(dim, dim)
+    return gate_set_unvect
+
+def apply_noisy_kraus_tensors_to_target_gate_set(kraus_tensors_noisy:dict[str, Tensor], target_gate_set:dict[str, Tensor], is_target_vectorized:bool=False)-> dict[str, Tensor]:
     """Apply noisy Kraus tensors to a target gate set to produce the noisy gate set.
     
     Args:
@@ -347,9 +363,19 @@ def apply_noisy_kraus_tensors_to_target_gate_set(kraus_tensors_noisy:dict[str, T
     noise_superop_povm = kraus_tensor_to_mgst(noise_tensor_povm) # (kraus_rank, dim_out*dim_out, dim_out*dim_out)
     noise_superop_state = kraus_tensor_to_mgst(noise_tensor_state) # (kraus_rank, dim_in*dim_in, dim_in*dim_in)
     
+    # check expected tensor ranks
+    expected_povm_ndim = 2 if is_target_vectorized else 3
+    expected_state_ndim = 1 if is_target_vectorized else 2
+    
+    if target_gate_set["povm"].ndim != expected_povm_ndim or target_gate_set["state"].ndim != expected_state_ndim:
+        raise ValueError(f"Target gate set POVM and State tensors have unexpected dimensions. Expected POVM ndim={expected_povm_ndim}, got {target_gate_set['povm'].ndim}. Expected State ndim={expected_state_ndim}, got {target_gate_set['state'].ndim}.")
+    
+    if is_target_vectorized:
+        target_gate_set = _unvectorize_target_gate_set(target_gate_set)
+    
     kraus_tensor_target = target_gate_set["kraus"] # (num_gates, 1, dim_out, dim_in)
     povm_tensor_target = target_gate_set["povm"] # (num_povm, dim_out*, dim_out)
-    state_tensor_target = target_gate_set["state"] # (dim_in, dim_in*)
+    state_tensor_target = target_gate_set["state"] # (dim_in, dim_in*)        
         
     # apply the noisy Kraus tensors to the target gate set
     kraus_tensor_noisy = contract_noiseless_and_noisy_kraus_tensors(kraus_tensor_target, noise_tensor_kraus) # (num_gates, kraus_rank, dim_out, dim_in)
@@ -404,7 +430,9 @@ def get_default_optimization_options() -> tuple[dict[str, OperatorSchedule], int
     relative_precision = 1e-5
     global_gradient_norm_tol = 1e-6
 
-    return optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol
+    noise_threshold = None
+
+    return optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol, noise_threshold
 
 
 def check_operators_dictionaries(*dicts)-> None:
@@ -417,7 +445,38 @@ def check_operators_dictionaries(*dicts)-> None:
         if set(dict.keys()) != EXPECTED_KEYS:
             raise ValueError(f"Dictionary keys {dict.keys()} do not match expected keys {EXPECTED_KEYS}.")
 
-def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:dict[str, jnp.ndarray], operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, optimization_verbose:bool=True, compute_least_squares:bool=False) -> dict[str, Any]:
+from mGST.utility_functions_comparisons import get_compressed_rep_from_mgst_output
+
+def generate_random_initial_operators(num_gates:int, dim:int, kraus_rank:int, povm_rank:int, state_rank:int, seeds:tuple[int, int, int]|None=None) -> dict[str, jnp.ndarray]:
+    """Generate random initial operators (kraus, povm, state) for the GST experiment."""
+    rndm_gate_set_superop = get_random_gate_set_superop(num_gates=num_gates, dim=dim, kraus_rank=kraus_rank, num_povm=dim, seeds=seeds)
+    rndm_gate_set_psd = get_compressed_rep_from_mgst_output(*rndm_gate_set_superop.values(), kraus_rank=kraus_rank, state_rank=state_rank, povm_rank=povm_rank)
+    return {
+        "kraus": rndm_gate_set_psd[0],
+        "povm": rndm_gate_set_psd[1],
+        "state": rndm_gate_set_psd[2],
+    }
+
+def get_parameters_from_gate_set(gate_set:dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    """Get the num_gates, dim, kraus_rank, povm_rank, state_rank from a gate set dictionary."""
+    num_gates, kraus_rank, dim, _ = gate_set["kraus"].shape
+    num_povm, povm_rank, _ = gate_set["povm"].shape
+    _, state_rank = gate_set["state"].shape
+    
+    return {
+        "num_gates": num_gates,
+        "dim": dim,
+        "kraus_rank": kraus_rank,
+        "povm_rank": povm_rank,
+        "state_rank": state_rank,
+    }
+    
+def generate_random_gate_set_from_gate_set(gate_set:dict[str, jnp.ndarray], seeds:tuple[int, int, int]|None=None) -> dict[str, jnp.ndarray]:
+    """Generate a random gate set by applying random Kraus operators to a given gate set."""
+    params = get_parameters_from_gate_set(gate_set)
+    return generate_random_initial_operators(**params, seeds=seeds)
+
+def run_optimization_workflow(num_shots:int, init_operators:dict[str, jnp.ndarray]|None, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, optimization_verbose:bool=True, compute_least_squares:bool=False, num_sequences:int|None=None, indices_dict:dict[str, list[list[int]]]|None=None) -> dict[str, Any]:
     """
     Run the optimization workflow for the Riemannian optimization of the GST operators.
     
@@ -433,10 +492,15 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         warmup_run: Whether to perform a warmup run of the cost function before the optimization. This can help with JIT compilation and caching.
         optimization_verbose: Whether to print information during the optimization.
         compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
+        indices_dict: Optional dictionary containing precomputed sequence indices. If None, new indices will be generated.
 
     Returns:
         A dictionary containing the optimized operators, gauged superoperators, target model, cost function history, probability matrices, times for optimization and gauging, and indices dictionary.
     """
+    if init_operators is None:
+        print("🎲 Generating random initial operators ...")
+        init_operators = generate_random_gate_set_from_gate_set(gate_set=operators_psd_true)
+    
     check_operators_dictionaries(operators_psd_true, target_superops, init_operators)    
     
     seq_len_list = [1, 8, 14]
@@ -448,7 +512,16 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
     num_gates = kraus_tensor_true.shape[0]
     
     # return this one
-    indices_dict = generate_sequence_indices(num_gates=num_gates, num_circuits=num_sequences, seq_len_list=seq_len_list)
+    if indices_dict is None:
+        if num_sequences is None:
+            raise ValueError("If indices_dict is None, num_sequences must be provided to generate new sequence indices.")
+        indices_dict = generate_sequence_indices(num_gates=num_gates, num_circuits=num_sequences, seq_len_list=seq_len_list)
+    else:
+        if set(indices_dict) != {"gate_indices", "gate_indices_with_negs"}:
+            raise ValueError(f"indices_dict must contain keys: ['gate_indices', 'gate_indices_with_negs'], but got {list(indices_dict.keys())}.")
+        if num_sequences is not None:
+            warnings.warn("num_sequences is ignored when indices_dict is provided. Using the provided indices_dict.")
+        
     indices_list = indices_dict["gate_indices"]
 
     # return this one
@@ -474,14 +547,18 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         cost_fn_kwargs["num_shots"] = num_shots
     
     if optimization_options is None:
-        optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol = get_default_optimization_options()
+        optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol, noise_threshold = get_default_optimization_options()
     else:
-        if ["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol"] != list(optimization_options.keys()):
-            raise ValueError(f"Optimization options must contain keys: ['schedule', 'num_iterations_outer', 'relative_precision', 'global_gradient_norm_tol'], but got {list(optimization_options.keys())}.")
+        expected_keys = set(["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol", "noise_threshold"])
+        optimization_keys = set(optimization_options.keys())
+        if expected_keys != optimization_keys:
+            raise ValueError(f"Optimization options must contain keys: {expected_keys}, but got {optimization_keys}.")
+        
         optimization_schedule_all_tr = optimization_options["schedule"]
         num_iterations_outer = optimization_options["num_iterations_outer"]
         relative_precision = optimization_options["relative_precision"]
         global_gradient_norm_tol = optimization_options["global_gradient_norm_tol"]
+        noise_threshold = optimization_options["noise_threshold"]
     
     if warmup_run:
         start_compilation_time = time.time()
@@ -500,7 +577,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         num_iterations=num_iterations_outer,
         optimization_schedule=optimization_schedule_all_tr,
         save_intermediate_cost_values=True,
-        noise_threshold=None,
+        noise_threshold=noise_threshold,
         relative_precision=relative_precision,
         global_gradient_norm_tol=global_gradient_norm_tol,
         verbose=optimization_verbose,
@@ -527,7 +604,7 @@ def run_optimization_workflow(num_sequences:int, num_shots:int, init_operators:d
         compilation_time = start_time - start_compilation_time
         times["compilation_time"] = compilation_time
     
-    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": times, "convergence_reason": convergence_reason}
+    return {"optimized_operators": optimized_operators, "superops_gauged": superops_gauged, "target_model_pygsti": target_model_pygsti, "cost_fn_history": cost_fn_history, "probability_matrices": probability_matrices, "indices_dict": indices_dict, "times": times, "convergence_reason": convergence_reason, "init_operators":init_operators}
     
 def perform_gauge(optimized_operators:dict[jnp.ndarray], target_superops:dict[jnp.ndarray], num_gates:int):
     """
@@ -542,3 +619,14 @@ def perform_gauge(optimized_operators:dict[jnp.ndarray], target_superops:dict[jn
     kraus_superop_gauged, povm_vect_gauged, state_vect_gauged = gauge_opt(X=optimized_superops["kraus"], E=optimized_superops["povm"], rho=optimized_superops["state"], target_mdl=target_model_pygsti, weights=gauge_weights)
     
     return kraus_superop_gauged, povm_vect_gauged, state_vect_gauged, target_model_pygsti
+
+def get_random_gate_set_superop(num_gates:int, dim:int, kraus_rank:int, num_povm:int, seeds:list[int]=None) -> dict[str, Tensor]:
+    """Get a random gate set in superoperator form of the specified dimensions."""     
+    kraus_psd, kraus_superop, povm_superop, state_superop = additional_fns.random_gs(
+        d=num_gates,
+        r=int(dim**2),
+        rK=kraus_rank,
+        n_povm=num_povm,
+        seeds=seeds
+    )
+    return {"kraus": kraus_superop, "povm": povm_superop, "state": state_superop}

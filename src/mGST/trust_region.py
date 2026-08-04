@@ -589,7 +589,7 @@ def run_riemannian_optimization(
     Args:
         kraus_tensor_init: Initial Kraus operator tensor. Shape: (num_gates, kraus_rank, dim_out, dim_in).
         povm_psd_init: Initial POVM operator tensor. Shape: (num_povm, rank_povm, dim_in).
-        state_psd_init: Initial State operator tensor. Shape: (rank_state, dim_in).
+        state_psd_init: Initial State operator tensor. Shape: (dim_in, rank_state).
         cost_function: The cost function to minimize. Should take kraus_tensor, povm_psd, state_psd as keyword arguments and return a scalar.
         cost_fn_kwargs: Additional keyword arguments to pass to the cost function.
         num_iterations: Number of outer iterations to perform (each iteration optimizes all operators once).

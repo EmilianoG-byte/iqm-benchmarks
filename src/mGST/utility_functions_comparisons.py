@@ -37,7 +37,34 @@ import numpy as np
 from typing import Sequence
 import warnings
 
-backend = "iqmfakeapollo"
+DEFAULT_BACKEND = "iqmfakeapollo"
+
+def get_target_operators_gate_set_name(gate_set_name:str)->tuple[dict[str, jnp.ndarray], list[str]]:
+    """Get the target Kraus, POVM, and State operators from a given gate set.
+    
+    Args:
+        gate_set: Name of the gate set to be used. This should be a string that can be used to initialize a GSTConfiguration object.
+
+    Returns:
+        A dictionary containing the target Kraus, POVM, and State operators, with keys "kraus", "povm", and "state".
+        the gate labels are also returned as a list of strings.
+    """
+    # we can infer the number of qubits from the gate set name
+    num_qubits = int(gate_set_name.split("Q")[0])
+    qubit_layouts = [[i for i in range(num_qubits)]]
+    num_circuits_dummy = 100
+    num_shots_dummy = 100
+    rank_dummy = 1
+    
+    configuration = GSTConfiguration(
+        qubit_layouts=qubit_layouts,
+        gate_set=gate_set_name,
+        num_circuits=num_circuits_dummy,
+        shots=num_shots_dummy,
+        rank=rank_dummy,
+        )
+    
+    return all_operators_from_configuration(configuration, backend=DEFAULT_BACKEND)
 
 def get_initial_gate_set_for_optimization(target_superops:dict[str, jnp.ndarray], kraus_rank:int, povm_rank:int, state_rank:int, seed:int=42) -> dict[str, jnp.ndarray]:
     """Get the initial gate set for optimization, given the target superoperators and the desired ranks for Kraus, POVM, and state.
