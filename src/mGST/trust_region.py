@@ -368,7 +368,7 @@ def run_trust_region_optimization(
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     global_norm_grad_init: float| None = None, 
-    verbose:bool=True)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
+    verbose:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
     """
     Run the trust region optimization algorithm.
 
@@ -426,8 +426,8 @@ def run_trust_region_optimization(
     norm_grad = norm_grad_init
     if global_norm_grad_init is not None:
         norm_grad_init = global_norm_grad_init
-    print(f"🚀 TR started for operator: {operator_type} 🚀.")
     if verbose:
+        print(f"🚀 TR started for operator: {operator_type} 🚀.")
         print("=======================================")
     try:
         for idx in range(num_iterations):
@@ -475,8 +475,9 @@ def run_trust_region_optimization(
                 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user {idx}.")
-    print("=======================================")
-    print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
+    if verbose:
+        print("=======================================")
+        print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
     return x_k, x_k_array, cost_fx_array, norm_grad
 
 def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
@@ -577,7 +578,7 @@ def run_riemannian_optimization(
     relative_precision: float|None = 1e-5,
     global_gradients_norm_init: dict[str, float] | None = None,
     global_gradient_norm_tol: float = 1e-6,
-    verbose:bool=True,
+    verbose:bool=False,
     compute_least_squares:bool| int = False,
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
@@ -616,7 +617,8 @@ def run_riemannian_optimization(
     
     cost_fn_history = []
     if compute_least_squares:
-        print("⚠️ Computing least squares values during optimization. This may add additional computational overhead. ⚠️")
+        if verbose:
+            print("⚠️ Computing least squares values during optimization. This may add additional computational overhead. ⚠️")
         cost_fn_least_squares = []
         cost_fn_kwargs_least_squares = cost_fn_kwargs.copy()
         cost_fn_kwargs_least_squares["use_log_likelihood"] = False  # Ensure we compute least squares, not log-likelihood
@@ -771,9 +773,11 @@ def run_riemannian_optimization(
         "state": state_psd_k,
     }
     
+    cost_dict = {"main": cost_fn_history}
     if compute_least_squares:
-        return optimized_operators, {"main": cost_fn_history, "least_squares": cost_fn_least_squares}, convergence_reason
-    return optimized_operators, cost_fn_history, convergence_reason
+        cost_dict["least_squares"] = cost_fn_least_squares
+    
+    return optimized_operators, cost_dict, convergence_reason
 
 
 def convergence_criteria_from_gradients_norms(*gradients_norms, threshold:float = 1e-6)-> tuple[bool, str]:

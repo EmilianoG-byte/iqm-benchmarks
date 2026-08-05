@@ -291,7 +291,7 @@ def random_gs(d, r, rK, n_povm, seeds:list[int]|None = None):
         seed_kraus, seed_povm, seed_state = map(int, rng.integers(0, 2**32, size=3, dtype=np.uint32))
     else:
         if len(seeds) != 3:
-            raise ValueError(...)
+            raise ValueError("If seeds are provided, it must be a list of length 3. We assume the order: [seed_kraus, seed_povm, seed_state].")
         seed_kraus, seed_povm, seed_state = seeds
     
     dim = int(np.sqrt(r))
@@ -465,6 +465,7 @@ def batch(y, J, bsize):
         bsize = int(bsize * len(J) // 1)
     batchmask = np.array([1] * bsize + [0] * (len(J) - bsize))
     np.random.shuffle(batchmask)
+    print(len(batchmask))
     J_b = J[batchmask == 1]
     y_b = y[:, batchmask == 1]
     return y_b, J_b

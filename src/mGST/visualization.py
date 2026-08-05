@@ -74,7 +74,7 @@ def plot_cost_function(
         marker = MARKERS[
             i % len(MARKERS)
         ]  # Cycle through markers if more curves than markers
-        color = COLOUR_PALETTE[i]
+        color = COLOUR_PALETTE[i % len(COLOUR_PALETTE)]  # Cycle through colors if more curves than colors
         plot_function(
             cost,
             linewidth=2,

@@ -697,7 +697,7 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
         
         if jit:
             new_count = inner_function._cache_size()
-            if new_count != previous_count:
+            if new_count != previous_count and verbose:
                 print(f'at iteration {idx} the new count changed to: {new_count}')
                 previous_count = new_count
 
