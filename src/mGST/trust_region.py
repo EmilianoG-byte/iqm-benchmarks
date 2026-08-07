@@ -777,6 +777,9 @@ def run_riemannian_optimization(
     if compute_least_squares:
         cost_dict["least_squares"] = cost_fn_least_squares
     
+    if verbose:
+        print("Testing")
+    
     return optimized_operators, cost_dict, convergence_reason
 
 
@@ -895,7 +898,7 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         optimized_operator, _, norm_grad_k ,cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
         saved_cost_values = [cost_value]
     else:
-        raise ValueError(f"Invalid optimization options: {optimization_options}. Must be TrustRegionOptions or GradientDescentOptions.")
+        raise ValueError(f"Invalid optimization options of type: {type(optimization_options)}. Must be TrustRegionOptions or GradientDescentOptions.")
 
     return optimized_operator, saved_cost_values, norm_grad_k
 

@@ -9,13 +9,14 @@ from mGST.typing import Tensor, Matrix, TrustRegionOptions, Vector
 import jax.numpy as jnp
 import numpy as np
 
-from mGST.typing import OperatorSchedule, TrustRegionOptions
+from mGST.typing import OperatorSchedule, TrustRegionOptions, OptimizationResult
 from mGST.trust_region import run_riemannian_optimization, estimate_noise_floor_threshold
 from mGST.low_level_jit import cost_function_jax_mps
 from mGST.reporting.reporting import gauge_opt
 from mGST.compatibility import arrays_to_pygsti_model
 
 from typing import Any
+from collections.abc import Sequence
 
 import warnings
 
@@ -437,7 +438,6 @@ def get_default_optimization_options() -> tuple[dict[str, OperatorSchedule], int
 
     return optimization_schedule_all_tr, num_iterations_outer, relative_precision, global_gradient_norm_tol, threshold_multiplier, noise_threshold, optimization_verbose, compute_least_squares
 
-
 def check_operators_dictionaries(*dicts)-> None:
     """
     Check if all dictionaries have valid keys.
@@ -477,23 +477,29 @@ def generate_random_gate_set_from_gate_set(gate_set:dict[str, jnp.ndarray], seed
     params = get_parameters_from_gate_set(gate_set)
     return generate_random_initial_operators(**params, seeds=seeds)
 
-def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any]=None, use_log_likelihood:bool=False, num_sequences:int|None=None, indices_dict:dict[str, list[list[int]]]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, seq_len_list:list[int]|None=None, threshold_multiplier:float=5.0):    
+def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any], num_sequences:int|None=None, seq_len_list:list[int]|None=None, indices_dict:dict[str, list[list[int]]]|None=None, probability_matrices:dict[str, Matrix]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, threshold_multiplier:float=5.0)-> tuple[OptimizationResult, OptimizationResult]:    
     # Generate the random sequences already here to fix it for all random inits.
     num_gates = target_superops["kraus"].shape[0]
     indices_dict = _process_indices_generation(num_gates=num_gates, num_sequences=num_sequences, seq_len_list=seq_len_list, indices_dict=indices_dict)
     
-    probability_matrices = _process_probability_matrices(operators_psd_true=operators_psd_true, indices_list=indices_dict["gate_indices"], num_shots=num_shots, probability_matrices=None)
+    probability_matrices = _process_probability_matrices(operators_psd_true=operators_psd_true, indices_list=indices_dict["gate_indices"], num_shots=num_shots, probability_matrices=probability_matrices)
         
     noise_threshold = estimate_noise_floor_threshold(multiplier=threshold_multiplier, num_shots=num_shots, probability_matrix=probability_matrices["sampled"])
     
-    if optimization_options is None:
-        optimization_options_random_init = {}
-    else:
-        optimization_options_random_init = optimization_options.copy()
+    
+    optimization_options_random_init = optimization_options.copy()
     
     optimization_options_random_init["noise_threshold"] = noise_threshold
     optimization_options_random_init["num_iterations_outer"] = num_max_iterations_random_inits
+    optimization_options_random_init["compute_least_squares"] = False # no need to additionally compute this, since it's the main cost funciton anyways
     converged_below_noise_threshold = False
+    # need to optimize the operator schedule accordingly
+    old_schedules = optimization_options["schedule"]
+
+    optimization_options_random_init["schedule"] = {
+        op_name: old_schedules[op_name].shorten_to(num_max_iterations_random_inits)
+        for op_name in ["kraus", "povm", "state"]
+    }        
     
     for init_idx in range(num_max_random_inits):
         print(f"🎲👾 Running optimization workflow with random initialization {init_idx+1}/{num_max_random_inits} 🎲👾")
@@ -508,7 +514,7 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
             use_exact_probabilities=False, # noise threshold only makes sense with sampled probabilities
             optimization_options=optimization_options_random_init,
             warmup_run=False, # is gonna be ran so many times that we don't need to warmup every time
-            use_log_likelihood=use_log_likelihood,
+            use_log_likelihood=False, # since we are evaluating at the noise threshold, it only makes sense to check convergence with the least-squares
             indices_dict=batched_indices_dict, # batched version
             probability_matrices=batched_probability_matrices, # batched version
             verbose=False, # we don't want to print every time
@@ -520,9 +526,11 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
             break
     
     if converged_below_noise_threshold:
-        cost_to_report = {cost_type: history[-1] for cost_type, history in random_init_result["cost_fn_history"].items()}
-        print(f"✅ Converged below noise threshold after {init_idx+1} random initializations."
-              f"Last cost function values: {cost_to_report}")
+        first_costs = {cost_type: history[0] for cost_type, history in random_init_result["cost_fn_history"].items()}
+        final_costs = {cost_type: history[-1] for cost_type, history in random_init_result["cost_fn_history"].items()}
+        print(f"✅ Converged below noise threshold after {init_idx+1} random initializations. \n"
+              f" Initial cost function values: {first_costs} \n"
+              f" Last cost function values: {final_costs}")
     else:
         print(f"⚠️ Did not converge below noise threshold after {num_max_random_inits} random initializations."
               "Using the result from the last random initialization.")
@@ -557,7 +565,7 @@ def _process_optimization_options(optimization_options:dict[str, Any]|None, num_
     if optimization_options is None:
             optimization_schedule, num_iterations_outer, relative_precision, global_gradient_norm_tol, threshold_multiplier, noise_threshold, optimization_verbose, compute_least_squares = get_default_optimization_options()
     else:
-        expected_keys = set(["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol", "threshold_multiplier", "noise_threshold", "optimization_verbose"])
+        expected_keys = set(["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol", "threshold_multiplier", "noise_threshold", "optimization_verbose", "compute_least_squares"])
         optimization_keys = set(optimization_options.keys())
         if not optimization_keys.issubset(expected_keys):
             raise ValueError(f"Optimization options must contain keys: {expected_keys}, but got {optimization_keys}.")
@@ -611,7 +619,7 @@ def _process_indices_generation(num_gates:int, num_sequences:int|None, seq_len_l
             warnings.warn("num_sequences is ignored when indices_dict is provided. Using the provided indices_dict.")
     return indices_dict
     
-def _process_probability_matrices(operators_psd_true:dict[str, jnp.ndarray], indices_list:list[list[int]], num_shots:int, probability_matrices:dict[str, jnp.ndarray]|None) -> jnp.ndarray:
+def _process_probability_matrices(operators_psd_true:dict[str, jnp.ndarray], indices_list:list[list[int]], num_shots:int, probability_matrices:dict[str, jnp.ndarray]|None) -> dict[str, jnp.ndarray]:
     """
     Process the generation of probability matrices for the optimization workflow.
     
@@ -632,7 +640,7 @@ def _process_probability_matrices(operators_psd_true:dict[str, jnp.ndarray], ind
         
     return probability_matrices
 
-def run_optimization_workflow(num_shots:int, init_operators:dict[str, jnp.ndarray]|None, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, num_sequences:int|None=None, indices_dict:dict[str, list[list[int]]]|None=None, seq_len_list:list[int]|None=None, probability_matrices:dict[str, jnp.ndarray]|None=None, verbose:bool=False, gauge_optimize:bool=True) -> dict[str, Any]:
+def run_optimization_workflow(num_shots:int, init_operators:dict[str, jnp.ndarray]|None, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], use_exact_probabilities:bool=False, optimization_options:dict[str, Any]=None, warmup_run:bool=False, use_log_likelihood:bool=False, num_sequences:int|None=None, indices_dict:dict[str, list[list[int]]]|None=None, seq_len_list:list[int]|None=None, probability_matrices:dict[str, jnp.ndarray]|None=None, verbose:bool=False, gauge_optimize:bool=True) -> OptimizationResult:
     """
     Run the optimization workflow for the Riemannian optimization of the GST operators.
     
@@ -840,3 +848,128 @@ def batch_probability_matrices_and_indices(
     }
 
     return batched_probability_matrices, batched_indices_dict
+
+def _process_batch_size(batch_size: int | float | Sequence[float|int] | None, num_sequences_list: list[int], dim:int) -> int | float | Sequence[float|int]:
+    """
+    Process the batch size parameter for the random-init phase of the optimization workflow.
+
+    Args:
+        batch_size: Can be an int (absolute number of circuits), a float (fraction of total circuits),
+            or a list of ints/floats (one per sequence count).
+
+    Returns:
+        Processed batch size as an int, float, or sequence of ints/floats.
+    """
+    if batch_size is None:
+        # See CompressiveGST class definition for the default batch size logic.
+        batch_size = 30 * dim
+
+    batch_size_is_sequence = isinstance(batch_size, Sequence)
+    if batch_size_is_sequence:
+        if len(batch_size) != len(num_sequences_list):
+            raise ValueError(
+                f"When batch_size is a list, it must have the same length as num_sequences_list. "
+                f"Got len(batch_size)={len(batch_size)} and len(num_sequences_list)={len(num_sequences_list)}."
+            )
+            
+    return batch_size, batch_size_is_sequence
+
+def run_optimization_workflow_multi_init_realizations(
+    num_shots: int,
+    operators_psd_true: dict[str, jnp.ndarray],
+    target_superops: dict[str, jnp.ndarray],
+    optimization_options: dict[str, Any],
+    num_sequences_list: list[int],
+    num_realizations: int,
+    seq_len_list: list[int] | None = None,
+    num_max_iterations_random_inits: int = 5,
+    num_max_random_inits: int = 10,
+    batch_size: int | float | list[int] = 0.1,
+    threshold_multiplier: float = 5.0,
+    seed: int | None = None,
+    debug: bool = False,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
+    """Run multiple independent realizations of the multi-init optimization workflow across
+    a list of sequence counts, generating fresh indices and probability matrices each time.
+
+    Args:
+        num_shots: Number of shots for sampling.
+        operators_psd_true: Dictionary containing the true operators (kraus, povm, state).
+        target_superops: Dictionary containing the target superoperators (kraus, povm, state).
+        optimization_options: Optimization options dictionary. Must include a 'schedule' whose
+            OperatorSchedule covers at least num_max_iterations_random_inits iterations.
+        num_sequences_list: List of sequence counts to run per realization.
+        num_realizations: Number of independent realizations to run.
+        seq_len_list: Sequence length [L_MIN, L_CUT, L_MAX]. Defaults to [1, 8, 14].
+        num_max_iterations_random_inits: Max outer iterations for each random-init run.
+        num_max_random_inits: Max number of random initializations to try.
+        batch_size: Batch size (absolute int or fraction) for the random-init phase.
+        threshold_multiplier: Multiplier for the noise floor threshold estimate.
+        seed: Base random seed. If None, seeds are drawn randomly per call. If an int,
+            seeds are derived deterministically as seed + realization * len(num_sequences_list) + seq_idx.
+        debug: If True, also return partial (random-init phase) results in the same dict format.
+
+    Returns:
+        A tuple (final_results, partial_results) where:
+        - final_results: list of length num_realizations, each a dict mapping str(num_seq) -> final_result.
+        - partial_results: same structure for the random-init phase result, or None when debug=False.
+    """
+    num_gates, kraus_rank, dim, _ = operators_psd_true["kraus"].shape
+    _seq_len_list = seq_len_list if seq_len_list is not None else [1, 8, 14]
+
+    final_results_all: list[dict[str, Any]] = []
+    partial_results_all: list[dict[str, Any]] | None = [] if debug else None
+
+    batch_size, batch_size_is_sequence = _process_batch_size(batch_size, num_sequences_list, dim=dim)
+
+    for realization_idx in range(num_realizations):
+        print(f"🔁 Realization {realization_idx + 1}/{num_realizations}")
+
+        final_results_realization: dict[str, Any] = {}
+        partial_results_realization: dict[str, Any] = {}
+
+        for seq_idx, num_seq in enumerate(num_sequences_list):
+            print(f"  📊 num_sequences={num_seq}")
+
+            batch_size_idx = batch_size[seq_idx] if batch_size_is_sequence else batch_size
+
+            # Derive a reproducible seed per (realization, sequence-count) pair when requested.
+            if seed is not None:
+                prob_seed = seed + realization_idx * len(num_sequences_list) + seq_idx
+            else:
+                prob_seed = int(np.random.default_rng().integers(0, 2**31))
+
+            indices_dict_r = generate_sequence_indices(
+                num_gates=num_gates,
+                num_circuits=num_seq,
+                seq_len_list=_seq_len_list,
+            )
+            probability_matrices_r = compute_probability_matrices(
+                *operators_psd_true.values(),
+                gate_indices=indices_dict_r["gate_indices"],
+                num_shots=num_shots,
+                seed=prob_seed,
+            )
+
+            final_result, partial_result = run_optimization_workflow_multi_init(
+                num_shots=num_shots,
+                operators_psd_true=operators_psd_true,
+                target_superops=target_superops,
+                optimization_options=optimization_options,
+                indices_dict=indices_dict_r,
+                probability_matrices=probability_matrices_r,
+                num_max_iterations_random_inits=num_max_iterations_random_inits,
+                num_max_random_inits=num_max_random_inits,
+                batch_size=batch_size_idx,
+                threshold_multiplier=threshold_multiplier,
+            )
+
+            final_results_realization[str(num_seq)] = final_result
+            if debug:
+                partial_results_realization[str(num_seq)] = partial_result
+
+        final_results_all.append(final_results_realization)
+        if debug:
+            partial_results_all.append(partial_results_realization)
+
+    return final_results_all, partial_results_all

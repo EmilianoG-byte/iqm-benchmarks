@@ -7,7 +7,7 @@ from qiskit.quantum_info import SuperOp
 from qiskit.quantum_info.operators.measures import diamond_norm
 from mGST.additional_fns import MVE
 from mGST.reporting.reporting import MVE_data
-from mGST.typing import Tensor
+from mGST.typing import Tensor, OptimizationResult
 from typing import Any
 from typing import Literal, Callable
 
@@ -266,13 +266,12 @@ def compute_avg_and_std_along_keys(list_of_errors:list[dict[str, dict[str, float
         avg_std_dict[key] = {"mean": mean, "std": std}
     return avg_std_dict
 
-def compute_mve_and_wve_for_all_realizations(optimization_results: list[list[dict[str, Any]]], expected_keys: list, true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str="superops_gauged",verbose:bool=False)-> tuple[list[dict[str, dict[str, float]]], list[dict[str, dict[str, float]]]]:
+def compute_mve_and_wve_for_all_realizations(optimization_results: list[dict[str, OptimizationResult]], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str="superops_gauged",verbose:bool=False)-> tuple[list[dict[str, dict[str, float]]], list[dict[str, dict[str, float]]]]:
     """
     Compute the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) for all realizations of optimization results.
     
     Args:
-        optimization_results: A list of lists of result dictionaries returned by `run_optimization_workflow`. The outer list corresponds to different realizations, and the inner list corresponds to different optimization results for each realization, where each of these has an associated expected key (e.g. the number of sequences ran).
-        expected_keys: A list of expected keys in the optimization results.
+        optimization_results: A list of different realizations instances of optimization results, where each realization is a dictionary of result dictionaries returned by `run_optimization_workflow`. The keys can be, for instance, the number of sequences used in the optimization.
         true_superops: The true superoperators (kraus, povm, state) used to generate the probability matrices.
         sequence_length: The length of the sequences to use for computing MVE and WVE.
         num_circuits_sampled: The number of circuits to sample for computing MVE and WVE.
@@ -284,13 +283,8 @@ def compute_mve_and_wve_for_all_realizations(optimization_results: list[list[dic
     mve_results_all_realizations = []
     wve_results_all_realizations = []
 
-    for realization_results in optimization_results:
+    for optimization_result_idx in optimization_results:
         # create the dictionary from where to compute mve and wve
-        if not len(realization_results) == len(expected_keys):
-            raise ValueError(f"Length of realization results ({len(realization_results)}) does not match length of expected keys ({len(expected_keys)}).")
-        
-        optimization_result_idx = {str(key): res for key, res in zip(expected_keys, realization_results)} 
-
         mve_results_dict, wve_results_dict = compute_mve_and_wve_from_optimization_results(
             optimization_results=optimization_result_idx,
             true_superops=true_superops,
@@ -306,7 +300,7 @@ def compute_mve_and_wve_for_all_realizations(optimization_results: list[list[dic
 
     return mve_results_all_realizations, wve_results_all_realizations
 
-def compute_mve_for_gauged_and_non_gauged_all_realizations(expected_keys:list, optimization_results: list[list[dict[str, dict[str, Any]]]], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10)->list[tuple[float, float]]:
+def compute_mve_for_gauged_and_non_gauged_all_realizations(expected_keys:list, optimization_results: list[list[dict[str, OptimizationResult]]], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10)->list[tuple[float, float]]:
     """Compute the Mean Variational Error (MVE) for both gauged and non-gauged superoperators from optimization results for all realizations."""
     mve_results_all_realizations = []
     for realization_results in optimization_results:
@@ -320,7 +314,7 @@ def compute_mve_for_gauged_and_non_gauged_all_realizations(expected_keys:list, o
         mve_results_all_realizations.append(mve_results)
     return mve_results_all_realizations
 
-def compute_mve_for_gauged_and_non_gauged_ops(expected_keys:list, optimization_results: list[dict[str, dict[str, Any]]], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10)->list[tuple[float, float]]:
+def compute_mve_for_gauged_and_non_gauged_ops(expected_keys:list, optimization_results: list[dict[str, OptimizationResult]], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10)->list[tuple[float, float]]:
     """Compute the Mean Variational Error (MVE) for both gauged and non-gauged superoperators from optimization results."""
 
     opt_results_dict = {str(key): res for key, res in zip(expected_keys, optimization_results)}
@@ -340,7 +334,7 @@ def compute_mve_for_gauged_and_non_gauged_ops(expected_keys:list, optimization_r
     
     return {str(key): {"mean": mean, "std": std} for key, (mean, std) in zip(expected_keys, mve_list)}
 
-def _to_superops_from_optimized(result: dict[str, Any]) -> dict[str, jnp.ndarray]:
+def _to_superops_from_optimized(result: OptimizationResult) -> dict[str, jnp.ndarray]:
     ops = result["optimized_operators"]
     # Explicit key access avoids relying on dict value order.
     return get_mgst_tensors_from_psd_representation(
@@ -350,17 +344,17 @@ def _to_superops_from_optimized(result: dict[str, Any]) -> dict[str, jnp.ndarray
     )
 
 def _extract_gst_superops_list(
-    optimization_results: dict[str, dict[str, Any]],
+    optimization_results: dict[str, OptimizationResult],
     which_data: WhichData,
 ) -> list[dict[str, jnp.ndarray]]:
-    extractors: dict[WhichData, Callable[[dict[str, Any]], dict[str, jnp.ndarray]]] = {
+    extractors: dict[WhichData, Callable[[OptimizationResult], dict[str, jnp.ndarray]]] = {
         "superops_gauged": lambda result: result["superops_gauged"],
         "optimized_operators": _to_superops_from_optimized,
     }
     return [extractors[which_data](result) for result in optimization_results.values()]
 
 
-def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str, dict[str, Any]], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str = "superops_gauged",verbose:bool=False)-> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str, OptimizationResult], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str = "superops_gauged",verbose:bool=False)-> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """
     Compute the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) from a dictionary of optimization results.
     
@@ -428,3 +422,7 @@ def to_json_serializable(error_results):
         {key: {k: float(v) for k, v in inner.items()} for key, inner in realization.items()}
         for realization in error_results
     ]
+    
+def get_all_realizations_for_key(error_results: list[dict[str, OptimizationResult]], key: str) -> list[dict[str, float]]:
+    """Extract all realizations for a specific key from a list of error results."""
+    return [realization[key] for realization in error_results if key in realization]
