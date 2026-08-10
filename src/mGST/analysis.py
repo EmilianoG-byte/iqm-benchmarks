@@ -13,6 +13,12 @@ from typing import Literal, Callable
 
 from mGST.utility_functions_comparisons import get_mgst_tensors_from_psd_representation
 
+import pickle
+import json
+
+from pathlib import Path
+
+
 WhichData = Literal["superops_gauged", "optimized_operators"]
 
 
@@ -426,3 +432,28 @@ def to_json_serializable(error_results):
 def get_all_realizations_for_key(error_results: list[dict[str, OptimizationResult]], key: str) -> list[dict[str, float]]:
     """Extract all realizations for a specific key from a list of error results."""
     return [realization[key] for realization in error_results if key in realization]
+
+def save_optimization_result(optimization_result:OptimizationResult, filename:str):
+    """Save an optimization result as a pickle file."""
+    # check that filename ends with .pkl
+    if not filename.endswith(".pkl"):
+        raise ValueError(f"Filename must end with .pkl, got {filename}")
+    
+    # Create parent directories if they don't exist
+    save_path = Path(filename)
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(filename, 'wb') as f:
+        pickle.dump(optimization_result, f)
+    print(f"Optimization result saved to {filename}")
+    
+def save_variational_errors(error_results:list[dict[str, dict[str, float]]], filename:str):
+    """Save the combined MVE results to a JSON file."""
+    # check that filename ends with .json
+    if not filename.endswith(".json"):
+        raise ValueError(f"Filename must end with .json, got {filename}")
+    
+    
+    with open(filename, "w") as f:
+        json.dump(to_json_serializable(error_results), f, indent=2)
+    print(f"Variational errors saved to {filename}")

@@ -674,7 +674,8 @@ def cost_function_jax_mps(kraus_tensor, povm_psd, state_psd, indices_list, prob_
         raise ValueError("num_shots must be provided when using log-likelihood cost function.")
     
     if kraus_rank == 1: # coherent channels. Can use specialized contraction path.
-        warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
+        if verbose:
+            warnings.warn("Kraus rank = 1 detected. Using the coherent version of the cost function for better performance.")
         if use_log_likelihood:
             # TODO: implement the coherent version once I know this works well.
             inner_function = log_likelihood_mps_single_gate_sequence_jit if jit else log_likelihood_mps_single_gate_sequence

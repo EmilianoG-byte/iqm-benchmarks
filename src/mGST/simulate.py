@@ -526,15 +526,17 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
             break
     
     if converged_below_noise_threshold:
-        first_costs = {cost_type: history[0] for cost_type, history in random_init_result["cost_fn_history"].items()}
-        final_costs = {cost_type: history[-1] for cost_type, history in random_init_result["cost_fn_history"].items()}
-        print(f"✅ Converged below noise threshold after {init_idx+1} random initializations. \n"
-              f" Initial cost function values: {first_costs} \n"
-              f" Last cost function values: {final_costs}")
+        print(f"✅ Converged below noise threshold after {init_idx+1} random initializations. ")
     else:
-        print(f"⚠️ Did not converge below noise threshold after {num_max_random_inits} random initializations."
-              "Using the result from the last random initialization.")
+        print(f"⚠️ Did not converge below noise threshold after {num_max_random_inits} random initializations. "
+              "Using the result from the last random initialization. ")
         
+    first_costs = {cost_type: history[0] for cost_type, history in random_init_result["cost_fn_history"].items()}
+    final_costs = {cost_type: history[-1] for cost_type, history in random_init_result["cost_fn_history"].items()}  
+    
+    print(f" Rnd. Init: Initial cost fn values: {first_costs} \n"
+          f" Rnd. Init: Final cost fn values: {final_costs}")
+    
     # now we again run a full optimization with either the last result (if max iters is hit) or the result that converged below the noise threshold
     
     final_result = run_optimization_workflow(

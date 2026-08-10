@@ -601,6 +601,20 @@ def superop2choi(superop:jnp.ndarray)->jnp.ndarray:
     original_shape = superop.shape
     return superop_tensor.swapaxes(-2, -3).reshape(original_shape) # (..., dim_in x dim_out, dim_in* x dim_out*)
 
+def compute_rank_of_channel(superop:Matrix)->int:
+    """
+    Compute the rank of a quantum channel given its superoperator representation.
+
+    Args:
+        superop: Superoperator representation of the quantum channel with dimensions (dim x dim, dim x dim)
+            This assumes an order: (dim_in x dim_in*, dim_out x dim_out*)
+
+    Returns:
+        The rank of the quantum channel.
+    """
+    choi_matrix = superop2choi(superop)
+    return jnp.linalg.matrix_rank(choi_matrix)
+
 def run_gds_jax(kraus_tensor:jnp.ndarray, povm_psd:jnp.ndarray, state_psd:jnp.ndarray, indices_list:list[list[int]], prob_matrix:jnp.ndarray, max_iter:int=200, target_rel_prec=1e-3, step_size:float=1, optimize_step:bool=True, ls_max_iter:int = 20, use_geodesic:bool=True, dmrg_like:bool=True, use_hessian:bool=False, regularized:bool=False, target_operators:Sequence[jnp.ndarray]= None, num_samples:int = None, return_operators_list:bool = False, **hessian_kwargs)->tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, list[float]]:
     """Run a simple gradient descent optimization on the gates using JAX.
 

@@ -687,6 +687,7 @@ def plot_many_mean_std_vs_x(
     dpi: int = 250,
     main_curve: dict[str, dict[str, float]] = None,
     main_curve_label: str = "Mean",
+    show: bool = True,
 ) -> plt.Figure:
     
     unlabeled_curves = False
@@ -736,7 +737,8 @@ def plot_many_mean_std_vs_x(
     if not unlabeled_curves:
         ax.legend(fontsize=10)
     figure.tight_layout()
-    plt.show()
+    if show:
+        plt.show()
     return figure
 
 def plot_mean_std_vs_x(
