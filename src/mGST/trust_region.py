@@ -8,8 +8,10 @@ from mGST.automatic_diff import hvp, automatic_gradient
 from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, _update_tensor_via_gradient
 from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
 from mGST.linear_algebra import transpose
-from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule, OptimizationScheduleItem
+from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule
+from mGST.trust_region_linearized import riemannian_and_euclidean_gradient_fn, linearize_riemannian_gradient_and_hvp
 
+import jax
 
 from typing import Callable, Any
 
@@ -44,17 +46,8 @@ def riemannian_gradient_fn(x:Tensor, cost_fn:Callable[[Tensor], Scalar], operato
     Returns:
         The Riemannian gradient of the cost function at x.
     """
-    # Compute the Euclidean gradient
-    gradient_euclidean_jax = automatic_gradient(cost_fn)(x) # 2df/dx
-
-    # Take the adjoint due to JAX convention
-    gradient_euclidean = gradient_euclidean_jax.conj() # 2df/dx*
-    # Riemannian gradient based on metric
-    gradient_stiefel_matrix, _ = euclidean_gradients_to_stiefel(
-        gradient_tensor=gradient_euclidean,
-        operator_tensor=x, operator_type=operator_type, metric=metric,
-    )
-    return isometry_to_tensor(gradient_stiefel_matrix, x.shape)
+    rgrad, _ = riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_fn, operator_type=operator_type, metric=metric)
+    return rgrad
 
 def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type:str, metric:str="canonical", return_tensor:bool=True)-> Tensor|Matrix:
     """Compute the Riemannian Hessian-vector product at a point x in the Stiefel manifold using automatic differentiation.
@@ -284,7 +277,7 @@ def _compute_second_order_term(x:Tensor, z:Tensor, gradient_conjugated:Tensor, h
     # (1/2)<z, Hx[z] - z* x.T 2df/dx>e with <z1, z2>e = Re(Tr(z1.T z2))
     return 0.5 * (compute_euclidean_inner_product_tensors(z, hessian_z - extra_factor_tensor, adjoint=False))
      
-def compute_approx_terms_from_tensors(x:Tensor, z:Tensor, n:int, p:int, cost_function:Callable)->tuple[float, float]:
+def compute_approx_terms_from_cost_fn(x:Tensor, z:Tensor, n:int, p:int, cost_function:Callable)->tuple[float, float]:
     """Helper function to compute the first and second order terms of the model approximation for the local cost function in the tangent space.
     
     Handles batch dimensions.
@@ -295,15 +288,47 @@ def compute_approx_terms_from_tensors(x:Tensor, z:Tensor, n:int, p:int, cost_fun
         n: Dimension of the Stiefel manifold.
         p: Dimension of the Stiefel manifold.
         cost_function: The cost function to approximate.
+
+    Returns:
+        A tuple containing:
+        - The first-order term of the model approximation.
+        - The second-order term of the model approximation.
     """
     # TODO: use grad_and_value to evaluate the cost function when computing the gradient at hvp.
     gradient_function = automatic_gradient(cost_function)
-    gradient_conjugated, hessian_z = hvp(function=gradient_function, x=x, z=z) # 2df/dx, 2(Hxx dx + Hx*x dx*)
-    first_order_term = _compute_first_order_term(z, gradient_conjugated)
-    second_order_term = _compute_second_order_term(x=x, z=z, gradient_conjugated=gradient_conjugated, hessian_z=hessian_z, n=n, p=p)
+    gradient_conjugated, euclidean_hvp = hvp(function=gradient_function, x=x, z=z) # 2df/dx, 2(Hxx dx + Hx*x dx*)
+    return compute_first_and_second_order_terms(
+        x=x, z=z, n=n, p=p, euclidean_gradient_conjugated=gradient_conjugated, euclidean_hvp=euclidean_hvp
+    )
+
+def compute_first_and_second_order_terms(x:Tensor, z:Tensor, n:int, p:int, euclidean_gradient_conjugated:Tensor, euclidean_hvp:Tensor)->tuple[float, float]:
+    """Compute first and second order terms of the model approximation, reusing an already-computed gradient/HVP.
+
+    Args:
+        x: Current point on the manifold.
+        z: Update direction (tangent vector).
+        n, p: Dimensions of the Stiefel manifold.
+        euclidean_gradient_conjugated: Euclidean gradient at x (2df/dx), reused from the outer loop's linearization.
+        euclidean_hvp: Euclidean Hessian-vector product at x in direction z, from the same linearization's linear map applied to z.
+    Returns:
+        A tuple containing:
+        - The first-order term of the model approximation.
+        - The second-order term of the model approximation.
+    """
+    first_order_term = _compute_first_order_term(z, euclidean_gradient_conjugated)
+    second_order_term = _compute_second_order_term(x=x, z=z, gradient_conjugated=euclidean_gradient_conjugated, hessian_z=euclidean_hvp, n=n, p=p)
     return first_order_term, second_order_term
 
-def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function:Callable, n:int, p:int, order:int=2, include_zero:bool=True)->float:
+def compute_model_approximation(
+    x:Tensor,
+    update_direction:Tensor,
+    cost_function:Callable,
+    n:int,
+    p:int,
+    euclidean_gradient_conjugated:Tensor = None,
+    euclidean_hvp:Tensor = None,
+    order:int=2,
+    include_zero:bool=True)->float:
     """Compute the model approximation up to second order of the local cost function in the tangent space.
     
     The implementation here is inspired by the metric-free second-order approximation described in Eq. (31 - 33) of [1]
@@ -332,17 +357,30 @@ def compute_model_approximation(x:Tensor, update_direction:Tensor, cost_function
     approximation_value = 0
     if include_zero:
         approximation_value += cost_function(x)
-    # Add higher-order terms if needed
-    first_order_term, second_order_term = compute_approx_terms_from_tensors(
+    # if the gradient and hvp are provided, use them.
+    if euclidean_gradient_conjugated is not None and euclidean_hvp is not None:
+        first_order_term, second_order_term = compute_first_and_second_order_terms(x=x, z=update_direction, n=n, p=p, euclidean_gradient_conjugated=euclidean_gradient_conjugated, euclidean_hvp=euclidean_hvp)
+    else:
+        first_order_term, second_order_term = compute_approx_terms_from_cost_fn(
         x=x, z=update_direction, n=n, p=p, cost_function=cost_function,
     )
+    # Add higher-order terms if needed
     if order >= 1:
         approximation_value += first_order_term
     if order == 2:
         approximation_value += second_order_term
     return approximation_value
 
-def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Callable, x_next:Tensor, n:int, p:int) -> tuple[Scalar, Scalar]:
+def compute_quality_quotient(
+    x:Tensor,
+    update_direction:Tensor,
+    cost_function:Callable,
+    x_next:Tensor,
+    n:int,
+    p:int,
+    euclidean_gradient_conjugated:Tensor = None,
+    euclidean_hvp:Tensor = None,
+    ) -> tuple[Scalar, Scalar]:
     """
     Compute the quality quotient for a proposed update direction in the trust region method.
     
@@ -361,14 +399,14 @@ def compute_quality_quotient(x:Tensor, update_direction:Tensor, cost_function:Ca
         - The cost function value at the proposed next point (Scalar).
     """
     cost_fx_next = cost_function(x_next)
-    return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, order=2, include_zero=False), cost_fx_next
+    return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, euclidean_gradient_conjugated=euclidean_gradient_conjugated, euclidean_hvp=euclidean_hvp, order=2, include_zero=False), cost_fx_next
 
 def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     global_norm_grad_init: float| None = None, 
-    verbose:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
+    verbose:bool=False, linearize:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
     """
     Run the trust region optimization algorithm.
 
@@ -415,15 +453,22 @@ def run_trust_region_optimization(
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
 
     # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
-    rgradient_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
-    rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric, return_tensor=True)
-    retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
-
-    # Compute the initial Riemannian gradient and its norm
-    rgradient = rgradient_fn(x_k)
+    retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)    
+    rgrad_and_euclidean_fn = lambda x: riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
+    
+    if linearize:
+        rgradient, euclidean_gradient_conjugated, hvp_map_linearized, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric)
+        
+    else:
+        # Compute the initial Riemannian gradient and its norm
+        rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
+        
+        rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric, return_tensor=True)
+    
     # TODO: Think whether we need to compute the initial gradient norm all the time.
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
     norm_grad = norm_grad_init
+    
     if global_norm_grad_init is not None:
         norm_grad_init = global_norm_grad_init
     if verbose:
@@ -435,37 +480,52 @@ def run_trust_region_optimization(
                 print(f"TR Iteration: {idx}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}")
 
             # Solve the trust region subproblem
-            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k, num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
+            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k,num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
             
+            # Retract the update direction to obtain the next iterate
+            x_next = retraction(x_k, update_direction)            
             # Compute the quality quotient
-            x_next = retraction(x_k, update_direction)
-            quality_quotient, cost_fx_next = compute_quality_quotient(x=x_k, update_direction=update_direction, cost_function=cost_function, x_next=x_next, n=n, p=p)
+            if linearize:
+                # TODO: get rid of this additional evaluation
+                # by returning the Euclidean directional derivative along with the Riemannian one from the linearized map
+                # from teh truncated_conjugate_gradient evaluation
+                # NOTE: if each evaluation is cheap, this shouldn't matter.
+                _, hvp_euclidean = hvp_map_linearized(update_direction)
+            else:
+                hvp_euclidean = None
             
-            if quality_quotient < 0.25:
-                # Reduce the trust region radius
-                radius_k *= 0.25
-            elif quality_quotient > 0.75 and on_boundary:
-                # Increase the trust region radius
-                radius_k = min(2.0 * radius_k, max_radius)
-            else:
-                # Keep the trust region radius the same
-                radius_k = radius_k
-                
-            if quality_quotient > quotient_trust:
-                # Accept the new point
-                x_k = x_next
-                # Only store accepted points
-                x_k_array.append(x_k)
-                cost_fx_array.append(cost_fx_next)
-            else:
-                # Reject the new point
-                num_rejections += 1
-                if verbose:
-                    print("Update rejected ❌.")
-                x_k = x_k
+            quality_quotient, cost_fx_next = compute_quality_quotient(
+                x=x_k,
+                update_direction=update_direction,
+                cost_function=cost_function,
+                x_next=x_next,
+                n=n,
+                p=p,
+                euclidean_gradient_conjugated=euclidean_gradient_conjugated,
+                hvp_euclidean=hvp_euclidean,
+                )
+            
+            radius_k, x_k, x_k_array, cost_fx_array, num_rejections = _update_trust_region_radius_and_xk(
+                quality_quotient=quality_quotient,
+                radius_k=radius_k,
+                max_radius=max_radius,
+                on_boundary=on_boundary,
+                quotient_trust=quotient_trust,
+                x_k=x_k,
+                x_next=x_next,
+                x_k_array=x_k_array,
+                cost_fx_array=cost_fx_array,
+                cost_fx_next=cost_fx_next,
+                num_rejections=num_rejections,
+                verbose=verbose
+            )
             # Compute the Riemannian gradient at the new point
-            rgradient = rgradient_fn(x_k)
-            
+            if linearize:
+                # Linearize at the new point for the next iteration
+                # this creates a new rhessian_vector_fn using the new linear map.
+                rgradient, euclidean_gradient_conjugated, hvp_map_linearized, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric)
+            else:
+                rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
             # Determine stopping criteria based on gradient norm
             norm_grad = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_k, metric=metric))
             if determine_tr_stopping_criteria(norm_grad, norm_grad_init, tol_grad=tol_grad):
@@ -479,6 +539,33 @@ def run_trust_region_optimization(
         print("=======================================")
         print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
     return x_k, x_k_array, cost_fx_array, norm_grad
+
+def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, max_radius:float, on_boundary:bool, quotient_trust:float, x_k:Tensor, x_next:Tensor, x_k_array:list, cost_fx_array:list, cost_fx_next:float, num_rejections:int, verbose:bool):
+    "Auxiliary function to update the trust region radius and accept/reject the new point based on the quality quotient."
+    if quality_quotient < 0.25:
+        # Reduce the trust region radius
+        radius_k *= 0.25
+    elif quality_quotient > 0.75 and on_boundary:
+        # Increase the trust region radius
+        radius_k = min(2.0 * radius_k, max_radius)
+    else:
+        # Keep the trust region radius the same
+        radius_k = radius_k
+        
+    if quality_quotient > quotient_trust:
+        # Accept the new point
+        x_k = x_next
+        # Only store accepted points
+        x_k_array.append(x_k)
+        cost_fx_array.append(cost_fx_next)
+    else:
+        # Reject the new point
+        num_rejections += 1
+        if verbose:
+            print("Update rejected ❌.")
+        x_k = x_k
+
+    return radius_k, x_k, x_k_array, cost_fx_array, num_rejections
 
 def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
     """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
