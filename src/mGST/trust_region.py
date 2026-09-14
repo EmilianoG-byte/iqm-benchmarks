@@ -490,9 +490,9 @@ def run_trust_region_optimization(
                 # by returning the Euclidean directional derivative along with the Riemannian one from the linearized map
                 # from teh truncated_conjugate_gradient evaluation
                 # NOTE: if each evaluation is cheap, this shouldn't matter.
-                _, hvp_euclidean = hvp_map_linearized(update_direction)
+                _, euclidean_hvp = hvp_map_linearized(update_direction)
             else:
-                hvp_euclidean = None
+                euclidean_hvp = None
             
             quality_quotient, cost_fx_next = compute_quality_quotient(
                 x=x_k,
@@ -502,7 +502,7 @@ def run_trust_region_optimization(
                 n=n,
                 p=p,
                 euclidean_gradient_conjugated=euclidean_gradient_conjugated,
-                hvp_euclidean=hvp_euclidean,
+                euclidean_hvp=euclidean_hvp,
                 )
             
             radius_k, x_k, x_k_array, cost_fx_array, num_rejections = _update_trust_region_radius_and_xk(

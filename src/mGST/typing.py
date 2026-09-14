@@ -37,6 +37,7 @@ class TrustRegionOptions(BaseOptimizationOptions):
     theta_cg: float | None = 1 # before by mistake we set it to 0.5 (WRONG). Based on book suggestions
     kappa_cg: float | None = 1/10 # decided to set it as default based on experimentation and book suggestions.
     verbose_cg: bool = False
+    linearize: bool = False # whether to linearize the HVP for repeated evaluation.
 
 @dataclass
 class GradientDescentOptions(BaseOptimizationOptions):
