@@ -1,4 +1,7 @@
-"""Beta module to possibly improve the efficiency of Riemannian gradient and Hessian-vector computations."""
+"""Beta module to possibly improve the efficiency of Riemannian gradient and Hessian-vector computations.
+
+For documentation see JAX's docs: https://docs.jax.dev/en/latest/_autosummary/jax.linearize.html
+"""
 
 from mGST.typing import Scalar, Matrix, Tensor
 from typing import Callable

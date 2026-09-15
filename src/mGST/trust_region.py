@@ -406,7 +406,7 @@ def run_trust_region_optimization(
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     global_norm_grad_init: float| None = None, 
-    verbose:bool=False, linearize:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar]:
+    verbose:bool=False, linearize:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar, Scalar]:
     """
     Run the trust region optimization algorithm.
 
@@ -435,6 +435,7 @@ def run_trust_region_optimization(
         - A list of all accepted points during the optimization.
         - A list of the cost function values at each accepted point.
         - The final gradient norm.
+        - The final trust region radius. To be used in the next iteration.
 
     See references for details on the choice of the parameters such as the trust region radius [5], tolerances [1, 2, 4], kappa and theta [1, 2, 3].
 
@@ -538,7 +539,7 @@ def run_trust_region_optimization(
     if verbose:
         print("=======================================")
         print(f"Optimization finished ✅. \n Iters: {idx+1}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}. Rejections: {num_rejections}")
-    return x_k, x_k_array, cost_fx_array, norm_grad
+    return x_k, x_k_array, cost_fx_array, norm_grad, radius_k
 
 def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, max_radius:float, on_boundary:bool, quotient_trust:float, x_k:Tensor, x_next:Tensor, x_k_array:list, cost_fx_array:list, cost_fx_next:float, num_rejections:int, verbose:bool):
     "Auxiliary function to update the trust region radius and accept/reject the new point based on the quality quotient."
@@ -667,6 +668,7 @@ def run_riemannian_optimization(
     global_gradient_norm_tol: float = 1e-6,
     verbose:bool=False,
     compute_least_squares:bool| int = False,
+    carry_over_radius: bool = True,
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -692,6 +694,9 @@ def run_riemannian_optimization(
         verbose: Whether to print information during the optimization
         compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
             If this is any integer, we assume that we want to compute after every operator.
+        carry_over_radius: Whether to carry over the trust region radius from the previous outer iteration.
+            Only affects operators currently using TrustRegionOptions;
+            ignored for operators using GradientDescentOptions.
         
     Returns:
         A tuple containing:
@@ -750,17 +755,23 @@ def run_riemannian_optimization(
     for operator, option in optimization_schedule.items()
     )
     
+    # Per-operator trust-region radius carried over.
+    # None on the first call for each operator, so the schedule's own radius_init is used.
+    # Will continue to be None unless `carry_over_radius=True`.
+    carried_radius = {"kraus": None, "povm": None, "state": None}
+    
     print("🔰 Starting Riemannian Optimization 🔰")
     if verbose:
         print(f" * optimization schedule: \n{optimization_schedule_print} \n{convergence_criteria}")
         
     try:
         for idx in range(num_iterations):
+            # TODO: I think I should be able to convert each optimization on each operator into a function to call it 3 times.
             # Optimize POVM
             current_operator = "povm"
             povm_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
-            povm_psd_k, cost_values_povm, gradient_norm_k_povm = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm
+            povm_psd_k, cost_values_povm, gradient_norm_k_povm, final_radius_povm = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm, radius_init_override=carried_radius[current_operator]
             )
             
             # only compute the least squares at the end.
@@ -787,8 +798,8 @@ def run_riemannian_optimization(
             # Optimize Kraus
             current_operator = "kraus"
             kraus_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
-            kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus
+            kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus, final_radius_kraus = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus, radius_init_override=carried_radius[current_operator],
             )
             
             # only compute the least squares at the end.
@@ -813,8 +824,8 @@ def run_riemannian_optimization(
             # Optimize State
             current_operator = "state"
             state_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
-            state_psd_k, cost_values_state, gradient_norm_k_state = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state
+            state_psd_k, cost_values_state, gradient_norm_k_state, final_radius_state = _optimize_single_operator(
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state, radius_init_override=carried_radius[current_operator]
             )
             # only compute the least squares at the end.
             if compute_least_squares:
@@ -846,12 +857,18 @@ def run_riemannian_optimization(
             all_gradients_small, convergence_reason = convergence_criteria_from_gradients_norms(gradient_norm_k_povm, gradient_norm_k_kraus, gradient_norm_k_state, threshold=global_gradient_norm_tol)
             if all_gradients_small:
                 break
+            
+            # If False, they remain None.
+            if carry_over_radius:
+                carried_radius["kraus"] = final_radius_kraus
+                carried_radius["povm"] = final_radius_povm
+                carried_radius["state"] = final_radius_state
 
     except KeyboardInterrupt:
         print(f"Optimized interrupted by user at outer iteration {idx}.")
         
     
-    final_message = f"‼️ Full optimization finished at iteration {idx + 1}/{num_iterations} ‼️ \n Reason: {convergence_reason}"
+    final_message = f"‼️ Full optimization finished at iteration {idx + 1}/{num_iterations} ‼️ \n Reason: {convergence_reason}. \n Trust region radii carried over: {carried_radius}."
     print(final_message) 
         
     optimized_operators = {
@@ -932,7 +949,7 @@ def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn
         message = f"Relative change in cost function value {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
     return converged, message, relative_change
 
-def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar]:
+def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None, radius_init_override:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar, Scalar]:
     """
     Optimize a single operator (Kraus, POVM, or State) using the specified optimization options.
     
@@ -946,15 +963,22 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         cost_fn_kwargs: Additional keyword arguments to pass to the cost function. Needed both for TrustRegionOptions and GradientDescentOptions.
         save_intermediate_cost_values: Whether to save all cost function values during the optimization of the operator. For now, we can only save intermediate values if using TrustRegionOptions, since the GDS does not return intermediate values.
         global_gradient_norm_init: A gradient norm value to used as the initial gradient norm for the stopping criteria.
+        radius_init_override: If provided overrides the schedule's radius_init for this
+        call.
         
     Returns:
         A tuple containing:
         - The optimized operator tensor.
         - A list of cost function values during the optimization of this operator (if save_intermediate_cost_values is True and using TrustRegionOptions, otherwise a list with only the final cost function value).
         - The initial gradient norm used for the stopping criteria (RTR) or the gradient used in this step (GDS).
+        - The final trust-region radius (TrustRegionOptions) or None (GradientDescentOptions, which has no radius concept).
     """
     options_dict = optimization_options.to_dict()
     if isinstance(optimization_options, TrustRegionOptions):
+        # override the initial radius if provided
+        if radius_init_override is not None:
+            options_dict["radius_init"] = radius_init_override
+
         if operator_type == "povm":
             x_init = povm_psd
             cost_fn_x = lambda x: cost_function(
@@ -971,7 +995,7 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         # Purposedly supressing warnings since the TR method raises warnings often, e.g. when the gradient is close to zero or t < 0.
         with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                optimized_operator, _, cost_values, norm_grad_k = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, global_norm_grad_init=global_norm_grad_init, **options_dict)
+                optimized_operator, _, cost_values, norm_grad_k, final_radius = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, global_norm_grad_init=global_norm_grad_init, **options_dict)
         if save_intermediate_cost_values:
             saved_cost_values = cost_values
         else:
@@ -984,10 +1008,11 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         print(f"GDS started for operator: {operator_type} 🚀.")
         optimized_operator, _, norm_grad_k ,cost_value = _update_tensor_via_gradient(operator_type=operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, return_cost_fn_value=True, **gds_options)
         saved_cost_values = [cost_value]
+        final_radius = None
     else:
         raise ValueError(f"Invalid optimization options of type: {type(optimization_options)}. Must be TrustRegionOptions or GradientDescentOptions.")
 
-    return optimized_operator, saved_cost_values, norm_grad_k
+    return optimized_operator, saved_cost_values, norm_grad_k, final_radius
 
 
 def estimate_noise_floor_threshold(probability_matrix:jnp.ndarray, num_shots:int, multiplier:float = 5.0)->float:
