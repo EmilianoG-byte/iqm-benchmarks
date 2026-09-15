@@ -437,7 +437,7 @@ def state_fidelity_from_density_matrices(rho_est:jnp.ndarray, rho_target:jnp.nda
     return jnp.trace(factorize_psd_truncated(rho_est_sqrt.conj().T @ rho_target @ rho_est_sqrt, unique_srt=True))**2
     
     
-def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray, unitary:bool=True)->float:
+def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray, unitary:bool=True, sum_over:bool=True)->float:
     """Compute the process fidelity between the estimate and target Kraus operators.
     
     With the new implementation using ellipsis, we can use the same function for individual kraus and tensor of 4 dimensions.
@@ -458,6 +458,7 @@ def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarr
         unitary: If True, at least one of the quantum channels is assumed to be unitary. 
             Then, the fidelity can be computed as the Hilbert Schmidt inner product of the superoperators. This is equivalent to calculating the state fidelity for pure states.
             If False, we instead return the state fidelity between the choi states of the two arrays channels. 
+        sum_over: If True, sum over the first dimension (number of gates) in the output fidelity.
         
     Returns:
         The process fidelity between the two quantum channels.
@@ -466,7 +467,7 @@ def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarr
     
     if unitary:
         # tr(|psi><psi|^dagger * rho) = <psi| rho |psi> 
-        return (hilbert_schmidt_inner_product(kraus_tensor_est, kraus_tensor_target).real) / dim**2
+        return (hilbert_schmidt_inner_product(kraus_tensor_est, kraus_tensor_target, sum_over=sum_over).real) / dim**2
     
     # This is equivalent to using the state_fidelity on the individual choi matrices. Namely:
     # choi_sqrt_est_test = kraus_tensor_est.reshape(rank_kraus, dim**2).T
@@ -474,9 +475,13 @@ def process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarr
     # state_fidelity(operator_sqrt_est=choi_sqrt_est_test, operator_sqrt_target=choi_sqrt_target_test) / dim**2
     
     choi_product = jnp.einsum("...roi, ...qoi -> ...rq", kraus_tensor_est.conj(), kraus_tensor_target)
-    return jnp.sum(jnp.linalg.norm(choi_product, ord="nuc", axis=(-2, -1)) **2)/ dim**2
+    norms_choi = jnp.linalg.norm(choi_product, ord="nuc", axis=(-2, -1)) **2
+    if sum_over:
+        return jnp.sum(norms_choi) / dim**2
+    else:
+        return norms_choi / dim**2
     
-def hilbert_schmidt_inner_product(kraus_tensor_1:jnp.ndarray, kraus_tensor_2:jnp.ndarray)->float:
+def hilbert_schmidt_inner_product(kraus_tensor_1:jnp.ndarray, kraus_tensor_2:jnp.ndarray, sum_over:bool=True)->float:
     """Compute the Hilbert Schmidt inner product between the estimate and target superoperators defined by the kraus tensors.
     
     This is equivalent to the entanglement fidelity when one of the channels is unital.
@@ -484,17 +489,29 @@ def hilbert_schmidt_inner_product(kraus_tensor_1:jnp.ndarray, kraus_tensor_2:jnp
     Note: this sums over the num_gates dimension!
     
     Args:
-        kraus_tensor_est: kraus tensor of the estimate of dimensions (..., kraus_rank, dim_out, dim_in)
+        kraus_tensor_1: kraus tensor of the first channel of dimensions (..., kraus_rank, dim_out, dim_in)
+        kraus_tensor_2: kraus tensor of the second channel of dimensions (..., kraus_rank, dim_out, dim_in)
+        sum_over: If True, sum over the first dimension (number of gates) in the output inner product.
+    Returns:
+        The Hilbert Schmidt inner product between the two quantum channels.
     """
     # This path corresponds to contracting the upper tensors together, the lower tensors together, scaling of d**2 * rank_2 * rank_1 - each
     # and then contracting these together, scaling of rank_1 * rank_2
     # see notes to compare against the scaling of d**5 * rank_1 of naive contraction
     optimal_path_trace = [(0, 1), (0, 1), (0, 1)]
-    return jnp.einsum(
-        "...ajk, ...bjk, ...alm, ...blm->", 
-        kraus_tensor_2.conj(), kraus_tensor_1, 
-        kraus_tensor_2, kraus_tensor_1.conj(), optimize=optimal_path_trace
-    )
+    
+    if sum_over:
+        return jnp.einsum(
+            "...ajk, ...bjk, ...alm, ...blm->", 
+            kraus_tensor_2.conj(), kraus_tensor_1, 
+            kraus_tensor_2, kraus_tensor_1.conj(), optimize=optimal_path_trace
+        )
+    else:
+        return jnp.einsum(
+            "...ajk, ...bjk, ...alm, ...blm->... ", 
+            kraus_tensor_2.conj(), kraus_tensor_1, 
+            kraus_tensor_2, kraus_tensor_1.conj(), optimize=optimal_path_trace
+        )
 
 def average_process_fidelity(kraus_tensor_est:jnp.ndarray, kraus_tensor_target:jnp.ndarray, unital:bool=False)->float:
     """Compute the average fidelity between the estimate and target Kraus operators.
