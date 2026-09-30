@@ -72,7 +72,7 @@ def A_SFN_riem_Hess(K, A, B, y, J, d, r, n_povm, lam=1e-3, mle=False):
 
     X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
     # Euclidean derivatives
-    dA_, dMdM, dMconjdM, dconjdA = ddA_derivs(X, A, B, J, y, r, pdim, n_povm)
+    dA_, dMdM, dMconjdM, dconjdA = ddA_derivs(X, A, B, J, y, r, pdim, n_povm, mle=mle)
     # dA_: first derivative wrt to A
     # dconjA: second derivative first by A* and then by A
 
@@ -751,6 +751,7 @@ def run_mGST(
     init=None,
     verbose_level=0,
     return_operators_list:bool=False,
+    use_log_likelihood:bool=True,
 ):  # pylint: disable=too-many-branches, too-many-statements
     """Main mGST routine
 
@@ -831,24 +832,24 @@ def run_mGST(
         A = np.array([la.cholesky(E[k].reshape(pdim, pdim) + 1e-14 * np.eye(pdim)).T.conj() for k in range(n_povm)])
         B = la.cholesky(rho.reshape(pdim, pdim))
         X = np.einsum("ijkl,ijnm -> iknlm", K, K.conj()).reshape((d, r, r))
-        res_list = [objf(X, E, rho, J, y)]
+        res_list_secondary_opt = [objf(X, E, rho, J, y)]
     else:
         for i in range(max_inits):
             K, X, E, rho = random_gs(d, r, rK, n_povm)
             A = np.array([la.cholesky(E[k].reshape(pdim, pdim) + 1e-14 * np.eye(pdim)).T.conj() for k in range(n_povm)])
             B = la.cholesky(rho.reshape(pdim, pdim))
-            res_list = [objf(X, E, rho, J, y)]
+            res_list_secondary_opt = [objf(X, E, rho, J, y)]
             with logging_redirect_tqdm(loggers=[qcvv_logger] if verbose_level > 0 else None):
                 for _ in trange(max_iter, disable=verbose_level == 0):
                     yb, Jb = batch(y, J, bsize)
                     K, X, E, rho, A, B = optimize(yb, Jb, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements)
-                    res_list.append(objf(X, E, rho, J, y))
-                    if res_list[-1] < delta:
+                    res_list_secondary_opt.append(objf(X, E, rho, J, y))
+                    if res_list_secondary_opt[-1] < delta:
                         qcvv_logger.info(f"Batch optimization successful, improving estimate over full data....")
                         success = True
                         break
             if verbose_level == 2:
-                plot_objf(res_list, f"Objective function for batch optimization", delta=delta)
+                plot_objf(res_list_secondary_opt, f"Objective function for batch optimization", delta=delta)
             if success:
                 break
             if verbose_level > 0:
@@ -863,34 +864,39 @@ def run_mGST(
     kraus_full_i = [X]        
 
     with logging_redirect_tqdm(loggers=[qcvv_logger] if verbose_level > 0 else None):
-        res_list_mle = []
+        res_list_main_opt = [objf(X, E, rho, J, y, mle=use_log_likelihood)]
+        
         for _ in trange(final_iter, disable=verbose_level == 0):
-            K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=True)
+            
+            K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=use_log_likelihood)
             
             kraus_i.append(K)
             povm_i.append(E)
             state_i.append(rho)
             kraus_full_i.append(X)
             
-            res_list.append(objf(X, E, rho, J, y))
-            res_list_mle.append(objf(X, E, rho, J, y, mle=True))
+            # if we are using the log-likelihood as main opt, we should also compute the least squares.
+            if use_log_likelihood:
+                res_list_secondary_opt.append(objf(X, E, rho, J, y))
+            res_list_main_opt.append(objf(X, E, rho, J, y, mle=use_log_likelihood))
             if (
-                len(res_list_mle) >= 2
-                and np.abs(res_list_mle[-2] - res_list_mle[-1]) < res_list_mle[-1] * target_rel_prec
+                len(res_list_main_opt) >= 2
+                and np.abs(res_list_main_opt[-2] - res_list_main_opt[-1]) < res_list_main_opt[-1] * target_rel_prec
             ):
                 break
     if verbose_level == 2:
-        plot_objf(res_list, f"Least squares error over batches and full data", delta=delta)
-        plot_objf(res_list_mle, f"Negative log-likelihood over full data")
+        if use_log_likelihood:
+            plot_objf(res_list_secondary_opt, f"Least squares error over batches and full data", delta=delta)
+        plot_objf(res_list_main_opt, f"Negative log-likelihood over full data")
     if verbose_level > 0:
-        if success or (res_list[-1] < delta):
+        if success or (res_list_secondary_opt[-1] < delta):
             qcvv_logger.info(f"Convergence criterion satisfied")
         else:
             qcvv_logger.warning(
                 f"Convergence criterion not satisfied. Potential causes include too low max_iterations, bad initialization or model mismatch."
             )
         qcvv_logger.info(
-            f"Final objective {Decimal(res_list[-1]):.2e} in time {(time.time() - t0):.2f}s",
+            f"Final objective {Decimal(res_list_secondary_opt[-1]):.2e} in time {(time.time() - t0):.2f}s",
         )
         
     if return_operators_list:
@@ -898,4 +904,8 @@ def run_mGST(
         E = povm_i
         rho = state_i
         X = kraus_full_i
-    return K, X, E, rho, res_list
+        
+    main_opt_name = "log_likelihood" if use_log_likelihood else "least_squares"
+    second_opt_name = "least_squares"
+        
+    return K, X, E, rho, {main_opt_name: res_list_main_opt, second_opt_name: res_list_secondary_opt}

@@ -212,10 +212,14 @@ def get_full_mgst_parameters_from_result_and_configuration(
     y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt = get_mgst_parameters_from_dataset(dataset, qubit_layout=qubit_layout, rK=kraus_rank)
     K, X, E, rho = initialize_mgst_parameters(dataset=dataset, target_init=True, seed=seed)
 
+    indices_list = [indices[indices != -1] for indices in J]
+    
     if only_jax_variables:
-        indices_list = [indices[indices != -1] for indices in J]
         return K, X, E, rho, y, indices_list
-    return K, X, E, rho, y, J, l, d, pdim, r, n_povm, bsize, meas_samples, n, nt, kraus_rank
+    
+    additional_mgst_vars = {"J": J, "l": l, "bsize": bsize}
+    
+    return K, X, E, rho, y, indices_list, additional_mgst_vars
 
 def get_full_mgst_parameters_from_benchmark(benchmark:CompressiveGST, seed:int = 42, only_jax_variables:bool = False, run_benchmark:bool = False):
     """
@@ -244,6 +248,18 @@ def get_full_mgst_parameters_from_configuration(configuration:GSTConfiguration, 
     Get the full set of parameters required to run mGST from a given configuration.
     
     Note: when using `only_jax_variables=True`, the returned indices J will be a list of arrays where each array contains only the valid indices (i.e., indices that are not -1).
+    
+    Returns:
+        In order:
+        1. The Kraus tensor (compressed form).
+        2. The Kraus superoperator (mgst form).
+        3. POVM (mgst form).
+        4. State (mgst form).
+        5. Probability matrix.
+        6. List of indices (no padding).
+    
+        Additionally, if `only_jax_variables=True`:
+        7. A dictionary containing the list of indices with padding, the batch-size and the max length of the sequences.
     """
     benchmark = CompressiveGST(backend, configuration)
     return get_full_mgst_parameters_from_benchmark(benchmark=benchmark, seed=seed, only_jax_variables=only_jax_variables, run_benchmark=True)

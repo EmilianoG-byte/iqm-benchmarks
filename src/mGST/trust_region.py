@@ -5,8 +5,8 @@ Trust Region module for Optimization on the Stiefel Manifold
 import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
-from mGST.utility_functions_comparisons import tensor_to_isometry, euclidean_gradients_to_stiefel, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, _update_tensor_via_gradient
-from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors
+from mGST.utility_functions_comparisons import tensor_to_isometry, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, _update_tensor_via_gradient
+from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors, project_onto_tangent_space
 from mGST.linear_algebra import transpose
 from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule
 from mGST.trust_region_linearized import riemannian_and_euclidean_gradient_fn, linearize_riemannian_gradient_and_hvp
@@ -186,19 +186,23 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
             on_boundary = True
             break
         
+        solution_matrix_old = solution_matrix
         alpha = norm_sqrd_r / curvature
-        solution_tensor += alpha * delta_tensor
+        solution_tensor_new  = solution_tensor + alpha * delta_tensor
         
-        solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p) 
+        solution_matrix = tensor_to_isometry(solution_tensor_new, n=n, p=p) 
         norm_solution = jnp.sqrt(riemannian_metric(solution_matrix, solution_matrix, x_matrix, metric=metric))
         
         # Check if the solution exceeds the trust region boundary
         if norm_solution >= radius:
+            # this should be evaluated at iteration k not k+1
             reason = "Exceeded trust region boundary 📈."
-            step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
+            step = compute_step_size(z=solution_matrix_old, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
             solution_tensor += step * delta_tensor
             on_boundary = True
             break
+        
+        solution_tensor = solution_tensor_new
         
         r_tensor += alpha * rhessian_delta_tensor
         r_matrix = tensor_to_isometry(r_tensor, n=n, p=p)
@@ -215,6 +219,12 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         beta = norm_sqrd_r_next / norm_sqrd_r
         delta_tensor = -r_tensor + beta * delta_tensor
         norm_sqrd_r = norm_sqrd_r_next
+        
+        # project delta_tensor onto the tangent space at the current solution
+        # done for numerical stability
+        delta_matrix_new = tensor_to_isometry(delta_tensor, n=n, p=p)
+        delta_matrix_new = project_onto_tangent_space(x=solution_matrix, z=delta_matrix_new)
+        delta_tensor = isometry_to_tensor(delta_matrix_new, tensor_shape=delta_tensor.shape)
 
     if verbose:
             print(f"TCG finished after: {iter + 1}/{num_iterations} iters. \n Reason: {reason}")
@@ -489,7 +499,7 @@ def run_trust_region_optimization(
             if linearize:
                 # TODO: get rid of this additional evaluation
                 # by returning the Euclidean directional derivative along with the Riemannian one from the linearized map
-                # from teh truncated_conjugate_gradient evaluation
+                # from the truncated_conjugate_gradient evaluation
                 # NOTE: if each evaluation is cheap, this shouldn't matter.
                 _, euclidean_hvp = hvp_map_linearized(update_direction)
             else:
@@ -563,7 +573,7 @@ def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, m
         # Reject the new point
         num_rejections += 1
         if verbose:
-            print("Update rejected ❌.")
+            print(f"Update rejected ❌. Quality quotient: {quality_quotient:.6e} < {quotient_trust:.6e}")
         x_k = x_k
 
     return radius_k, x_k, x_k_array, cost_fx_array, num_rejections
