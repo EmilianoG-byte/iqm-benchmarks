@@ -396,25 +396,28 @@ def compute_quality_quotient(
     p:int,
     euclidean_gradient_conjugated:Tensor = None,
     euclidean_hvp:Tensor = None,
+    cost_fx:Scalar|None = None,
     ) -> tuple[Scalar, Scalar]:
     """
     Compute the quality quotient for a proposed update direction in the trust region method.
-    
+
     Handles batch dimensions.
-    
+
     Args:
         x: Current point on the manifold.
         update_direction: Proposed update direction (tangent vector).
         cost_function: The cost function to approximate.
         x_next: The proposed next point on the manifold after applying the update direction using the retraction.
         n,p : Dimensions of the Stiefel manifold.
-        
+        cost_fx: The cost function value at x, if already known. If None, it is recomputed.
+
     Returns:
         A tuple containing:
         - The quality quotient (Scalar).
         - The cost function value at the proposed next point (Scalar).
     """
-    cost_fx = cost_function(x)
+    if cost_fx is None:
+        cost_fx = cost_function(x)
     cost_fx_next = cost_function(x_next)
     # f(x_next) - f(x)
     cost_decrease = cost_fx_next - cost_fx
@@ -533,9 +536,11 @@ def run_trust_region_optimization(
                 p=p,
                 euclidean_gradient_conjugated=euclidean_gradient_conjugated,
                 euclidean_hvp=euclidean_hvp,
+                # only accepted points are stored, so this is f(x_k)
+                cost_fx=cost_fx_array[-1],
                 )
-            
-            radius_k, x_k, x_k_array, cost_fx_array, num_rejections = _update_trust_region_radius_and_xk(
+
+            radius_k, x_k, x_k_array, cost_fx_array, num_rejections, accepted = _update_trust_region_radius_and_xk(
                 quality_quotient=quality_quotient,
                 radius_k=radius_k,
                 max_radius=max_radius,
@@ -549,6 +554,9 @@ def run_trust_region_optimization(
                 num_rejections=num_rejections,
                 verbose=verbose
             )
+            # If the step was rejected, x_k did not change: the gradient, linearization and gradient norm are still valid.
+            if not accepted:
+                continue
             # Compute the Riemannian gradient at the new point
             if linearize:
                 # Linearize at the new point for the next iteration
@@ -586,7 +594,8 @@ def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, m
         # Keep the trust region radius the same
         radius_k = radius_k
         
-    if quality_quotient > quotient_trust:
+    accepted = bool(quality_quotient > quotient_trust)
+    if accepted:
         # Accept the new point
         x_k = x_next
         # Only store accepted points
@@ -597,9 +606,8 @@ def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, m
         num_rejections += 1
         if verbose:
             print(f"Update rejected ❌. Quality quotient: {quality_quotient:.6e} < {quotient_trust:.6e}")
-        x_k = x_k
 
-    return radius_k, x_k, x_k_array, cost_fx_array, num_rejections
+    return radius_k, x_k, x_k_array, cost_fx_array, num_rejections, accepted
 
 def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor, metric:str = "euclidean")-> float:
     """Compute the Riemannian metric at point x between two tangent vectors represented as tensors.
@@ -703,6 +711,7 @@ def run_riemannian_optimization(
     compute_least_squares:bool| int = False,
     carry_over_radius: bool = True,
     cost_floor: float|None = None,
+    absolute_tolerance: float|None = None,
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -732,7 +741,9 @@ def run_riemannian_optimization(
         carry_over_radius: Whether to carry over the trust region radius from the previous outer iteration.
             Only affects operators currently using TrustRegionOptions;
             ignored for operators using GradientDescentOptions.
-        
+        absolute_tolerance: Tolerance, in units of the cost function (nats for the log-likelihood), on the estimated
+            remaining decrease of the cost function. See `convergence_criteria_from_absolute_tolerance`. If None, this stopping criterion is disabled.
+
     Returns:
         A tuple containing:
         - A dictionary with the optimized operators: {"kraus": kraus_tensor, "povm": povm_psd, "state": state_psd}.
@@ -777,7 +788,9 @@ def run_riemannian_optimization(
         relative_precision = 0.0 # Set to zero to disable early stopping based on relative precision.
     else:
         convergence_criteria += f"+ Relative Precision 📏 {relative_precision:.2e} \n"
-        
+    if absolute_tolerance is not None:
+        convergence_criteria += f"+ Absolute Tolerance 📉 {absolute_tolerance:.2e} \n"
+
     # Convergence based on early stopp using norms is always present as a last resource
     convergence_criteria += "+ Gradient(s) Norm(s) 📐"
     # Default convergence reason
@@ -809,7 +822,9 @@ def run_riemannian_optimization(
     # Cost at the start of the current outer iteration.
     cost_fn_previous_iteration = cost_function(kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init, **cost_fn_kwargs)
     cost_fn_history = [cost_fn_previous_iteration]
-        
+    # Decrease of the cost function over the previous outer iteration (used by the absolute tolerance criterion).
+    cost_decrease_previous_iteration = None
+
     try:
         for idx in range(num_iterations):
             # TODO: I think I should be able to convert each optimization on each operator into a function to call it 3 times.
@@ -886,7 +901,16 @@ def run_riemannian_optimization(
             
             if relative_cost_below_precision:
                 break
-                
+
+            if absolute_tolerance is not None:
+                cost_decrease = cost_fn_previous_iteration - cost_fn_current_k
+                remaining_below_tolerance, convergence_reason, remaining_decrease = convergence_criteria_from_absolute_tolerance(cost_decrease=cost_decrease, cost_decrease_previous=cost_decrease_previous_iteration, absolute_tolerance=absolute_tolerance)
+                if verbose:
+                    print(f" 📉 Decrease over iteration {idx + 1}: {cost_decrease:.2e}. Estimated remaining decrease: {remaining_decrease:.2e}. Target: {absolute_tolerance:.2e}.")
+                if remaining_below_tolerance:
+                    break
+                cost_decrease_previous_iteration = cost_decrease
+
             cost_fn_previous_iteration = cost_fn_current_k
 
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
@@ -1003,6 +1027,45 @@ def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn
         converged = True
         message = f"Relative change in reducible cost {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
     return converged, message, relative_change
+
+def convergence_criteria_from_absolute_tolerance(cost_decrease:float, cost_decrease_previous:float|None, absolute_tolerance:float)-> tuple[bool, str, float]:
+    """Determine convergence from an estimate of how much the cost function can still decrease.
+
+    In the tail of the optimization the outer iterations converge linearly: the decrease per outer iteration
+    shrinks by a roughly constant factor q = Δf_k / Δf_{k-1} < 1. Summing the geometric series, the remaining decrease is
+
+        f_k - f_∞ ≈ Δf_k * q / (1 - q).
+
+    We stop when max(Δf_k, Δf_k * q / (1 - q)) < absolute_tolerance. Taking the max with Δf_k makes the estimate
+    conservative when q < 1/2 (e.g. noisy q early on). If q >= 1 (no linear convergence yet) or q is undefined
+    (first iteration, or Δf_{k-1} <= 0), the remaining decrease is considered infinite and we never stop.
+
+    For the negative log-likelihood the tolerance is in nats: 2 Δf is a likelihood-ratio statistic, so a change in f
+    of 0.5 nats corresponds to moving ~1 standard deviation along one parameter direction. A tolerance of ~0.1 nats
+    therefore means the optimization error is well below the statistical uncertainty of the estimate.
+
+    Args:
+        cost_decrease: Δf_k = f_{k-1} - f_k, the decrease of the cost function over the last outer iteration.
+        cost_decrease_previous: Δf_{k-1}, the decrease over the outer iteration before. None on the first iteration.
+        absolute_tolerance: Tolerance on the estimated remaining decrease, in units of the cost function.
+
+    Returns:
+        A tuple containing:
+        - A boolean indicating whether convergence criteria are met.
+        - A string describing the reason for convergence.
+        - The estimated remaining decrease of the cost function.
+    """
+    message = "No convergence criteria met yet ⏳."
+    converged = False
+    remaining_decrease = jnp.inf
+    if cost_decrease_previous is not None and cost_decrease_previous > 0:
+        rate = cost_decrease / cost_decrease_previous
+        if 0 <= rate < 1:
+            remaining_decrease = max(cost_decrease, cost_decrease * rate / (1 - rate))
+    if remaining_decrease < absolute_tolerance:
+        converged = True
+        message = f"Estimated remaining decrease of the cost function {remaining_decrease:.2e} below absolute tolerance {absolute_tolerance:.2e} 📉."
+    return converged, message, remaining_decrease
 
 def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None, radius_init_override:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar, Scalar]:
     """
