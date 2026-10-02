@@ -866,6 +866,7 @@ def run_mGST(
     with logging_redirect_tqdm(loggers=[qcvv_logger] if verbose_level > 0 else None):
         res_list_main_opt = [objf(X, E, rho, J, y, mle=use_log_likelihood)]
         
+        stopped_early = False
         for _ in trange(final_iter, disable=verbose_level == 0):
             
             K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=use_log_likelihood)
@@ -883,7 +884,14 @@ def run_mGST(
                 len(res_list_main_opt) >= 2
                 and np.abs(res_list_main_opt[-2] - res_list_main_opt[-1]) < res_list_main_opt[-1] * target_rel_prec
             ):
+                print(f"Convergence reached at iteration {len(res_list_main_opt)}")
+                stopped_early = True
                 break
+            
+    if not stopped_early:
+        print(f"Reached maximum iterations ({final_iter}) without convergence.")
+            
+        
     if verbose_level == 2:
         if use_log_likelihood:
             plot_objf(res_list_secondary_opt, f"Least squares error over batches and full data", delta=delta)

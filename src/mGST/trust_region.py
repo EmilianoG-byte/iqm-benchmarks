@@ -99,6 +99,10 @@ def compute_step_size(z:jnp.ndarray, delta:jnp.ndarray, radius:float, x:jnp.ndar
     t = solve_quadratic_equation(p, q)[1]
     if t < 0:
         warnings.warn(f"encountered t < 0: {t}", UserWarning)
+        
+    if jnp.isnan(t):
+        raise ValueError(f"Step size 't' is NaN 👵. z: {z}, delta: {delta}, radius: {radius}")
+        
     return t
 
 
@@ -174,6 +178,10 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p)
         # Compute rHessian-tangent-vector product
         rhessian_delta_tensor = rhessian_vector_fn(x=x, z=delta_tensor)
+        # Remove the numerically small normal component of Hδ, so that r and δ stay in the tangent space at x.
+        # Otherwise it gets amplified in r as tCG converges (|r| << |α Hδ|) and breaks the CG recurrences.
+        rhessian_delta_tensor = project_tensor_onto_tangent_space(x=x, z=rhessian_delta_tensor, n=n, p=p)
+        
         rhessian_delta_matrix = tensor_to_isometry(rhessian_delta_tensor, n=n, p=p)
         delta_matrix = tensor_to_isometry(delta_tensor, n=n, p=p)
         # Compute curvature
@@ -219,16 +227,14 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         beta = norm_sqrd_r_next / norm_sqrd_r
         delta_tensor = -r_tensor + beta * delta_tensor
         norm_sqrd_r = norm_sqrd_r_next
-        
-        # project delta_tensor onto the tangent space at the current solution
-        # done for numerical stability
-        delta_matrix_new = tensor_to_isometry(delta_tensor, n=n, p=p)
-        delta_matrix_new = project_onto_tangent_space(x=solution_matrix, z=delta_matrix_new)
-        delta_tensor = isometry_to_tensor(delta_matrix_new, tensor_shape=delta_tensor.shape)
 
     if verbose:
             print(f"TCG finished after: {iter + 1}/{num_iterations} iters. \n Reason: {reason}")
             print("---------------------------------------")
+            
+    if jnp.isnan(solution_tensor).any():
+        raise ValueError("Solution tensor contains NaN values. 👵.")
+            
     return solution_tensor, on_boundary
 
 def determine_cg_stopping_criteria(norm_r0:Tensor, norm_rk:Tensor, theta:float = 1, kappa:float = 0.1)->bool:
@@ -408,8 +414,20 @@ def compute_quality_quotient(
         - The quality quotient (Scalar).
         - The cost function value at the proposed next point (Scalar).
     """
+    cost_fx = cost_function(x)
     cost_fx_next = cost_function(x_next)
-    return (cost_fx_next - cost_function(x)) / compute_model_approximation(x, update_direction, cost_function, n, p, euclidean_gradient_conjugated=euclidean_gradient_conjugated, euclidean_hvp=euclidean_hvp, order=2, include_zero=False), cost_fx_next
+    # f(x_next) - f(x)
+    cost_decrease = cost_fx_next - cost_fx
+    # m(η) - m(0), negative for a descent step
+    model_decrease = compute_model_approximation(x, update_direction, cost_function, n, p, euclidean_gradient_conjugated=euclidean_gradient_conjugated, euclidean_hvp=euclidean_hvp, order=2, include_zero=False)
+    # regularization for qualitient quotient.
+    # see manopt implementation: https://manoptjl.org/v0.2/solvers/trust_regions.html
+    # and "regularized ratio from Conn, Gould, and Toint, Trust-Region Methods (2000) §17.4.2." for details
+    rho_reg = max(1.0, abs(cost_fx)) * jnp.finfo(float).eps * 1e3
+    quality_quotient = (cost_decrease - rho_reg) / (model_decrease - rho_reg)
+    if jnp.isnan(quality_quotient):
+        raise ValueError(f"Quotient is NaN. 👵. Δf = {cost_decrease}, Δm = {model_decrease}")
+    return quality_quotient, cost_fx_next
 
 def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
@@ -478,6 +496,7 @@ def run_trust_region_optimization(
     
     # TODO: Think whether we need to compute the initial gradient norm all the time.
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
+    
     norm_grad = norm_grad_init
     
     if global_norm_grad_init is not None:
@@ -553,6 +572,10 @@ def run_trust_region_optimization(
 
 def _update_trust_region_radius_and_xk(quality_quotient:float, radius_k:float, max_radius:float, on_boundary:bool, quotient_trust:float, x_k:Tensor, x_next:Tensor, x_k_array:list, cost_fx_array:list, cost_fx_next:float, num_rejections:int, verbose:bool):
     "Auxiliary function to update the trust region radius and accept/reject the new point based on the quality quotient."
+    # adding this extra check to not silently have a nan' value
+    if jnp.isnan(quality_quotient):
+        raise ValueError("Quality quotient is NaN. 👵.")
+    
     if quality_quotient < 0.25:
         # Reduce the trust region radius
         radius_k *= 0.25
@@ -679,6 +702,7 @@ def run_riemannian_optimization(
     verbose:bool=False,
     compute_least_squares:bool| int = False,
     carry_over_radius: bool = True,
+    cost_floor: float|None = None,
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -703,6 +727,7 @@ def run_riemannian_optimization(
         global_gradient_norm_tol: The tolerance for the gradient norm stopping criterion. If the norm of the gradient falls below this value, the optimization will stop.
         verbose: Whether to print information during the optimization
         compute_least_squares: Whether to compute the least squares value during the optimization in addition to the cost function. This can be useful for debugging and analysis, but may add additional computational overhead.
+        cost_floor: The minimum cost function value considered for the relative precision stopping criterion. If None, the cost floor is computed from the data and cost function type.
             If this is any integer, we assume that we want to compute after every operator.
         carry_over_radius: Whether to carry over the trust region radius from the previous outer iteration.
             Only affects operators currently using TrustRegionOptions;
@@ -717,7 +742,6 @@ def run_riemannian_optimization(
     # Validate optimization options
     optimization_schedule = validate_optimization_schedule(optimization_schedule=optimization_schedule, num_iterations=num_iterations)
     
-    cost_fn_history = []
     if compute_least_squares:
         if verbose:
             print("⚠️ Computing least squares values during optimization. This may add additional computational overhead. ⚠️")
@@ -770,9 +794,21 @@ def run_riemannian_optimization(
     # Will continue to be None unless `carry_over_radius=True`.
     carried_radius = {"kraus": None, "povm": None, "state": None}
     
+    if cost_floor is None:    
+            cost_floor = compute_cost_floor(
+                prob_matrix=cost_fn_kwargs["prob_matrix"],
+                use_log_likelihood=cost_fn_kwargs.get("use_log_likelihood", False),
+                num_shots=cost_fn_kwargs.get("num_shots"),
+            )
+    
     print("🔰 Starting Riemannian Optimization 🔰")
     if verbose:
         print(f" * optimization schedule: \n{optimization_schedule_print} \n{convergence_criteria}")
+        print(f" * cost floor: {cost_floor:.6e}")
+        
+    # Cost at the start of the current outer iteration.
+    cost_fn_previous_iteration = cost_function(kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init, **cost_fn_kwargs)
+    cost_fn_history = [cost_fn_previous_iteration]
         
     try:
         for idx in range(num_iterations):
@@ -792,19 +828,12 @@ def run_riemannian_optimization(
                     print(f"👾 Least squares value after POVM: {least_squares_value:.6e} 👾")
             
             # Save the initial cost value from this iteration for convergence check
-            cost_fn_init_k = cost_values_povm[0]
-            cost_fn_current_k = cost_values_povm[-1]
             cost_fn_history.extend(cost_values_povm)
             # Check cost fn convergence
             cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator=current_operator)
             if cost_below_threshold:
                 break
-            
-            _, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
-            
-            if verbose:
-                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
-                
+                            
             # Optimize Kraus
             current_operator = "kraus"
             kraus_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
@@ -819,17 +848,11 @@ def run_riemannian_optimization(
                 if verbose:
                     print(f"👾 Least squares value after Kraus: {least_squares_value:.6e} 👾")
             
-            cost_fn_current_k = cost_values_kraus[-1]
             cost_fn_history.extend(cost_values_kraus)
             # Check cost fn convergence
             cost_below_threshold, convergence_reason = convergence_criteria_from_noise_threshold(cost_fn_history[-1], noise_threshold, operator=current_operator)
             if cost_below_threshold:
                 break
-            relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
-            if relative_cost_below_precision:
-                break
-            if verbose:
-                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
             
             # Optimize State
             current_operator = "state"
@@ -856,12 +879,16 @@ def run_riemannian_optimization(
             if verbose:
                 print(f"🏁 Iteration: {idx + 1}/{num_iterations}. f(x): {cost_fn_history[-1]:.6e}.")
             
-            relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_init_k, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision)
+            relative_cost_below_precision, convergence_reason, relative_change = convergence_criteria_from_relative_precision(cost_fn_previous=cost_fn_previous_iteration, cost_fn_current=cost_fn_current_k, relative_precision=relative_precision, cost_floor=cost_floor)
+            
+            if verbose:
+                print(f"\n 🎯 Relative change in reducible cost over iteration {idx + 1}: {relative_change:.2e}. Target: {relative_precision:.2e}.")
+            
             if relative_cost_below_precision:
                 break
-            if verbose:
-                print(f"\n 🎯 [{current_operator.capitalize()}] Relative change in cost function value: {relative_change:.2e}. Target: {relative_precision:.2e}.")
                 
+            cost_fn_previous_iteration = cost_fn_current_k
+
             # This would only happen if we use RTR for all 3 operators, since GDS does not stop early.
             # TODO: implement stopping criteria for GDS based on gradient norm to allow early stopping.
             all_gradients_small, convergence_reason = convergence_criteria_from_gradients_norms(gradient_norm_k_povm, gradient_norm_k_kraus, gradient_norm_k_state, threshold=global_gradient_norm_tol)
@@ -880,7 +907,7 @@ def run_riemannian_optimization(
     
     final_message = f"‼️ Full optimization finished at iteration {idx + 1}/{num_iterations} ‼️ \n Reason: {convergence_reason}. \n Trust region radii carried over: {carried_radius}."
     print(final_message) 
-        
+    
     optimized_operators = {
         "kraus": kraus_tensor_k,
         "povm": povm_psd_k,
@@ -890,9 +917,6 @@ def run_riemannian_optimization(
     cost_dict = {"main": cost_fn_history}
     if compute_least_squares:
         cost_dict["least_squares"] = cost_fn_least_squares
-    
-    if verbose:
-        print("Testing")
     
     return optimized_operators, cost_dict, convergence_reason
 
@@ -937,14 +961,34 @@ def convergence_criteria_from_noise_threshold(cost_fn_value:float, noise_thresho
         message = f"Cost function value for {operator.capitalize()} below noise threshold {noise_threshold:.2e} 📶."
     return converged, message
 
-def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn_current:float, relative_precision:float)-> tuple[bool, str, float]:
-    """Determine convergence based on relative precision of cost function values.
+
+def compute_cost_floor(prob_matrix:jnp.ndarray, use_log_likelihood:bool=False, num_shots:int|None=None)->float:
+    """Lower bound of the cost function, attained when the model probabilities equal the empirical frequencies.
+
+    - Least squares: 0.
+    - Negative log-likelihood: saturated-model value -N * sum_{n,o} y log y (with 0 log 0 = 0).
+      The difference f - f_floor is N * sum_n KL(y_n || p_n), the part of the cost the optimizer can reduce.
+    """
+    if not use_log_likelihood:
+        return 0.0
+    y = prob_matrix
+    y_log_y = jnp.where(y > 0, y * jnp.log(jnp.where(y > 0, y, 1.0)), 0.0)
+    return float(-num_shots * jnp.sum(y_log_y))
+
+def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn_current:float, relative_precision:float, cost_floor:float = 0.0)-> tuple[bool, str, float]:
+    """Determine convergence based on the relative decrease of the reducible part of the cost function.
+
+    relative_change = |f_prev - f_curr| / (f_prev - f_floor)
+
+    i.e. the fraction of the remaining removable misfit eliminated during the last outer iteration.
+    For the log-likelihood, f_prev - f_floor is N * sum_n KL(y_n || p_n) (in nats), which is O(degrees of freedom)
+    at a statistically good fit, so relative_precision * (f_prev - f_floor) is the per-iteration improvement in nats.
     
     Args:
         cost_fn_previous: The previous value of the cost function.
         cost_fn_current: The current value of the cost function.
         relative_precision: The target relative precision to determine convergence. If the relative change in the cost function value is below this threshold, the optimization is considered converged.
-        
+        cost_floor: The lower bound of the cost function, used to compute the reducible part of the cost. Defaults to 0.0.
     Returns:
         A tuple containing:
         - A boolean indicating whether convergence criteria are met.
@@ -953,10 +997,11 @@ def convergence_criteria_from_relative_precision(cost_fn_previous:float, cost_fn
     """
     message = "No convergence criteria met yet ⏳."
     converged = False
-    relative_change = abs(cost_fn_current - cost_fn_previous) / (abs(cost_fn_previous) + 1)
+    excess_previous = max(cost_fn_previous - cost_floor, jnp.finfo(jnp.float64).tiny)
+    relative_change = abs(cost_fn_current - cost_fn_previous) / excess_previous
     if relative_change < relative_precision:
         converged = True
-        message = f"Relative change in cost function value {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
+        message = f"Relative change in reducible cost {relative_change:.2e} below target relative precision {relative_precision:.2e} 🎯."
     return converged, message, relative_change
 
 def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None, radius_init_override:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar, Scalar]:
@@ -980,7 +1025,8 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         A tuple containing:
         - The optimized operator tensor.
         - A list of cost function values during the optimization of this operator (if save_intermediate_cost_values is True and using TrustRegionOptions, otherwise a list with only the final cost function value).
-        - The initial gradient norm used for the stopping criteria (RTR) or the gradient used in this step (GDS).
+        - The gradient norm at the end of this step: for TrustRegionOptions, the Riemannian gradient norm at the returned
+          (optimized) point; for GradientDescentOptions, the norm of the gradient at the input point (the one used for the step).
         - The final trust-region radius (TrustRegionOptions) or None (GradientDescentOptions, which has no radius concept).
     """
     options_dict = optimization_options.to_dict()
@@ -1060,3 +1106,24 @@ def estimate_noise_floor_threshold(probability_matrix:jnp.ndarray, num_shots:int
     # Apply multiplier to adjust the threshold based on empirical observations (typical noise level). This can be tuned.
     threshold *= multiplier
     return threshold
+
+def project_tensor_onto_tangent_space(x: Tensor, z: Tensor, operator_type: str = None, n: int = None, p: int = None) -> Tensor:
+    """Project a tensor z onto the tangent space of the Stiefel manifold at the point represented by the tensor x.
+
+    The tensors are internally reshaped into isometries of dimensions (n, p), projected, and reshaped back to the shape of z.
+
+    Handles batch dimensions.
+
+    Args:
+        x: Tensor representing the base point on the Stiefel manifold.
+        z: Tensor to be projected onto the tangent space at x. Must have the same shape as x.
+        operator_type: The type of the input operator used to infer the dimension of
+            the isometry manifold (n, p). Can be: ('kraus', 'state', or 'povm')
+        n: First dimension of isometry if known
+        p: Second dimension of isometry if known
+
+    Returns:
+        The projected tensor, with the same shape as z.
+    """
+    x_matrix, z_matrix = tensors_to_isometries(x, z, operator_type=operator_type, n=n, p=p)
+    return isometry_to_tensor(project_onto_tangent_space(x=x_matrix, z=z_matrix), tensor_shape=z.shape)
