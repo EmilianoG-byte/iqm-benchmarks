@@ -10,6 +10,7 @@ from mGST.riemannian import riemannian_connection, riemannian_metric, update_iso
 from mGST.linear_algebra import transpose
 from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule
 from mGST.trust_region_linearized import riemannian_and_euclidean_gradient_fn, linearize_riemannian_gradient_and_hvp
+from mGST.jitted_objective import JittedObjective
 
 import jax
 
@@ -436,8 +437,11 @@ def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
     radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
-    global_norm_grad_init: float| None = None, 
-    verbose:bool=False, linearize:bool=False)->tuple[Tensor, list[Tensor], list[Scalar], Scalar, Scalar]:
+    global_norm_grad_init: float| None = None,
+    verbose:bool=False, linearize:bool=False,
+    rgrad_and_euclidean_fn:Callable[[Tensor], tuple[Tensor, Tensor]]|None = None,
+    rhvp_and_euclidean_fn:Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]|None = None,
+    )->tuple[Tensor, list[Tensor], list[Scalar], Scalar, Scalar]:
     """
     Run the trust region optimization algorithm.
 
@@ -459,7 +463,13 @@ def run_trust_region_optimization(
             Within an optimization outer loop, this can be the gradient before any optimization step is taken.
             If not provided, the initial gradient norm will be computed from the initial point within this RTR sweep.
         verbose: Whether to print information during the trust region outer loop optimization.
-        
+        linearize: Whether to linearize the Riemannian gradient once per TR iteration and reuse the linear map for the HVPs.
+            Ignored if rhvp_and_euclidean_fn is given.
+        rgrad_and_euclidean_fn: Precompiled (e.g. jitted) function x -> (Riemannian gradient, Euclidean gradient).
+            Must be given together with rhvp_and_euclidean_fn. If None, it is built from cost_function with automatic differentiation.
+        rhvp_and_euclidean_fn: Precompiled (e.g. jitted) function (x, z) -> (Riemannian HVP, Euclidean HVP).
+            Must be given together with rgrad_and_euclidean_fn. See `mGST.jitted_objective.JittedObjective.bind`.
+
     Returns:
         A tuple containing:
         - The optimized point on the manifold.
@@ -485,12 +495,23 @@ def run_trust_region_optimization(
     n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
 
     # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
-    retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)    
-    rgrad_and_euclidean_fn = lambda x: riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
-    
-    if linearize:
+    retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
+
+    precompiled = rhvp_and_euclidean_fn is not None
+    if precompiled != (rgrad_and_euclidean_fn is not None):
+        raise ValueError("rgrad_and_euclidean_fn and rhvp_and_euclidean_fn must be given together.")
+    if not precompiled:
+        rgrad_and_euclidean_fn = lambda x: riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
+
+    if precompiled:
+        # The precompiled HVP replaces the linearization.
+        linearize = False
+        rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
+        rhessian_vector_fn = lambda x, z: rhvp_and_euclidean_fn(x, z)[0]
+
+    elif linearize:
         rgradient, euclidean_gradient_conjugated, hvp_map_linearized, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric)
-        
+
     else:
         # Compute the initial Riemannian gradient and its norm
         rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
@@ -518,7 +539,10 @@ def run_trust_region_optimization(
             # Retract the update direction to obtain the next iterate
             x_next = retraction(x_k, update_direction)            
             # Compute the quality quotient
-            if linearize:
+            if precompiled:
+                # TODO: accumulate the Euclidean HVP inside tCG (η = Σ α_k δ_k) to avoid this extra evaluation.
+                _, euclidean_hvp = rhvp_and_euclidean_fn(x_k, update_direction)
+            elif linearize:
                 # TODO: get rid of this additional evaluation
                 # by returning the Euclidean directional derivative along with the Riemannian one from the linearized map
                 # from the truncated_conjugate_gradient evaluation
@@ -712,6 +736,8 @@ def run_riemannian_optimization(
     carry_over_radius: bool = True,
     cost_floor: float|None = None,
     absolute_tolerance: float|None = None,
+    use_jit: bool = False,
+    jit_contraction: str = "prefix",
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -743,6 +769,10 @@ def run_riemannian_optimization(
             ignored for operators using GradientDescentOptions.
         absolute_tolerance: Tolerance, in units of the cost function (nats for the log-likelihood), on the estimated
             remaining decrease of the cost function. See `convergence_criteria_from_absolute_tolerance`. If None, this stopping criterion is disabled.
+        use_jit: Whether to use the vectorized, jit-compiled cost function, Riemannian gradient and HVP (see `mGST.jitted_objective`)
+            for the operators optimized with TrustRegionOptions. The `linearize` option is then ignored.
+            Only reproduces `cost_function_jax_mps`: this is checked against `cost_function` at the initial point.
+        jit_contraction: Contraction strategy of the jitted cost function, "prefix" or "padded". Only used if use_jit=True.
 
     Returns:
         A tuple containing:
@@ -814,10 +844,17 @@ def run_riemannian_optimization(
                 num_shots=cost_fn_kwargs.get("num_shots"),
             )
     
+    # Built once per run: compilation happens on the first call of each operator and is reused afterwards.
+    jitted_objective = None
+    if use_jit:
+        jitted_objective = JittedObjective.from_cost_fn_kwargs(cost_fn_kwargs, contraction=jit_contraction)
+        jitted_objective.validate(cost_function, cost_fn_kwargs, kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init)
+
     print("🔰 Starting Riemannian Optimization 🔰")
     if verbose:
         print(f" * optimization schedule: \n{optimization_schedule_print} \n{convergence_criteria}")
         print(f" * cost floor: {cost_floor:.6e}")
+        print(f" * jitted objective: {f'yes ({jit_contraction} contraction)' if use_jit else 'no'}")
         
     # Cost at the start of the current outer iteration.
     cost_fn_previous_iteration = cost_function(kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init, **cost_fn_kwargs)
@@ -832,7 +869,7 @@ def run_riemannian_optimization(
             current_operator = "povm"
             povm_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             povm_psd_k, cost_values_povm, gradient_norm_k_povm, final_radius_povm = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm, radius_init_override=carried_radius[current_operator]
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=povm_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_povm, radius_init_override=carried_radius[current_operator], jitted_objective=jitted_objective
             )
             
             # only compute the least squares at the end.
@@ -853,7 +890,7 @@ def run_riemannian_optimization(
             current_operator = "kraus"
             kraus_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             kraus_tensor_k, cost_values_kraus, gradient_norm_k_kraus, final_radius_kraus = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus, radius_init_override=carried_radius[current_operator],
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=kraus_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_kraus, radius_init_override=carried_radius[current_operator], jitted_objective=jitted_objective,
             )
             
             # only compute the least squares at the end.
@@ -873,7 +910,7 @@ def run_riemannian_optimization(
             current_operator = "state"
             state_options = optimization_schedule[current_operator].get_options_for_iteration(idx)
             state_psd_k, cost_values_state, gradient_norm_k_state, final_radius_state = _optimize_single_operator(
-                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state, radius_init_override=carried_radius[current_operator]
+                kraus_tensor=kraus_tensor_k, povm_psd=povm_psd_k, state_psd=state_psd_k, optimization_options=state_options, operator_type=current_operator, cost_function=cost_function, cost_fn_kwargs=cost_fn_kwargs, save_intermediate_cost_values=save_intermediate_cost_values, global_norm_grad_init=global_gradient_norm_init_state, radius_init_override=carried_radius[current_operator], jitted_objective=jitted_objective
             )
             # only compute the least squares at the end.
             if compute_least_squares:
@@ -1067,7 +1104,7 @@ def convergence_criteria_from_absolute_tolerance(cost_decrease:float, cost_decre
         message = f"Estimated remaining decrease of the cost function {remaining_decrease:.2e} below absolute tolerance {absolute_tolerance:.2e} 📉."
     return converged, message, remaining_decrease
 
-def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None, radius_init_override:Scalar|None = None)-> tuple[Tensor, list[Scalar], Scalar, Scalar]:
+def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Tensor, optimization_options:OptimizationOptions, operator_type:str, cost_fn_kwargs:dict[str, Any], cost_function:Callable = None, save_intermediate_cost_values:bool=False, global_norm_grad_init:Scalar|None = None, radius_init_override:Scalar|None = None, jitted_objective:JittedObjective|None = None)-> tuple[Tensor, list[Scalar], Scalar, Scalar]:
     """
     Optimize a single operator (Kraus, POVM, or State) using the specified optimization options.
     
@@ -1083,7 +1120,9 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
         global_gradient_norm_init: A gradient norm value to used as the initial gradient norm for the stopping criteria.
         radius_init_override: If provided overrides the schedule's radius_init for this
         call.
-        
+        jitted_objective: If provided (and using TrustRegionOptions), the jitted cost function, gradient and HVP are used
+            instead of `cost_function` and automatic differentiation. Ignored for GradientDescentOptions.
+
     Returns:
         A tuple containing:
         - The optimized operator tensor.
@@ -1110,11 +1149,17 @@ def _optimize_single_operator(kraus_tensor:Tensor, povm_psd:Tensor, state_psd:Te
             x_init = state_psd
             cost_fn_x = lambda x: cost_function(
                 kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=x, **cost_fn_kwargs)
-            
+
+        # Replace the cost function and its derivatives by the jitted ones, with the other two operators fixed.
+        precompiled_fns = {}
+        if jitted_objective is not None:
+            cost_fn_x, precompiled_fns["rgrad_and_euclidean_fn"], precompiled_fns["rhvp_and_euclidean_fn"] = jitted_objective.bind(
+                operator_type, kraus_tensor=kraus_tensor, povm_psd=povm_psd, state_psd=state_psd, metric=options_dict["metric"])
+
         # Purposedly supressing warnings since the TR method raises warnings often, e.g. when the gradient is close to zero or t < 0.
         with warnings.catch_warnings():
                 warnings.filterwarnings("ignore", category=UserWarning)
-                optimized_operator, _, cost_values, norm_grad_k, final_radius = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, global_norm_grad_init=global_norm_grad_init, **options_dict)
+                optimized_operator, _, cost_values, norm_grad_k, final_radius = run_trust_region_optimization(x_init=x_init, cost_function=cost_fn_x, operator_type=operator_type, global_norm_grad_init=global_norm_grad_init, **options_dict, **precompiled_fns)
         if save_intermediate_cost_values:
             saved_cost_values = cost_values
         else:
