@@ -38,7 +38,7 @@ def riemannian_and_euclidean_gradient_fn(x:Tensor, cost_fn:Callable[[Tensor], Sc
     )
     return isometry_to_tensor(gradient_stiefel_matrix, x.shape), gradient_euclidean_jax
 
-def linearize_riemannian_gradient_and_hvp(x:Tensor, rgrad_and_euclidean_fn:Callable[[Tensor], Tensor], operator_type:str, metric:str)-> tuple[Tensor, Tensor, Callable[[Tensor], tuple[Tensor, Tensor]]]:
+def linearize_riemannian_gradient_and_hvp(x:Tensor, rgrad_and_euclidean_fn:Callable[[Tensor], Tensor], operator_type:str, metric:str, return_euclidean:bool=False)-> tuple[Tensor, Tensor, Callable[[Tensor], tuple[Tensor, Tensor]], Callable]:
     """Linearize the Riemannian-gradient map at x once, returning a linear map for repeated Hessian-vector products.
 
     Reasoning:
@@ -52,6 +52,8 @@ def linearize_riemannian_gradient_and_hvp(x:Tensor, rgrad_and_euclidean_fn:Calla
         cost_fn: The cost function to differentiate.
         operator_type: The type of operator ('kraus', 'state', 'povm').
         metric: The metric to use ('canonical' or 'euclidean').
+        return_euclidean: Whether the returned rhessian_vector_fn also returns the Euclidean Hessian-vector product,
+            i.e. (x, z) -> (Riemannian HVP, Euclidean HVP).
 
     Returns:
         A tuple containing:
@@ -59,10 +61,11 @@ def linearize_riemannian_gradient_and_hvp(x:Tensor, rgrad_and_euclidean_fn:Calla
         - The Euclidean gradient at x (2df/dx).
         - A linear map taking a tangent vector z (same shape as x) to a tuple
           (Riemannian directional derivative, Euclidean directional derivative) at x in direction z.
+        - rhessian_vector_fn(x, z): the Riemannian Hessian-vector product (and the Euclidean one if return_euclidean).
     """
     (rgradient, euclidean_gradient_conjugated), hvp_map_linearized = jax.linearize(rgrad_and_euclidean_fn, x)
-            
-    rhessian_vector_fn = lambda x, z: rhessian_vector_product_from_linear_map(x=x, z=z, rgradient=rgradient, operator_type=operator_type, metric=metric, linearized_hvp_map=hvp_map_linearized)
+
+    rhessian_vector_fn = lambda x, z: rhessian_vector_product_from_linear_map(x=x, z=z, rgradient=rgradient, operator_type=operator_type, metric=metric, linearized_hvp_map=hvp_map_linearized, return_euclidean=return_euclidean)
     
     return rgradient, euclidean_gradient_conjugated,hvp_map_linearized, rhessian_vector_fn
 
@@ -91,10 +94,17 @@ def assemble_riemannian_hessian_vector_product(x:Tensor, tangent_vector:Tensor, 
         return isometry_to_tensor(rhessian_vector_product_matrix, x.shape)
     return rhessian_vector_product_matrix
 
-def rhessian_vector_product_from_linear_map(x: Tensor, z: Tensor, rgradient: Tensor, operator_type: str, metric: str, linearized_hvp_map: Callable[[Tensor], Tensor]) -> Tensor:
-    """Compute the Riemannian Hessian-vector product using a linearization of the riemannian gradient function."""
-    Drgrad_x_to_z_tensor, _  = linearized_hvp_map(z) # I belive the second output is the jvp for the euclidean gradient which we don't need.
-    return assemble_riemannian_hessian_vector_product(
+def rhessian_vector_product_from_linear_map(x: Tensor, z: Tensor, rgradient: Tensor, operator_type: str, metric: str, linearized_hvp_map: Callable[[Tensor], Tensor], return_euclidean: bool = False) -> Tensor | tuple[Tensor, Tensor]:
+    """Compute the Riemannian Hessian-vector product using a linearization of the riemannian gradient function.
+
+    If return_euclidean, also return the Euclidean Hessian-vector product (the jvp of the Euclidean gradient 2df/dx),
+    which is the second output of the linear map, as a tuple (Riemannian HVP, Euclidean HVP).
+    """
+    Drgrad_x_to_z_tensor, euclidean_hvp_tensor = linearized_hvp_map(z)
+    rhessian_vector_product_tensor = assemble_riemannian_hessian_vector_product(
         x=x, tangent_vector=z, rgrad_x_tensor=rgradient,
         Drgrad_x_to_z_tensor=Drgrad_x_to_z_tensor, operator_type=operator_type, metric=metric, return_tensor=True,
     )
+    if return_euclidean:
+        return rhessian_vector_product_tensor, euclidean_hvp_tensor
+    return rhessian_vector_product_tensor

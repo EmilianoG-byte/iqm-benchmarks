@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import warnings
 from mGST.automatic_diff import hvp, automatic_gradient
 from mGST.utility_functions_comparisons import tensor_to_isometry, isometry_to_tensor, tensors_to_isometries, get_isometry_dimensions_from_tensor, _update_tensor_via_gradient
-from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors, project_onto_tangent_space
+from mGST.riemannian import riemannian_connection, riemannian_metric, update_isometry_tensors, project_onto_tangent_space, is_isometry
 from mGST.linear_algebra import transpose
 from mGST.typing import Tensor, Matrix, Scalar, TrustRegionOptions, GradientDescentOptions, OptimizationOptions, OperatorSchedule
 from mGST.trust_region_linearized import riemannian_and_euclidean_gradient_fn, linearize_riemannian_gradient_and_hvp
@@ -50,7 +50,7 @@ def riemannian_gradient_fn(x:Tensor, cost_fn:Callable[[Tensor], Scalar], operato
     rgrad, _ = riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_fn, operator_type=operator_type, metric=metric)
     return rgrad
 
-def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type:str, metric:str="canonical", return_tensor:bool=True)-> Tensor|Matrix:
+def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callable[[Tensor], Scalar], operator_type:str, metric:str="canonical", return_tensor:bool=True, return_euclidean:bool=False)-> Tensor|Matrix|tuple[Tensor|Matrix, Tensor]:
     """Compute the Riemannian Hessian-vector product at a point x in the Stiefel manifold using automatic differentiation.
     
     NOTE: For the calculation of the Riemannian Hessian-vector product, we should use df/dx*
@@ -67,13 +67,17 @@ def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callab
         operator_type: The type of operator that x corresponds to ('povm', 'kraus', 'state').
         metric: The metric to use for the Hessian calculation. Can be "canonical" or "euclidean".
         return_tensor: Whether to return the result as a tensor (True) or as a matrix (False).
-        
+        return_euclidean: Whether to also return the Euclidean Hessian-vector product (directional derivative of 2df/dx along
+            tangent_vector), as needed by `compute_quality_quotient`. It comes out of the same jvp, so it is free.
+
     Returns:
         The Riemannian Hessian-vector product, either as a tensor or matrix depending on return_tensor.
+        If return_euclidean, a tuple (Riemannian Hessian-vector product, Euclidean Hessian-vector product as a tensor).
     """
-    rgrad_fn = lambda x: riemannian_gradient_fn(x=x, cost_fn=cost_fn, operator_type=operator_type, metric=metric) # Riemannian gradient (from df/dx*)
+    # Riemannian gradient (from df/dx*) together with the Euclidean gradient 2df/dx
+    rgrad_and_euclidean_fn = lambda x: riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_fn, operator_type=operator_type, metric=metric)
 
-    rgrad_x_tensor, Drgrad_x_to_z_tensor = hvp(function=rgrad_fn, x=x, z=tangent_vector)
+    (rgrad_x_tensor, _), (Drgrad_x_to_z_tensor, euclidean_hvp_tensor) = hvp(function=rgrad_and_euclidean_fn, x=x, z=tangent_vector)
 
     x_matrix, tangent_vector_matrix, rgrad_x_matrix, Drgrad_x_to_z_matrix = tensors_to_isometries(
         x, tangent_vector, rgrad_x_tensor, Drgrad_x_to_z_tensor, operator_type=operator_type)
@@ -81,7 +85,9 @@ def riemannian_hessian_vector_fn(x:Tensor, tangent_vector:Tensor, cost_fn:Callab
     rhessian_vector_product_matrix = riemannian_connection(x=x_matrix, w_x=rgrad_x_matrix, z=tangent_vector_matrix, Dw_x_to_z=Drgrad_x_to_z_matrix, metric=metric)
     
     if return_tensor:
-        return isometry_to_tensor(rhessian_vector_product_matrix, x.shape)
+        rhessian_vector_product_matrix = isometry_to_tensor(rhessian_vector_product_matrix, x.shape)
+    if return_euclidean:
+        return rhessian_vector_product_matrix, euclidean_hvp_tensor
     return rhessian_vector_product_matrix
 
 
@@ -135,12 +141,14 @@ def solve_quadratic_equation(p:float, q:float)->tuple[float, float]:
     x2 = q / x1
     return tuple(sorted((x1, x2)))
 
-def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None) -> tuple[Tensor, bool]:
+def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, rgradient:Tensor, metric:str, n:int, p:int, rhessian_vector_fn:Callable[[Tensor, Tensor], Tensor], verbose:bool=True, theta:float | None = None, kappa: float | None = None, return_euclidean_hvp:bool = False) -> tuple[Tensor, bool] | tuple[Tensor, bool, Tensor]:
     """ Truncated Conjugate Gradient (TCG) method to approximately solve the trust region subproblem on the Stiefel manifold.
-    
-    TODO: determine if we can use the Hessian-vector product output to compute the denominator in the quality coefficient
-    (reduce by half computation time).
-    
+
+    With return_euclidean_hvp=True, the Euclidean Hessian-vector product along the solution η is accumulated for free:
+    η = Σ_j α_j δ_j (plus a final τ δ on the boundary), and the Euclidean Hessian-vector product is linear in its direction,
+    so H_e[η] = Σ_j α_j H_e[δ_j] (+ τ H_e[δ]), where every H_e[δ_j] comes out of the same jvp as the Riemannian H[δ_j].
+    This saves the extra Hessian-vector product needed by the model in `compute_quality_quotient`.
+
     References:
     [1] Trust-region methods on Riemannian manifolds, P. A. Absil, C. G. Baker, and K. A. Gallivan, 2006.
     [2] https://www.nicolasboumal.net/book/IntroOptimManifolds_Boumal_2023.pdf (Algorithm 6.4)
@@ -156,13 +164,17 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
         verbose: Whether to print information during the TCG algorithm.
         theta: The theta parameter for the stopping criteria. If None, stopping criteria is not used. See [2] for an example of parameters.
         kappa: The kappa parameter for the stopping criteria. If None, stopping criteria is not used. See [2] for an example of parameters.
-    
+        return_euclidean_hvp: If True, rhessian_vector_fn(x, z) must return a tuple (Riemannian HVP, Euclidean HVP),
+            and the Euclidean HVP along the solution is returned as third output.
+
     Returns:
         A tuple containing:
         - The approximate solution to the trust region subproblem (tangent vector), i.e. the proposed direction to update x.
         - A boolean indicating whether the solution lies on the boundary of the trust region.
+        - Only if return_euclidean_hvp: the Euclidean Hessian-vector product along the solution.
     """
-    solution_tensor = jnp.zeros_like(x) # η 
+    solution_tensor = jnp.zeros_like(x) # η
+    euclidean_hvp_solution = jnp.zeros_like(x) if return_euclidean_hvp else None # H_e[η]
     r_tensor = rgradient # r
     delta_tensor = -r_tensor # δ
     on_boundary = False
@@ -178,7 +190,10 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
     for iter in range(num_iterations):
         solution_matrix = tensor_to_isometry(solution_tensor, n=n, p=p)
         # Compute rHessian-tangent-vector product
-        rhessian_delta_tensor = rhessian_vector_fn(x=x, z=delta_tensor)
+        if return_euclidean_hvp:
+            rhessian_delta_tensor, euclidean_hvp_delta = rhessian_vector_fn(x=x, z=delta_tensor)
+        else:
+            rhessian_delta_tensor = rhessian_vector_fn(x=x, z=delta_tensor)
         # Remove the numerically small normal component of Hδ, so that r and δ stay in the tangent space at x.
         # Otherwise it gets amplified in r as tCG converges (|r| << |α Hδ|) and breaks the CG recurrences.
         rhessian_delta_tensor = project_tensor_onto_tangent_space(x=x, z=rhessian_delta_tensor, n=n, p=p)
@@ -192,6 +207,8 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
             reason = "Negative curvature encountered 📉."
             step = compute_step_size(z=solution_matrix, delta=delta_matrix, radius=radius, x=x_matrix, metric=metric)
             solution_tensor += step * delta_tensor
+            if return_euclidean_hvp:
+                euclidean_hvp_solution += step * euclidean_hvp_delta
             on_boundary = True
             break
         
@@ -208,11 +225,15 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
             reason = "Exceeded trust region boundary 📈."
             step = compute_step_size(z=solution_matrix_old, delta=delta_matrix, radius=radius, x=x_matrix,metric=metric)
             solution_tensor += step * delta_tensor
+            if return_euclidean_hvp:
+                euclidean_hvp_solution += step * euclidean_hvp_delta
             on_boundary = True
             break
-        
+
         solution_tensor = solution_tensor_new
-        
+        if return_euclidean_hvp:
+            euclidean_hvp_solution += alpha * euclidean_hvp_delta
+
         r_tensor += alpha * rhessian_delta_tensor
         r_matrix = tensor_to_isometry(r_tensor, n=n, p=p)
         norm_sqrd_r_next = riemannian_metric(r_matrix, r_matrix, x=x_matrix, metric=metric)
@@ -235,7 +256,9 @@ def truncated_conjugate_gradient(x: Tensor, radius: float, num_iterations:int, r
             
     if jnp.isnan(solution_tensor).any():
         raise ValueError("Solution tensor contains NaN values. 👵.")
-            
+
+    if return_euclidean_hvp:
+        return solution_tensor, on_boundary, euclidean_hvp_solution
     return solution_tensor, on_boundary
 
 def determine_cg_stopping_criteria(norm_r0:Tensor, norm_rk:Tensor, theta:float = 1, kappa:float = 0.1)->bool:
@@ -503,20 +526,22 @@ def run_trust_region_optimization(
     if not precompiled:
         rgrad_and_euclidean_fn = lambda x: riemannian_and_euclidean_gradient_fn(x=x, cost_fn=cost_function, operator_type=operator_type, metric=metric)
 
+    # In all three cases rhessian_vector_fn(x, z) returns (Riemannian HVP, Euclidean HVP). tCG accumulates the Euclidean HVP
+    # along its solution, which is what the model in the quality quotient needs, so no extra HVP is evaluated for it.
     if precompiled:
         # The precompiled HVP replaces the linearization.
         linearize = False
         rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
-        rhessian_vector_fn = lambda x, z: rhvp_and_euclidean_fn(x, z)[0]
+        rhessian_vector_fn = rhvp_and_euclidean_fn
 
     elif linearize:
-        rgradient, euclidean_gradient_conjugated, hvp_map_linearized, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric)
+        rgradient, euclidean_gradient_conjugated, _, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric, return_euclidean=True)
 
     else:
         # Compute the initial Riemannian gradient and its norm
         rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
-        
-        rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric, return_tensor=True)
+
+        rhessian_vector_fn = lambda x, z: riemannian_hessian_vector_fn(x=x, tangent_vector=z, cost_fn=cost_function, operator_type=operator_type, metric=metric, return_tensor=True, return_euclidean=True)
     
     # TODO: Think whether we need to compute the initial gradient norm all the time.
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
@@ -534,23 +559,12 @@ def run_trust_region_optimization(
                 print(f"TR Iteration: {idx}. f(x): {cost_fx_array[-1]:.6e}. |r∇f(x)|: {norm_grad:.6e}. Radius: {radius_k:.2e}")
 
             # Solve the trust region subproblem
-            update_direction, on_boundary = truncated_conjugate_gradient(x=x_k, radius=radius_k,num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg)
-            
+            # euclidean_hvp: Euclidean Hessian-vector product along update_direction, accumulated inside tCG.
+            update_direction, on_boundary, euclidean_hvp = truncated_conjugate_gradient(x=x_k, radius=radius_k,num_iterations=num_iterations_cg, rgradient=rgradient, metric=metric, n=n, p=p, rhessian_vector_fn=rhessian_vector_fn, verbose=verbose_cg, theta=theta_cg, kappa=kappa_cg, return_euclidean_hvp=True)
+
             # Retract the update direction to obtain the next iterate
-            x_next = retraction(x_k, update_direction)            
+            x_next = retraction(x_k, update_direction)
             # Compute the quality quotient
-            if precompiled:
-                # TODO: accumulate the Euclidean HVP inside tCG (η = Σ α_k δ_k) to avoid this extra evaluation.
-                _, euclidean_hvp = rhvp_and_euclidean_fn(x_k, update_direction)
-            elif linearize:
-                # TODO: get rid of this additional evaluation
-                # by returning the Euclidean directional derivative along with the Riemannian one from the linearized map
-                # from the truncated_conjugate_gradient evaluation
-                # NOTE: if each evaluation is cheap, this shouldn't matter.
-                _, euclidean_hvp = hvp_map_linearized(update_direction)
-            else:
-                euclidean_hvp = None
-            
             quality_quotient, cost_fx_next = compute_quality_quotient(
                 x=x_k,
                 update_direction=update_direction,
@@ -585,7 +599,7 @@ def run_trust_region_optimization(
             if linearize:
                 # Linearize at the new point for the next iteration
                 # this creates a new rhessian_vector_fn using the new linear map.
-                rgradient, euclidean_gradient_conjugated, hvp_map_linearized, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric)
+                rgradient, euclidean_gradient_conjugated, _, rhessian_vector_fn = linearize_riemannian_gradient_and_hvp(x=x_k, rgrad_and_euclidean_fn=rgrad_and_euclidean_fn, operator_type=operator_type, metric=metric, return_euclidean=True)
             else:
                 rgradient, euclidean_gradient_conjugated = rgrad_and_euclidean_fn(x_k)
             # Determine stopping criteria based on gradient norm
@@ -1235,3 +1249,31 @@ def project_tensor_onto_tangent_space(x: Tensor, z: Tensor, operator_type: str =
     """
     x_matrix, z_matrix = tensors_to_isometries(x, z, operator_type=operator_type, n=n, p=p)
     return isometry_to_tensor(project_onto_tangent_space(x=x_matrix, z=z_matrix), tensor_shape=z.shape)
+
+
+def is_tensor_isometry(x: Tensor, operator_type: str)->bool:
+    """Check if a tensor represents an isometry on the Stiefel manifold.
+
+    Args:
+        x: Tensor to be checked.
+        operator_type: The type of the input operator used to infer the dimension of
+            the isometry manifold (n, p). Can be: ('kraus', 'state', or 'povm')
+
+    Returns:
+        True if the tensor represents an isometry, False otherwise.
+    """
+    x_matrix = tensors_to_isometries(x, operator_type=operator_type)[0] # since this returns a tuple
+    return is_isometry(x_matrix)
+
+def are_all_tensors_in_gate_set_isometries(gate_set: dict[str, Tensor])->bool:
+    """Check if all tensors in the gate set represent isometries on the Stiefel manifold.
+
+    Args:
+        gate_set: Mapping from gate names to their corresponding tensors.
+            The names can be 'kraus', 'state', or 'povm'.
+        
+
+    Returns:
+        True if all tensors in the gate set represent isometries, False otherwise.
+    """
+    return all(is_tensor_isometry(tensor, operator_type=name) for name, tensor in gate_set.items())

@@ -198,8 +198,14 @@ def eigy_expm_jax(A:jnp.ndarray):
     return jnp.einsum("...ik, ...k, ...kj -> ...ij", eigvects, jnp.exp(eigvals), jnp.linalg.inv(eigvects))
 
 def is_isometry(x:jnp.ndarray)->bool:
-    "check if `x` belongs to the stiefel manifold"
-    return jnp.allclose(x.conj().T @ x, jnp.eye(x.shape[1]))
+    """Check if `x` belongs to the stiefel manifold.
+
+    Supports batch dimensions: `x` may have shape (..., n, p), in which case
+    isometry is checked for every matrix in the leading (...) dimensions.
+    """
+    p = x.shape[-1]
+    gram_matrix = jnp.swapaxes(x.conj(), -1, -2) @ x
+    return jnp.allclose(gram_matrix, jnp.eye(p, dtype=gram_matrix.dtype))
 
 def is_in_tangent_space(x:jnp.ndarray, z:jnp.ndarray)->bool:
     """
