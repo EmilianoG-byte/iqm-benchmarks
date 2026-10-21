@@ -79,6 +79,7 @@ def get_initial_gate_set_for_optimization(target_superops:dict[str, jnp.ndarray]
         spam_depolarization: Weight of the identity mixed into the target POVM and state before factorizing them,
             to start in the interior of the PSD cone. See `get_compressed_perturbed_rep_from_mgst`. Defaults to 0.0 (no mixing).
         project_kraus_to_isometry: Whether to project the (rank-truncated) perturbed Kraus operators onto the Stiefel manifold.
+        TODO: we should also project the perturbed POVM and state operators onto the stiefel manifold if truncated.
     Returns:
         A dictionary containing the initial gate set for optimization, with keys "kraus", "povm", and "state".
     """
