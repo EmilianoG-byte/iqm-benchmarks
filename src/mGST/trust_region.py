@@ -16,6 +16,10 @@ import jax
 
 from typing import Callable, Any
 
+RADIUS_HEURISTICS = frozenset({"auto", "typical_distance", "gradient"})
+# Smallest initial radius the heuristics may return, as a fraction of the maximum radius.
+RADIUS_FLOOR_FRACTION = 1e-8
+
 def retraction_first_order(x:Tensor, z:Tensor, operator_type:str)-> Tensor:
     """First order retraction using the polar decomposition.
     
@@ -458,10 +462,10 @@ def compute_quality_quotient(
 
 def run_trust_region_optimization(
     x_init:Tensor, cost_function:Callable[[Tensor], Scalar], operator_type:str,
-    radius_init:float = 0.1, num_iterations:int = 20, max_radius:float = 2.0, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
+    radius_init:float|None = None, num_iterations:int = 20, max_radius:float|None = None, quotient_trust:float = 0.125, tol_grad:float = 1e-6, 
     metric:str = "euclidean", num_iterations_cg:int = 10, theta_cg:float = None, kappa_cg:float = None, verbose_cg:bool=True,
     global_norm_grad_init: float| None = None,
-    verbose:bool=False, linearize:bool=False,
+    verbose:bool=False, linearize:bool=False, radius_heuristic:str = "auto",
     rgrad_and_euclidean_fn:Callable[[Tensor], tuple[Tensor, Tensor]]|None = None,
     rhvp_and_euclidean_fn:Callable[[Tensor, Tensor], tuple[Tensor, Tensor]]|None = None,
     )->tuple[Tensor, list[Tensor], list[Scalar], Scalar, Scalar]:
@@ -471,9 +475,9 @@ def run_trust_region_optimization(
     Args:
         cost_function: The cost function to minimize. Should take a tensor as input and return a scalar.
         x_init: The initial point on the manifold.
-        radius_init: The initial trust region radius.
+        radius_init: The initial trust region radius. If None, it is chosen by `radius_heuristic`.
         num_iterations: The maximum number of trust region iterations to perform.
-        max_radius: The maximum trust region radius to allow.
+        max_radius: The maximum trust region radius to allow. If None, the typical distance of the manifold is used.
         quotient_trust: The lower threshold for accepting a step based on the quality quotient.
         operator_type: The type of the input operator ('kraus', 'state', 'povm')
         metric: The metric to use to calculate inner products in the truncated conjugate gradient algorithm. Can be "canonical" or "euclidean".
@@ -488,6 +492,8 @@ def run_trust_region_optimization(
         verbose: Whether to print information during the trust region outer loop optimization.
         linearize: Whether to linearize the Riemannian gradient once per TR iteration and reuse the linear map for the HVPs.
             Ignored if rhvp_and_euclidean_fn is given.
+        radius_heuristic: Which heuristic resolves `radius_init` and `max_radius` when they are None:
+            "auto", "typical_distance" or "gradient". See `resolve_trust_region_radii`. Explicit radii always win.
         rgrad_and_euclidean_fn: Precompiled (e.g. jitted) function x -> (Riemannian gradient, Euclidean gradient).
             Must be given together with rhvp_and_euclidean_fn. If None, it is built from cost_function with automatic differentiation.
         rhvp_and_euclidean_fn: Precompiled (e.g. jitted) function (x, z) -> (Riemannian HVP, Euclidean HVP).
@@ -513,9 +519,8 @@ def run_trust_region_optimization(
     x_k = x_init
     x_k_array = [x_k]
     cost_fx_array = [cost_function(x_k)]
-    radius_k = radius_init
     num_rejections = 0
-    n, p = get_isometry_dimensions_from_tensor(x_init, operator_type)
+    n, p, k = get_isometry_dimensions_from_tensor(x_init, operator_type)
 
     # Define the riemannian gradient, riemannian hessian-vector product, and retraction functions
     retraction = lambda x, z: retraction_first_order(x, z, operator_type=operator_type)
@@ -547,11 +552,16 @@ def run_trust_region_optimization(
     norm_grad_init = jnp.sqrt(riemannian_metric_from_tensors(n=n, p=p, z1=rgradient, z2=rgradient, x=x_init, metric=metric))
     
     norm_grad = norm_grad_init
+
+    # Resolved before `global_norm_grad_init` replaces norm_grad_init: the heuristics need the gradient at x_init.
+    radius_k, max_radius = resolve_trust_region_radii(
+        p=p, k=k, norm_grad=norm_grad_init, metric=metric, radius_init=radius_init, max_radius=max_radius, heuristic=radius_heuristic)
     
     if global_norm_grad_init is not None:
         norm_grad_init = global_norm_grad_init
     if verbose:
         print(f"🚀 TR started for operator: {operator_type} 🚀.")
+        print(f"Radii ({radius_heuristic} heuristic): Δ0 = {radius_k:.2e}. Δmax = {max_radius:.2e}")
         print("=======================================")
     try:
         for idx in range(num_iterations):
@@ -662,6 +672,95 @@ def riemannian_metric_from_tensors(n:int, p: int, z1:Tensor, z2:Tensor, x:Tensor
     z1_matrix, z2_matrix, x_matrix = tensors_to_isometries(z1, z2, x, n=n, p=p)
     
     return riemannian_metric(z1=z1_matrix, z2=z2_matrix, x=x_matrix, metric=metric)
+
+def compute_typical_distance(p:int, k:int, metric:str = "euclidean")->float:
+    """Order of magnitude of the distance one can travel on a product of k Stiefel manifolds St(n, p).
+
+    Every X in St(n, p) satisfies ||X||_F^2 = tr(X^H X) = p, so the manifold sits on a sphere of radius
+    sqrt(p) and its diameter is O(sqrt(p)); for k independent factors the squared norms add up.
+    This is pymanopt's `typical_dist`, used as the natural scale of the trust region radius.
+
+    Args:
+        p: The Stiefel p dimension.
+        k: The number of independent Stiefel factors (see `get_isometry_dimensions_from_tensor`).
+        metric: The metric in which the distance is measured, "euclidean" or "canonical".
+
+    Returns:
+        The typical distance of the manifold, in the units the trust region radius is measured in.
+
+    Raises:
+        ValueError: If the metric is not recognized.
+    """
+    if metric == "euclidean":
+        scale = 1.0
+    elif metric == "canonical":
+        # <z,z>_c = ||A||^2/2 + ||B||^2 for z = xA + x_perp B, so the canonical norm of the rotational
+        # directions is smaller than the euclidean one by sqrt(2).
+        scale = 0.5
+    else:
+        raise ValueError(f"Metric: {metric} is not recognized. Please use one of the following: 'euclidean', 'canonical'.")
+    return float(jnp.sqrt(scale * k * p))
+
+def resolve_trust_region_radii(
+    p:int, k:int, norm_grad:Scalar, metric:str = "euclidean",
+    radius_init:float|None = None, max_radius:float|None = None,
+    heuristic:str = "typical_distance", gradient_fraction:float = 0.1)->tuple[float, float]:
+    """Choose the initial and maximum trust region radius when they are not given explicitly.
+
+    `max_radius` always comes from the typical distance of the manifold: the gradient carries no
+    information about how far one can travel on it. `radius_init` depends on the heuristic:
+
+    - "typical_distance": Δ0 = typical_dist / 8, the pymanopt/Manopt default. Purely geometric,
+      it knows nothing about the cost function.
+    - "gradient": Δ0 = gradient_fraction * |r∇f(x_0)|, one of the classical choices surveyed in
+      Conn, Gould & Toint, Trust-Region Methods (2000), §17.2. Function-aware, but it blows up
+      where the log-likelihood is steep (model probabilities close to zero).
+    - "auto": the minimum of the two, i.e. the function-aware choice tamed by the geometric cap.
+
+    References:
+        * [1] Absil, Baker & Gallivan, Trust-region methods on Riemannian manifolds, FoCM 7(3), 2007.
+          Global convergence holds for any Δ0 in (0, Δ_max], so Δ0 is only a matter of efficiency.
+        * [2] Boumal, An Introduction to Optimization on Smooth Manifolds (2023), Ch. 6.
+        * [3] Conn, Gould & Toint, Trust-Region Methods, SIAM (2000), §17.2.
+
+    Args:
+        p: The Stiefel p dimension.
+        k: The number of independent Stiefel factors (see `get_isometry_dimensions_from_tensor`).
+        norm_grad: Norm of the Riemannian gradient at the initial point, in the same `metric`.
+        metric: The metric the trust region radius is measured in, "euclidean" or "canonical".
+        radius_init: The initial radius. Returned unchanged if not None.
+        max_radius: The maximum radius. Returned unchanged if not None.
+        heuristic: Which heuristic to use for `radius_init`: "auto", "typical_distance" or "gradient".
+        gradient_fraction: Fraction of the initial gradient norm used by the "gradient" and "auto" heuristics.
+
+    Returns:
+        A tuple containing the resolved initial and maximum trust region radii.
+
+    Raises:
+        ValueError: If the heuristic is not recognized.
+    """
+    if heuristic not in RADIUS_HEURISTICS:
+        raise ValueError(f"Radius heuristic '{heuristic}' is not recognized. Please use one of the following: {sorted(RADIUS_HEURISTICS)}.")
+    if radius_init is not None and max_radius is not None:
+        return radius_init, max_radius
+
+    typical_distance = compute_typical_distance(p=p, k=k, metric=metric)
+    if max_radius is None:
+        max_radius = typical_distance
+
+    if radius_init is None:
+        radius_from_gradient = gradient_fraction * float(norm_grad)
+        if heuristic == "typical_distance":
+            radius_init = typical_distance / 8
+        elif heuristic == "gradient":
+            radius_init = radius_from_gradient
+        else:
+            radius_init = min(radius_from_gradient, typical_distance / 8)
+        # The gradient vanishes at a saddle of the factorization (e.g. zero POVM/state columns),
+        # where an unclamped radius would stall the optimization.
+        radius_init = min(max(radius_init, RADIUS_FLOOR_FRACTION * max_radius), max_radius)
+
+    return radius_init, max_radius
 
 def determine_tr_stopping_criteria(norm_grad:float, norm_grad_init:float, tol_grad:float = 1e-8)->bool:
     """Determine whether to stop the trust region optimization based on the gradient norm.

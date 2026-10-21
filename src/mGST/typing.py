@@ -28,8 +28,8 @@ class BaseOptimizationOptions:
 class TrustRegionOptions(BaseOptimizationOptions):
     """Options for trust region optimization method."""
     num_iterations: int = 20
-    radius_init: float = 0.1
-    max_radius: float = 2.0
+    radius_init: float | None = None # if None, resolved by radius_heuristic.
+    max_radius: float | None = None # if None, the typical distance of the manifold.
     quotient_trust: float = 0.125
     tol_grad: float = 1e-6
     num_iterations_cg: int = 10
@@ -37,6 +37,11 @@ class TrustRegionOptions(BaseOptimizationOptions):
     kappa_cg: float | None = 1/10 # decided to set it as default based on experimentation and book suggestions.
     verbose_cg: bool = False
     linearize: bool = False # whether to linearize the HVP for repeated evaluation.
+    radius_heuristic: str = "auto" # "auto", "typical_distance" or "gradient".
+    
+    def __post_init__(self):
+        if self.radius_heuristic not in ("auto", "typical_distance", "gradient"):
+            raise ValueError(f"Invalid radius_heuristic: {self.radius_heuristic}")
 
 @dataclass
 class GradientDescentOptions(BaseOptimizationOptions):

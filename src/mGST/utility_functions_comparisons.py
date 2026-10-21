@@ -203,7 +203,7 @@ def get_compressed_perturbed_kraus_from_superop(superop:jnp.ndarray, rank:int, s
     kraus_tensor_perturbed = additional_fns.perturbed_target_init(X_target=superop, rK=rank, seed=seed)
     if project_to_isometry:
         kraus_tensor_perturbed = jnp.asarray(kraus_tensor_perturbed)
-        n, p = get_isometry_dimensions_from_tensor(kraus_tensor_perturbed, operator_type="kraus")
+        n, p, _ = get_isometry_dimensions_from_tensor(kraus_tensor_perturbed, operator_type="kraus")
         # Explicit batch dimension (num_gates, n, p), also for a single gate.
         kraus_isometries = jnp.reshape(kraus_tensor_perturbed, (-1, n, p))
         # Polar decomposition of x - 0 * z, i.e. the closest isometry to x.
@@ -1398,7 +1398,7 @@ def tensors_to_isometries(*tensors: Tensor, operator_type: str = None, n:int = N
         raise ValueError("Either operator_type or both n and p must be provided.")
 
     if n is None or p is None:
-        n, p = get_isometry_dimensions_from_tensor(tensors[0], operator_type=operator_type)
+        n, p, _ = get_isometry_dimensions_from_tensor(tensors[0], operator_type=operator_type)
 
     # Handle POVM and state cases
     return tuple(tensor_to_isometry(tensor, n=n, p=p) for tensor in tensors)
@@ -1419,7 +1419,7 @@ def euclidean_gradients_to_stiefel(gradient_tensor: Tensor, operator_tensor: Ten
             An array of stiefel isometries
     """
 
-    n, p = get_isometry_dimensions_from_tensor(operator_tensor, operator_type=operator_type)
+    n, p, _ = get_isometry_dimensions_from_tensor(operator_tensor, operator_type=operator_type)
 
     if operator_type == "kraus":
         
@@ -1510,9 +1510,9 @@ def calculate_finite_sampling_error(prob_matrix_exact:jnp.ndarray, prob_matrix_s
     num_povm, num_gate_sequences = prob_matrix_exact.shape
     return jnp.sum(jnp.abs(prob_matrix_exact - prob_matrix_sampled)**2) / (num_gate_sequences * num_povm)
 
-def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple[int, int]:
+def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple[int, int, int]:
     """
-    Get the Stiefel dimensions n and p from the given tensor.
+    Get the Stiefel dimensions n and p and the number of Stiefel factors k from the given tensor.
     
     Args:
         tensor: The tensor from where dimensions will be inferred.
@@ -1524,6 +1524,8 @@ def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple
     Returns:
         n: The Stiefel n dimension
         p: The Stiefel p dimension
+        k: The number of independent Stiefel factors the tensor is made of, i.e. the batch dimension
+            of `tensor_to_isometry`. 1 for the POVM and the state, the number of gates for the Kraus tensor.
         
     Raises:
         ValueError: If the tensor_type is not recognized.
@@ -1543,7 +1545,9 @@ def get_isometry_dimensions_from_tensor(tensor:Tensor, operator_type:str)->tuple
         p = dim
     else:
         raise ValueError(f"Operator name '{operator_type}' is not recognized. Please use one of the following: 'state', 'povm' or 'kraus'.")
-    return n, p
+    # Same leading dimension as the reshape in `tensor_to_isometry`.
+    k = tensor.size // (n * p)
+    return n, p, k
     
 def riemannian_hessian_vector_mgst(rhessian_tensor:Tensor, vector:Matrix)->Matrix:
     """Compute the Riemannian Hessian-vector product using the mGST implementation
