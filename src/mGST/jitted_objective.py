@@ -112,7 +112,7 @@ def make_vectorized_cost(indices_list: list, prob_matrix: Tensor, use_log_likeli
             identity_gate = jnp.zeros((1, kraus_rank, dim, dim), kraus_tensor.dtype).at[0, 0].set(jnp.eye(dim))
             kraus_extended = jnp.concatenate([kraus_tensor, identity_gate], axis=0)  # index -1 is the identity
             apply_position = lambda rho, gates_t: (_apply_gate_batched(kraus_extended[gates_t], rho), None)
-            rho, _ = jax.lax.scan(apply_position, rho, gates.T)
+            rho, _ = jax.lax.scan(apply_position, rho, gates.T) # this is what helps avoiding the unrolling of the for loop over all sequences.
 
         probabilities = _povm_probabilities(povm_psd, rho)  # (num_sequences, num_povm)
         if use_log_likelihood:

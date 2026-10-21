@@ -19,7 +19,7 @@ from mGST.low_level_jit import (
     gradient_state_mps_jit_reg)
 
 from mGST.typing import Tensor, Matrix, Scalar
-from mGST.riemannian import project_onto_tangent_space, canonical_gradient, riemannian_metric
+from mGST.riemannian import project_onto_tangent_space, canonical_gradient, riemannian_metric, retraction_polar_decomposition
 
 from mGST.algorithm import B_SFN_riem_Hess, A_SFN_riem_Hess, SFN_riem_Hess_full
 from mGST.additional_fns import random_gs
@@ -31,6 +31,7 @@ from scipy.optimize import minimize
 
 from typing_extensions import Literal
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -66,22 +67,25 @@ def get_target_operators_gate_set_name(gate_set_name:str)->tuple[dict[str, jnp.n
     
     return all_operators_from_configuration(configuration, backend=DEFAULT_BACKEND)
 
-def get_initial_gate_set_for_optimization(target_superops:dict[str, jnp.ndarray], kraus_rank:int, povm_rank:int, state_rank:int, seed:int=42) -> dict[str, jnp.ndarray]:
+def get_initial_gate_set_for_optimization(target_superops:dict[str, jnp.ndarray], kraus_rank:int, povm_rank:int, state_rank:int, seed:int=42, spam_depolarization:float=0.0, project_kraus_to_isometry:bool=True) -> dict[str, jnp.ndarray]:
     """Get the initial gate set for optimization, given the target superoperators and the desired ranks for Kraus, POVM, and state.
-    
+
     Args:
         target_superops: A dictionary containing the target superoperators for Kraus, POVM, and state.
         kraus_rank: Desired rank of the Kraus operators in the compressed representation.
         povm_rank: Desired rank of the POVM operators in the compressed representation.
         state_rank: Desired rank of the state operator in the compressed representation.
         seed: Seed for random perturbation. Defaults to 42.
+        spam_depolarization: Weight of the identity mixed into the target POVM and state before factorizing them,
+            to start in the interior of the PSD cone. See `get_compressed_perturbed_rep_from_mgst`. Defaults to 0.0 (no mixing).
+        project_kraus_to_isometry: Whether to project the (rank-truncated) perturbed Kraus operators onto the Stiefel manifold.
     Returns:
         A dictionary containing the initial gate set for optimization, with keys "kraus", "povm", and "state".
     """
-    kraus_tensor_init_dict = get_compressed_perturbed_kraus_from_superop(superop=target_superops["kraus"], rank=kraus_rank, seed=seed)
+    kraus_tensor_init_dict = get_compressed_perturbed_kraus_from_superop(superop=target_superops["kraus"], rank=kraus_rank, seed=seed, project_to_isometry=project_kraus_to_isometry)
     kraus_tensor_init = kraus_tensor_init_dict["kraus_tensor"]
 
-    povm_psd_init, state_psd_init = get_compressed_perturbed_rep_from_mgst(target_superops["povm"], target_superops["state"], rank_povm=povm_rank, rank_state=state_rank)
+    povm_psd_init, state_psd_init = get_compressed_perturbed_rep_from_mgst(target_superops["povm"], target_superops["state"], rank_povm=povm_rank, rank_state=state_rank, spam_depolarization=spam_depolarization)
     
     return {
         "kraus": kraus_tensor_init,
@@ -176,21 +180,35 @@ def generate_target_povm(dim:int)->jnp.ndarray:
             ]
         ).astype(jnp.complex128)
 
-def get_compressed_perturbed_kraus_from_superop(superop:jnp.ndarray, rank:int, seed:int = 42)->dict[str, jnp.ndarray]:
+def get_compressed_perturbed_kraus_from_superop(superop:jnp.ndarray, rank:int, seed:int = 42, project_to_isometry:bool = False)->dict[str, jnp.ndarray]:
     """Get a perturbed Kraus representation from a superoperator.
-    
+
+    The perturbed channel is generally of full Kraus rank. If `rank` is smaller than that, the truncation to `rank`
+    Kraus operators breaks trace preservation slightly (e.g. |sum_i K_i^† K_i - I| ~ 5e-6 for 2 qubits and rank 4),
+    so the Kraus tensor is not exactly on the Stiefel manifold. With `project_to_isometry=True`, each gate is projected
+    onto the closest isometry (in Frobenius norm) via the polar decomposition.
+
     Args:
         superop: Superoperator tensor of dimensions (num_gates, dim_out^2, dim_in^2)
             Names in other functions: `X`, `kraus_tensor_mgst`.
         rank: Desired rank of the Kraus tensor in the compressed representation.
         seed: Seed for random perturbation. Defaults to 42.
-        
+        project_to_isometry: Whether to project the Kraus operators of each gate onto the Stiefel manifold. Defaults to False.
+
     Returns:
     A dictionary containing the perturbed Kraus representation and the corresponding superoperator.
         kraus_tensor: Kraus tensor of dimensions (num_gates, kraus_rank, dim_out, dim_in)
         superop: Superoperator tensor of dimensions (num_gates, dim_out^2, dim_in^2)
     """
     kraus_tensor_perturbed = additional_fns.perturbed_target_init(X_target=superop, rK=rank, seed=seed)
+    if project_to_isometry:
+        kraus_tensor_perturbed = jnp.asarray(kraus_tensor_perturbed)
+        n, p = get_isometry_dimensions_from_tensor(kraus_tensor_perturbed, operator_type="kraus")
+        # Explicit batch dimension (num_gates, n, p), also for a single gate.
+        kraus_isometries = jnp.reshape(kraus_tensor_perturbed, (-1, n, p))
+        # Polar decomposition of x - 0 * z, i.e. the closest isometry to x.
+        project_fn = lambda x: retraction_polar_decomposition(x=x, z=jnp.zeros_like(x), step_size=0.0)
+        kraus_tensor_perturbed = isometry_to_tensor(jax.vmap(project_fn)(kraus_isometries), kraus_tensor_perturbed.shape)
     superop_perturbed = kraus_tensor_to_mgst(kraus_tensor_perturbed)
     return {"kraus_tensor": kraus_tensor_perturbed, "superop": superop_perturbed}
     
@@ -533,21 +551,39 @@ def get_kraus_psd_from_mgst(kraus_mgst, rank:int)->jnp.ndarray:
     kraus_tensor = jnp.transpose(kraus_tensor, (0, 3, 2, 1)) # num_gates, rank_kraus, dim_out, dim_in
     return kraus_tensor
 
-def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, rank_povm:int = None, rank_state:int = None)->tuple[jnp.ndarray, jnp.ndarray]:
+def get_compressed_perturbed_rep_from_mgst(povm_mgst:jnp.ndarray, state_mgst:jnp.ndarray, rank_povm:int = None, rank_state:int = None, spam_depolarization:float = 0.0)->tuple[jnp.ndarray, jnp.ndarray]:
     """Get the compressed representation of the MGST operators using cholesky factorization + SVD decomposition if ranks are specified.
-    
+
     This is the implementation used in the original mGST code + my SVD decomposition.
-    
+
     For the Kraus function see `get_compressed_perturbed_kraus_from_superop`.
-    
+
+    With spam_depolarization = ε > 0, the identity is mixed into the POVM and state before factorizing them:
+        E_i -> (1 - ε) E_i + ε I / num_povm,    ρ -> (1 - ε) ρ + ε I / dim,
+    which preserves sum_i E_i = I and Tr(ρ) = 1. The reason for doing this, as opposed to factorizing the (pure) targets,
+    is that the factors of rank-deficient operators have (almost) zero columns. Those points are on the boundary of the PSD cone:
+    the predicted probabilities can be ~0 where the data is not, so the log-likelihood has a huge gradient there, and
+    the zero columns have zero gradient (a saddle of the factorization). Both force tiny trust region radii in the first
+    iterations. This is the same reason why the non-dominant Kraus operators are initialized as small random matrices
+    (see `perturbed_target_init`).
+
     Args:
         povm_mgst: POVM operators from MGST. Dimensions: (num_povm, dim_in x dim_in*)
         state_mgst: State operator from MGST. Dimensions: (dim_out x dim_out*)
+        rank_povm: Rank of the compressed POVM operators. If None, the full cholesky factor is returned.
+        rank_state: Rank of the compressed state. If None, the full cholesky factor is returned.
+        spam_depolarization: Weight ε in [0, 1] of the identity mixed into the POVM and state. Defaults to 0.0 (no mixing).
     Returns:
         A tuple containing the compressed representation of the POVM and State as JAX arrays.
     """
+    if not 0.0 <= spam_depolarization <= 1.0:
+        raise ValueError(f"spam_depolarization must be in [0, 1]. Got {spam_depolarization}.")
     num_povm, dim_sqrd = povm_mgst.shape
     dim = int(jnp.sqrt(dim_sqrd))
+    if spam_depolarization > 0:
+        identity_vectorized = jnp.eye(dim).reshape(-1)
+        povm_mgst = (1 - spam_depolarization) * povm_mgst + spam_depolarization * identity_vectorized / num_povm
+        state_mgst = (1 - spam_depolarization) * state_mgst + spam_depolarization * identity_vectorized / dim
     povm_psd = jnp.array(
         [jnp.linalg.cholesky(
             povm_mgst[k].reshape(dim, dim) + 1e-14 * jnp.eye(dim)

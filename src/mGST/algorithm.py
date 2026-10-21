@@ -751,7 +751,7 @@ def run_mGST(
     init=None,
     verbose_level=0,
     return_operators_list:bool=False,
-    use_log_likelihood:bool=True,
+    optimize_over_log_likelihood:bool=True,
 ):  # pylint: disable=too-many-branches, too-many-statements
     """Main mGST routine
 
@@ -863,23 +863,32 @@ def run_mGST(
     state_i = [rho]
     kraus_full_i = [X]        
 
+    # Batch initialization continues to optimize least squares.
+    batch_least_squares_history = res_list_secondary_opt
+    if not optimize_over_log_likelihood:
+        res_list_secondary_opt = [objf(X, E, rho, J, y, mle=True)]
+
     with logging_redirect_tqdm(loggers=[qcvv_logger] if verbose_level > 0 else None):
-        res_list_main_opt = [objf(X, E, rho, J, y, mle=use_log_likelihood)]
+        res_list_main_opt = [objf(X, E, rho, J, y, mle=optimize_over_log_likelihood)]
         
         stopped_early = False
         for _ in trange(final_iter, disable=verbose_level == 0):
             
-            K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=use_log_likelihood)
+            K, X, E, rho, A, B = optimize(y, J, d, r, rK, n_povm, method, K, rho, A, B, fixed_elements, mle=optimize_over_log_likelihood)
             
             kraus_i.append(K)
             povm_i.append(E)
             state_i.append(rho)
             kraus_full_i.append(X)
             
-            # if we are using the log-likelihood as main opt, we should also compute the least squares.
-            if use_log_likelihood:
-                res_list_secondary_opt.append(objf(X, E, rho, J, y))
-            res_list_main_opt.append(objf(X, E, rho, J, y, mle=use_log_likelihood))
+            # if we are using the log-likelihood as main opt, we should also compute the least squares and viceversa.
+            res_list_main_opt.append(
+                objf(X, E, rho, J, y, mle=optimize_over_log_likelihood)
+            )
+            res_list_secondary_opt.append(
+                objf(X, E, rho, J, y, mle=not optimize_over_log_likelihood)
+            )
+            
             if (
                 len(res_list_main_opt) >= 2
                 and np.abs(res_list_main_opt[-2] - res_list_main_opt[-1]) < res_list_main_opt[-1] * target_rel_prec
@@ -891,20 +900,36 @@ def run_mGST(
     if not stopped_early:
         print(f"Reached maximum iterations ({final_iter}) without convergence.")
             
+            
+    if optimize_over_log_likelihood:
+        least_squares_history = res_list_secondary_opt
+        log_likelihood_history = res_list_main_opt
+    else:
+        least_squares_history = (
+            batch_least_squares_history + res_list_main_opt[1:]
+        )
+        log_likelihood_history = res_list_secondary_opt
         
     if verbose_level == 2:
-        if use_log_likelihood:
-            plot_objf(res_list_secondary_opt, f"Least squares error over batches and full data", delta=delta)
-        plot_objf(res_list_main_opt, f"Negative log-likelihood over full data")
+        plot_objf(
+            least_squares_history,
+            "Least squares error over batches and full data",
+            delta=delta,
+        )
+        plot_objf(
+            log_likelihood_history,
+            "Negative log-likelihood over full data",
+            delta=delta,
+        )
     if verbose_level > 0:
-        if success or (res_list_secondary_opt[-1] < delta):
+        if success or (least_squares_history[-1] < delta):
             qcvv_logger.info(f"Convergence criterion satisfied")
         else:
             qcvv_logger.warning(
                 f"Convergence criterion not satisfied. Potential causes include too low max_iterations, bad initialization or model mismatch."
             )
         qcvv_logger.info(
-            f"Final objective {Decimal(res_list_secondary_opt[-1]):.2e} in time {(time.time() - t0):.2f}s",
+            f"Final objective {Decimal(least_squares_history[-1]):.2e} in time {(time.time() - t0):.2f}s",
         )
         
     if return_operators_list:
@@ -913,7 +938,7 @@ def run_mGST(
         rho = state_i
         X = kraus_full_i
         
-    main_opt_name = "log_likelihood" if use_log_likelihood else "least_squares"
-    second_opt_name = "least_squares"
-        
-    return K, X, E, rho, {main_opt_name: res_list_main_opt, second_opt_name: res_list_secondary_opt}
+    return K, X, E, rho, {
+        "log_likelihood": log_likelihood_history,
+        "least_squares": least_squares_history,
+    }

@@ -1228,7 +1228,12 @@ def ddM(X, K, E, rho, J, y, d, r, rK, mle=False):
                                             ).reshape(r, r)
 
                                         elif i1 == i2:
-                                            dconjdK_loc[rk1 * rK + rk2] = np.outer(L, R)
+                                            # Changes from Raphael
+                                            if rk1 == rk2:
+                                                dconjdK_loc[rk1 * rK + rk2] = np.kron(
+                                                    L.reshape(pdim, pdim), R.reshape(pdim, pdim)
+                                                )
+
 
                                         elif i1 > i2:
                                             ddK_loc[rk1 * rK + rk2] = np.kron(

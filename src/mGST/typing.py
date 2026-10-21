@@ -3,7 +3,7 @@ This module provides type aliases for commonly used tensor shapes and structures
 """
 import jax.numpy as jnp
 from dataclasses import dataclass
-from typing import Optional, Literal, Any
+from typing import Any
 
 Tensor = jnp.ndarray
 Scalar = jnp.ndarray
@@ -13,7 +13,6 @@ Matrix = jnp.ndarray
 OptimizationResult = dict[str, Any]
 
 from dataclasses import dataclass, asdict
-from typing import Optional, Any, Literal
 
 @dataclass
 class BaseOptimizationOptions:

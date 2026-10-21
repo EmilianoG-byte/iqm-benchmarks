@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import jax
 from typing import Sequence
 
-from mGST.typing import Tensor, Matrix, Scalar
+from mGST.typing import Matrix, Scalar
 from mGST.linear_algebra import transpose, symmetrize
 
 def riemannian_connection(x:Matrix, w_x:Matrix, z:Matrix, Dw_x_to_z:Matrix, metric:str = "euclidean", alphas:tuple|None = None)-> Matrix:

@@ -290,8 +290,8 @@ At 1q all variants are a few ms (overhead-dominated) and the ordering fluctuates
 | Default `absolute_tolerance` (e.g. 0.1 nats) and an LS analogue (fraction of the shot-noise floor) | currently opt-in, LS has no natural unit | dataset-independent stopping |
 | `isinstance(compute_least_squares, int)` is also true for `True` | `compute_least_squares=True` computes LS after every operator | cosmetic |
 | GDS path (`GradientDescentOptions`) is not jitted | only TR uses the jitted objective | – |
+| Implement an initialization method for POVM and State that helps me farther from the current singularity of the log-likelihood function | Currently, the first iterations are wasted since most updates are rejected | Better convergence |
 | Remove the superseded prototypes in `playground/time_complexity/` (`jit_prototype.py`, `end_to_end_jit.py`, `scaling.py`) | replaced by the module and the scripts here | – |
-
 ---
 
 ## References
