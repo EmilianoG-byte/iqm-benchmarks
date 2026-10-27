@@ -492,6 +492,8 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
     optimization_options_random_init["noise_threshold"] = noise_threshold
     optimization_options_random_init["num_iterations_outer"] = num_max_iterations_random_inits
     optimization_options_random_init["compute_least_squares"] = False # no need to additionally compute this, since it's the main cost funciton anyways
+    optimization_options_random_init["absolute_tolerance"] = None # for the least squares, and particularly in the case of random inits, we care more about fitting to the estimated noise floor threshold.
+    
     converged_below_noise_threshold = False
     # need to optimize the operator schedule accordingly
     old_schedules = optimization_options["schedule"]
@@ -501,6 +503,8 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
         for op_name in ["kraus", "povm", "state"]
     }        
     
+    best_random_result = None
+    best_random_idx = None
     for init_idx in range(num_max_random_inits):
         print(f"🎲👾 Running optimization workflow with random initialization {init_idx+1}/{num_max_random_inits} 🎲👾")
         
@@ -523,16 +527,29 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
         
         if "below noise threshold" in random_init_result["convergence_reason"]:
             converged_below_noise_threshold = True
+            best_random_result = random_init_result
+            best_random_idx = init_idx
             break
-    
+        # if its the first iteration this is the best by default
+        if best_random_result is None:
+            best_random_result = random_init_result
+            best_random_idx = init_idx
+        # check if the cost function is better than the previous best
+        else:
+            current_cost = random_init_result["cost_fn_history"]["main"][-1]
+            best_cost = best_random_result["cost_fn_history"]["main"][-1]
+            if current_cost < best_cost:
+                best_random_result = random_init_result
+                best_random_idx = init_idx
+                
     if converged_below_noise_threshold:
         print(f"✅ Converged below noise threshold after {init_idx+1} random initializations. ")
     else:
         print(f"⚠️ Did not converge below noise threshold after {num_max_random_inits} random initializations. "
-              "Using the result from the last random initialization. ")
+              f"Using the BEST result from random initialization {best_random_idx}")
         
-    first_costs = {cost_type: history[0] for cost_type, history in random_init_result["cost_fn_history"].items()}
-    final_costs = {cost_type: history[-1] for cost_type, history in random_init_result["cost_fn_history"].items()}  
+    first_costs = {cost_type: history[0] for cost_type, history in best_random_result["cost_fn_history"].items()}
+    final_costs = {cost_type: history[-1] for cost_type, history in best_random_result["cost_fn_history"].items()}  
     
     print(f" Rnd. Init: Initial cost fn values: {first_costs} \n"
           f" Rnd. Init: Final cost fn values: {final_costs}")
@@ -541,7 +558,7 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
     
     final_result = run_optimization_workflow(
                 num_shots=num_shots,
-                init_operators=random_init_result["optimized_operators"], # use the result from the last random initialization
+                init_operators=best_random_result["optimized_operators"], # use the result from the BEST random initialization
                 operators_psd_true=operators_psd_true,
                 target_superops=target_superops,
                 use_exact_probabilities=False, # noise threshold only makes sense with sampled probabilities
@@ -554,7 +571,7 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
                 gauge_optimize=True, # we want to optimize the gauge for the final result
             )
     
-    return final_result, random_init_result
+    return final_result, best_random_result
     
 def _process_optimization_options(optimization_options:dict[str, Any]|None, num_shots:int, probability_matrix:jnp.ndarray) -> dict[str, Any]:
     """Process the optimization options and return the relevant parameters for the optimization workflow.
@@ -567,11 +584,12 @@ def _process_optimization_options(optimization_options:dict[str, Any]|None, num_
     if optimization_options is None:
             optimization_schedule, num_iterations_outer, relative_precision, global_gradient_norm_tol, threshold_multiplier, noise_threshold, optimization_verbose, compute_least_squares = get_default_optimization_options()
     else:
-        expected_keys = set(["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol", "threshold_multiplier", "noise_threshold", "optimization_verbose", "compute_least_squares"])
+        expected_keys = set(["schedule", "num_iterations_outer", "relative_precision", "global_gradient_norm_tol", "threshold_multiplier", "noise_threshold", "optimization_verbose", "compute_least_squares", "carry_over_radius", "absolute_tolerance"])
         optimization_keys = set(optimization_options.keys())
         if not optimization_keys.issubset(expected_keys):
             raise ValueError(f"Optimization options must contain keys: {expected_keys}, but got {optimization_keys}.")
         
+        # TODO: need to automate this retrieval of options from the dictionary to avoid manual assignment.
         optimization_schedule = optimization_options["schedule"]
         num_iterations_outer = optimization_options["num_iterations_outer"]
         relative_precision = optimization_options["relative_precision"]
@@ -582,6 +600,8 @@ def _process_optimization_options(optimization_options:dict[str, Any]|None, num_
         
         optimization_verbose = optimization_options.get("optimization_verbose", False)
         compute_least_squares = optimization_options.get("compute_least_squares", False)
+        carry_over_radius = optimization_options.get("carry_over_radius", True)
+        absolute_tolerance = optimization_options.get("absolute_tolerance", None)
     
     if noise_threshold is None and threshold_multiplier is not None:
         noise_threshold = estimate_noise_floor_threshold(multiplier=threshold_multiplier, num_shots=num_shots, probability_matrix=probability_matrix)
@@ -594,6 +614,8 @@ def _process_optimization_options(optimization_options:dict[str, Any]|None, num_
         "noise_threshold": noise_threshold,
         "verbose": optimization_verbose,
         "compute_least_squares": compute_least_squares,
+        "carry_over_radius": carry_over_radius,
+        "absolute_tolerance": absolute_tolerance,
     }
 
 def _process_indices_generation(num_gates:int, num_sequences:int|None, seq_len_list:list[int]|None, indices_dict:dict[str, list[list[int]]]|None) -> dict[str, list[list[int]]]:

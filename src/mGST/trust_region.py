@@ -849,7 +849,7 @@ def run_riemannian_optimization(
     carry_over_radius: bool = True,
     cost_floor: float|None = None,
     absolute_tolerance: float|None = None,
-    use_jit: bool = False,
+    use_jit: bool = True, # new default
     jit_contraction: str = "prefix",
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """

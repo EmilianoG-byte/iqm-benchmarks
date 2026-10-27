@@ -900,3 +900,15 @@ def plot_mve_multiple_seq_lengths(mve_dict:dict[int, list[tuple]], shots_list:jn
     plt.show()
     
     return fig, parameters_dict
+
+def time_to_seconds(days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0) -> float:
+    """Convert time duration to seconds."""
+    return days * 24 * 3600 + hours * 3600 + minutes * 60 + seconds
+
+def format_time(days:float = 0, hours:float = 0, minutes:float = 0, seconds: float = 0) -> str:
+    """Format time in seconds to a human-readable string."""
+    total_seconds = time_to_seconds(days, hours, minutes, seconds)
+    days, total_seconds = divmod(total_seconds, 24 * 3600)
+    hours, total_seconds = divmod(total_seconds, 3600)
+    minutes, total_seconds = divmod(total_seconds, 60)
+    return f"{int(days)}d {int(hours)}h {int(minutes)}m {total_seconds:.1f}s"

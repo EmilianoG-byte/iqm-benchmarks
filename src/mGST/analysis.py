@@ -292,7 +292,7 @@ def compute_mve_and_wve_for_all_realizations(optimization_results: list[dict[str
     for optimization_result_idx in optimization_results:
         # create the dictionary from where to compute mve and wve
         mve_results_dict, wve_results_dict = compute_mve_and_wve_from_optimization_results(
-            optimization_results=optimization_result_idx,
+            optimization_results_dict=optimization_result_idx,
             true_superops=true_superops,
             sequence_length=sequence_length,
             num_circuits_sampled=num_circuits_sampled,
@@ -360,12 +360,12 @@ def _extract_gst_superops_list(
     return [extractors[which_data](result) for result in optimization_results.values()]
 
 
-def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str, OptimizationResult], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str = "superops_gauged",verbose:bool=False)-> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
+def compute_mve_and_wve_from_optimization_results(optimization_results_dict: dict[str, OptimizationResult], true_superops: dict[str, jnp.ndarray], sequence_length:int=14, num_circuits_sampled:int=1000, num_repetitions:int=10, which_data:str = "superops_gauged",verbose:bool=False)-> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """
     Compute the Mean Variational Error (MVE) and Mean Worst-case Variational Error (WVE) from a dictionary of optimization results.
     
     Args:
-        optimization_results: A dictionary of result dictionaries returned by `run_optimization_workflow`.
+        optimization_results_dict: A dictionary mapping number of sequences to their corresponding optimization results. As returned by `run_optimization_workflow`.
         true_superops: The true superoperators (kraus, povm, state) used to generate the probability matrices.
         sequence_length: The length of the sequences to use for computing MVE and WVE.
         num_circuits_sampled: The number of circuits to sample for computing MVE and WVE.
@@ -374,12 +374,15 @@ def compute_mve_and_wve_from_optimization_results(optimization_results: dict[str
     Returns:
         The MVE and WVE results, where each result is stored in a dictionary with the expected keys, and each key maps to a dictionary containing the mean and standard deviation of the MVE and WVE.
     """
-    keys = list(optimization_results.keys())
+    keys = list(optimization_results_dict.keys())
     
     if which_data not in ["superops_gauged", "optimized_operators"]:
         raise ValueError(f"which_data must be either 'superops_gauged' or 'optimized_operators', got {which_data}.")
+    
+    if not optimization_results_dict:
+        raise ValueError("optimization_results_dict is empty.")
         
-    gst_superops_list = _extract_gst_superops_list(optimization_results, which_data=which_data)
+    gst_superops_list = _extract_gst_superops_list(optimization_results_dict, which_data=which_data)
 
     mve_results_over_sequences = variational_error_avg_and_std_from_list_of_superops(num_runs=num_repetitions, true_superops=true_superops, gst_superops=gst_superops_list, length=sequence_length, samples=num_circuits_sampled, error_type="MVE", verbose=verbose)
     
