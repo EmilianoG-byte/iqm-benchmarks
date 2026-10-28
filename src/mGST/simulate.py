@@ -10,7 +10,15 @@ import jax.numpy as jnp
 import numpy as np
 
 from mGST.typing import OperatorSchedule, TrustRegionOptions, OptimizationResult
-from mGST.trust_region import run_riemannian_optimization, estimate_noise_floor_threshold
+from mGST.trust_region import (
+    run_riemannian_optimization,
+    estimate_noise_floor_threshold,
+    compute_cost_floor,
+    convergence_criteria_from_noise_threshold,
+    convergence_criteria_from_relative_precision,
+    convergence_criteria_from_absolute_tolerance,
+)
+from mGST.jitted_objective import JittedObjective
 from mGST.low_level_jit import cost_function_jax_mps
 from mGST.reporting.reporting import gauge_opt
 from mGST.compatibility import arrays_to_pygsti_model
@@ -477,7 +485,20 @@ def generate_random_gate_set_from_gate_set(gate_set:dict[str, jnp.ndarray], seed
     params = get_parameters_from_gate_set(gate_set)
     return generate_random_initial_operators(**params, seeds=seeds)
 
-def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any], num_sequences:int|None=None, seq_len_list:list[int]|None=None, indices_dict:dict[str, list[list[int]]]|None=None, probability_matrices:dict[str, Matrix]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, threshold_multiplier:float=5.0)-> tuple[OptimizationResult, OptimizationResult]:    
+def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any], num_sequences:int|None=None, seq_len_list:list[int]|None=None, indices_dict:dict[str, list[list[int]]]|None=None, probability_matrices:dict[str, Matrix]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, threshold_multiplier:float=5.0, num_batches:int|None=None, seed:int|None=None, verbose:bool=True)-> tuple[OptimizationResult, OptimizationResult]:
+    """Search for a good starting point with random initializations, then refine it on the full data.
+
+    The random-init phase mirrors the batch phase of `mGST.algorithm.run_mGST`: a different batch of
+    circuits at every outer iteration, with the noise threshold evaluated on the full data set. The
+    batches are drawn once into a pool (see `build_batch_pool`) and reused across initializations,
+    which bounds the jit compilation cost to `num_batches` instead of one per outer iteration.
+
+    Args:
+        num_batches: Size of the batch pool. Defaults to `num_max_iterations_random_inits`, so that each
+            initialization sees a different batch at every outer iteration. Larger values give more batch
+            diversity across initializations at the price of proportionally more jit compilation.
+        seed: Seed for the batch draws and the random initial operators. If None, they are not reproducible.
+    """
     # Generate the random sequences already here to fix it for all random inits.
     num_gates = target_superops["kraus"].shape[0]
     indices_dict = _process_indices_generation(num_gates=num_gates, num_sequences=num_sequences, seq_len_list=seq_len_list, indices_dict=indices_dict)
@@ -485,44 +506,68 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
     probability_matrices = _process_probability_matrices(operators_psd_true=operators_psd_true, indices_list=indices_dict["gate_indices"], num_shots=num_shots, probability_matrices=probability_matrices)
         
     noise_threshold = estimate_noise_floor_threshold(multiplier=threshold_multiplier, num_shots=num_shots, probability_matrix=probability_matrices["sampled"])
-    
-    
-    optimization_options_random_init = optimization_options.copy()
-    
-    optimization_options_random_init["noise_threshold"] = noise_threshold
-    optimization_options_random_init["num_iterations_outer"] = num_max_iterations_random_inits
-    optimization_options_random_init["compute_least_squares"] = False # no need to additionally compute this, since it's the main cost funciton anyways
-    optimization_options_random_init["absolute_tolerance"] = None # for the least squares, and particularly in the case of random inits, we care more about fitting to the estimated noise floor threshold.
-    
-    converged_below_noise_threshold = False
-    # need to optimize the operator schedule accordingly
-    old_schedules = optimization_options["schedule"]
+    print(f"🔊 Estimated noise threshold: {noise_threshold:.6e} 🔊")
+    # The random-init phase fits the least squares on the sampled probabilities: that is the cost the
+    # noise threshold is expressed in.
+    cost_fn_kwargs_random_init = {
+        "indices_list": indices_dict["gate_indices"],
+        "prob_matrix": probability_matrices["sampled"],
+        "jit": True,
+        "use_log_likelihood": False,
+        "verbose": False,
+    }
 
-    optimization_options_random_init["schedule"] = {
-        op_name: old_schedules[op_name].shorten_to(num_max_iterations_random_inits)
-        for op_name in ["kraus", "povm", "state"]
-    }        
+    if num_batches is None:
+        num_batches = num_max_iterations_random_inits
+
+    rng = np.random.default_rng(seed)
+    init_operators_per_init = [
+        generate_random_gate_set_from_gate_set(
+            gate_set=operators_psd_true,
+            seeds=[int(value) for value in rng.integers(0, 2**31, size=3)],
+        )
+        for _ in range(num_max_random_inits)
+    ]
+
+    # Raises if the schedule does not cover the random-init iterations.
+    schedule_random_init = {
+        op_name: optimization_options["schedule"][op_name].shorten_to(num_max_iterations_random_inits)
+        for op_name in OPERATOR_NAMES
+    }
+
+    batch_pool = build_batch_pool(
+        probability_matrices=probability_matrices,
+        indices_dict=indices_dict,
+        batch_size=batch_size,
+        num_batches=num_batches,
+        cost_fn_kwargs=cost_fn_kwargs_random_init,
+        seed=rng,
+        validate_at=init_operators_per_init[0],
+    )
     
+    jitted_objective_full = JittedObjective.from_cost_fn_kwargs(cost_fn_kwargs_random_init)
+    jitted_objective_full.validate(cost_function_jax_mps, cost_fn_kwargs_random_init, **_as_objective_operators(init_operators_per_init[0]))
+
+    converged_below_noise_threshold = False
     best_random_result = None
     best_random_idx = None
     for init_idx in range(num_max_random_inits):
         print(f"🎲👾 Running optimization workflow with random initialization {init_idx+1}/{num_max_random_inits} 🎲👾")
-        
-        batched_probability_matrices, batched_indices_dict = batch_probability_matrices_and_indices(probability_matrices=probability_matrices, indices_dict=indices_dict, batch_size=batch_size, seed=None) # no seed to make it random every time
-        
-        random_init_result = run_optimization_workflow(
-            num_shots=num_shots,
-            init_operators=None, # generate random initial operators
-            operators_psd_true=operators_psd_true,
-            target_superops=target_superops,
-            use_exact_probabilities=False, # noise threshold only makes sense with sampled probabilities
-            optimization_options=optimization_options_random_init,
-            warmup_run=False, # is gonna be ran so many times that we don't need to warmup every time
-            use_log_likelihood=False, # since we are evaluating at the noise threshold, it only makes sense to check convergence with the least-squares
-            indices_dict=batched_indices_dict, # batched version
-            probability_matrices=batched_probability_matrices, # batched version
-            verbose=False, # we don't want to print every time
-            gauge_optimize=False, # no need to optimize for every run.
+
+        random_init_result = run_optimization_workflow_batched(
+            init_operators=init_operators_per_init[init_idx],
+            batch_pool=batch_pool,
+            cost_fn_kwargs=cost_fn_kwargs_random_init,
+            num_iterations=num_max_iterations_random_inits,
+            optimization_schedule=schedule_random_init,
+            jitted_objective_full=jitted_objective_full,
+            init_offset=init_idx,
+            noise_threshold=noise_threshold,
+            relative_precision=None, #optimization_options.get("relative_precision"),
+            # for the least squares, and particularly in the case of random inits, we care more about
+            # fitting to the estimated noise floor threshold.
+            absolute_tolerance=None,
+            verbose=verbose,
         )
         
         if "below noise threshold" in random_init_result["convergence_reason"]:
@@ -565,8 +610,8 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
                 optimization_options=optimization_options,
                 warmup_run=False,
                 use_log_likelihood=True, # force this for "refinement" optimization
-                indices_dict=indices_dict, # batched version
-                probability_matrices=probability_matrices, # batched version
+                indices_dict=indices_dict,
+                probability_matrices=probability_matrices,
                 verbose=False, # we don't want to print every time
                 gauge_optimize=True, # we want to optimize the gauge for the final result
             )
@@ -807,7 +852,7 @@ def batch_probability_matrices_and_indices(
     probability_matrices: dict[str, Matrix],
     indices_dict: dict[str, Any],
     batch_size: int | float,
-    seed: int | None = None,
+    seed: int | np.random.Generator | None = None,
 ) -> tuple[dict[str, Matrix], dict[str, Any]]:
     """
     Subsample a consistent batch of circuits from probability matrices and indices.
@@ -817,6 +862,9 @@ def batch_probability_matrices_and_indices(
     - probability_matrices["sampled"]: (num_povm, num_circuits)
     - indices_dict["gate_indices"]: length num_circuits
     - indices_dict["gate_indices_with_negs"]: (num_circuits, max_len)
+
+    `seed` may also be a `numpy.random.Generator`, which is then used (and advanced) as is,
+    so that successive draws of a pool of batches stay reproducible.
     """
     required_prob_keys = {"exact", "sampled"}
     required_idx_keys = {"gate_indices", "gate_indices_with_negs"}
@@ -872,6 +920,200 @@ def batch_probability_matrices_and_indices(
     }
 
     return batched_probability_matrices, batched_indices_dict
+
+OPERATOR_NAMES = ("kraus", "povm", "state")
+
+def build_batch_pool(
+    probability_matrices: dict[str, Matrix],
+    indices_dict: dict[str, Any],
+    batch_size: int | float,
+    num_batches: int,
+    cost_fn_kwargs: dict[str, Any],
+    which_probabilities: str = "sampled",
+    seed: int | np.random.Generator | None = None,
+    jit_contraction: str = "prefix",
+    validate_at: dict[str, jnp.ndarray] | None = None,
+) -> list[tuple[dict[str, Any], JittedObjective]]:
+    """Draw a fixed pool of batches and compile one `JittedObjective` for each.
+
+    `mGST.jitted_objective.make_vectorized_cost` bakes the circuits and probabilities into the jit
+    closure, so a new batch means recompiling the cost and the (gradient, HVP) pair of all three
+    operators. Drawing the batches once and cycling through the pool bounds that cost to
+    `num_batches` compilations instead of one per outer iteration of every random initialization.
+
+    Args:
+        probability_matrices: Full exact and sampled probability matrices.
+        indices_dict: Full gate indices, as returned by `generate_sequence_indices`.
+        batch_size: Absolute number of circuits per batch, or a fraction of the total.
+        num_batches: Number of batches in the pool.
+        cost_fn_kwargs: Keyword arguments of the cost function over the full data. `indices_list` and
+            `prob_matrix` are replaced by the batched ones; everything else is kept.
+        which_probabilities: Which probability matrix the batches are taken from, "sampled" or "exact".
+        seed: Seed or generator for the batch draws. A generator is advanced across the draws.
+        jit_contraction: Contraction strategy of the jitted cost function, "prefix" or "padded".
+        validate_at: Operators at which each objective is checked against `cost_function_jax_mps`.
+            If None, the objectives are not validated.
+
+    Returns:
+        A list of `num_batches` (cost function keyword arguments, jitted objective) pairs.
+    """
+    if which_probabilities not in probability_matrices:
+        raise ValueError(f"which_probabilities must be one of {sorted(probability_matrices)}, got {which_probabilities}.")
+
+    rng = np.random.default_rng(seed)
+    pool = []
+    for _ in range(num_batches):
+        batched_probability_matrices, batched_indices_dict = batch_probability_matrices_and_indices(
+            probability_matrices=probability_matrices,
+            indices_dict=indices_dict,
+            batch_size=batch_size,
+            seed=rng,
+        )
+        batch_cost_fn_kwargs = cost_fn_kwargs | {
+            "indices_list": batched_indices_dict["gate_indices"],
+            "prob_matrix": batched_probability_matrices[which_probabilities],
+        }
+        objective = JittedObjective.from_cost_fn_kwargs(batch_cost_fn_kwargs, contraction=jit_contraction)
+        if validate_at is not None:
+            objective.validate(cost_function_jax_mps, batch_cost_fn_kwargs, **_as_objective_operators(validate_at))
+        pool.append((batch_cost_fn_kwargs, objective))
+
+    return pool
+
+def _as_objective_operators(operators: dict[str, jnp.ndarray]) -> dict[str, jnp.ndarray]:
+    """Rename a gate set dictionary to the argument names used by `JittedObjective`."""
+    return {"kraus_tensor": operators["kraus"], "povm_psd": operators["povm"], "state_psd": operators["state"]}
+
+def run_optimization_workflow_batched(
+    init_operators: dict[str, jnp.ndarray],
+    batch_pool: list[tuple[dict[str, Any], JittedObjective]],
+    cost_fn_kwargs: dict[str, Any],
+    num_iterations: int,
+    optimization_schedule: dict[str, OperatorSchedule],
+    jitted_objective_full: JittedObjective | None = None,
+    init_offset: int = 0,
+    noise_threshold: float | None = None,
+    relative_precision: float | None = None,
+    absolute_tolerance: float | None = None,
+    cost_floor: float | None = None,
+    verbose: bool = False,
+) -> OptimizationResult:
+    """Optimize with a different batch of circuits at every outer iteration.
+
+    This reproduces the batch phase of `mGST.algorithm.run_mGST`: each outer iteration updates
+    povm -> kraus -> state on a fresh batch, and the stopping criteria are then evaluated on the
+    **full** data set, not on the batch. `run_riemannian_optimization` is therefore called one outer
+    iteration at a time with all of its own criteria disabled, since those would compare batch values.
+    The trust region radius is not carried over: the objective changes between iterations.
+
+    Args:
+        init_operators: Initial operators (kraus, povm, state).
+        batch_pool: Pool of (cost function keyword arguments, jitted objective) pairs, see `build_batch_pool`.
+            Iteration `idx` uses `batch_pool[(init_offset + idx) % len(batch_pool)]`.
+        cost_fn_kwargs: Keyword arguments of the cost function over the full data set.
+        num_iterations: Maximum number of outer iterations.
+        optimization_schedule: Per-operator schedules, sliced one iteration at a time.
+        jitted_objective_full: Jitted objective over the full data, used for the convergence checks.
+            Built here if None; pass it in to share one compilation across several calls.
+        init_offset: Offset into the pool, so that different initializations see the batches in a different order.
+        noise_threshold: See `estimate_noise_floor_threshold`. Disabled if None.
+        relative_precision: See `convergence_criteria_from_relative_precision`. Disabled if None.
+        absolute_tolerance: See `convergence_criteria_from_absolute_tolerance`. Disabled if None.
+        cost_floor: Lower bound of the cost function. Computed from the full data if None.
+        verbose: Whether to print the full-data cost after every outer iteration.
+
+    Returns:
+        A dictionary with the optimized operators, the cost function history and the convergence reason.
+        `cost_fn_history["main"]` holds one full-data value per outer iteration (plus the initial one),
+        and `cost_fn_history["batch"]` the per-operator values on the batches.
+    """
+    if not batch_pool:
+        raise ValueError("batch_pool must contain at least one batch.")
+
+    if jitted_objective_full is None:
+        jitted_objective_full = JittedObjective.from_cost_fn_kwargs(cost_fn_kwargs)
+
+    if cost_floor is None:
+        cost_floor = compute_cost_floor(
+            prob_matrix=cost_fn_kwargs["prob_matrix"],
+            use_log_likelihood=cost_fn_kwargs.get("use_log_likelihood", False),
+            num_shots=cost_fn_kwargs.get("num_shots"),
+        )
+
+    cost_on_full_data = lambda ops: float(jitted_objective_full.cost(ops["kraus"], ops["povm"], ops["state"]))
+
+    operators = dict(init_operators)
+    cost_fn_history = [cost_on_full_data(operators)]
+    cost_fn_batch = []
+    cost_decrease_previous = None
+    convergence_reason = "Max iterations reached ⏳."
+
+    start_time = time.time()
+    for idx in range(num_iterations):
+        batch_cost_fn_kwargs, batch_objective = batch_pool[(init_offset + idx) % len(batch_pool)]
+        schedule_iteration = {
+            operator: OperatorSchedule.default(1, optimization_schedule[operator].get_options_for_iteration(idx))
+            for operator in OPERATOR_NAMES
+        }
+
+        operators, cost_dict_iteration, _ = run_riemannian_optimization(
+            operators["kraus"],
+            operators["povm"],
+            operators["state"],
+            cost_function=cost_function_jax_mps,
+            cost_fn_kwargs=batch_cost_fn_kwargs,
+            num_iterations=1, # we do one full iteration over all 3 operators for a given batch
+            optimization_schedule=schedule_iteration,
+            jitted_objective=batch_objective,
+            carry_over_radius=False,
+            noise_threshold=None,
+            relative_precision=None,
+            absolute_tolerance=None,
+            global_gradient_norm_tol=0.0,
+            compute_least_squares=False,
+            verbose=False,
+        )
+        # The first entry is the cost at the point already recorded by the previous iteration.
+        cost_fn_batch.extend(cost_dict_iteration["main"][1:])
+
+        cost_fn_previous = cost_fn_history[-1]
+        cost_fn_current = cost_on_full_data(operators)
+        cost_fn_history.append(cost_fn_current)
+
+        if verbose:
+            print(f"🏁 Iteration {idx + 1}/{num_iterations}. f(x) on full data: {cost_fn_current:.6e}.")
+
+        if noise_threshold is not None:
+            converged, convergence_reason = convergence_criteria_from_noise_threshold(
+                cost_fn_current, noise_threshold, operator="full data")
+            if converged:
+                break
+
+        # NOTE: For the least squares, I might just want to check for the noise threshold
+        # TODO: erase these two actually.
+        if relative_precision is not None:
+            converged, convergence_reason, _ = convergence_criteria_from_relative_precision(
+                cost_fn_previous=cost_fn_previous, cost_fn_current=cost_fn_current,
+                relative_precision=relative_precision, cost_floor=cost_floor)
+            if converged:
+                break
+
+        if absolute_tolerance is not None:
+            cost_decrease = cost_fn_previous - cost_fn_current
+            converged, convergence_reason, _ = convergence_criteria_from_absolute_tolerance(
+                cost_decrease=cost_decrease, cost_decrease_previous=cost_decrease_previous,
+                absolute_tolerance=absolute_tolerance)
+            if converged:
+                break
+            cost_decrease_previous = cost_decrease
+
+    return {
+        "optimized_operators": operators,
+        "init_operators": init_operators,
+        "cost_fn_history": {"main": cost_fn_history, "batch": cost_fn_batch},
+        "convergence_reason": convergence_reason,
+        "times": {"optimization_time": time.time() - start_time},
+    }
 
 def _process_batch_size(batch_size: int | float | Sequence[float|int] | None, num_sequences_list: list[int], dim:int) -> int | float | Sequence[float|int]:
     """
@@ -986,6 +1228,7 @@ def run_optimization_workflow_multi_init_realizations(
                 num_max_random_inits=num_max_random_inits,
                 batch_size=batch_size_idx,
                 threshold_multiplier=threshold_multiplier,
+                seed=prob_seed,
             )
 
             final_results_realization[str(num_seq)] = final_result

@@ -851,6 +851,7 @@ def run_riemannian_optimization(
     absolute_tolerance: float|None = None,
     use_jit: bool = True, # new default
     jit_contraction: str = "prefix",
+    jitted_objective: JittedObjective|None = None,
     )-> tuple[dict[str, jnp.ndarray], list[float], str]:
     """
     Run the Riemannian optimization for each operator (Kraus, POVM, State) in an alternating fashion.
@@ -886,6 +887,9 @@ def run_riemannian_optimization(
             for the operators optimized with TrustRegionOptions. The `linearize` option is then ignored.
             Only reproduces `cost_function_jax_mps`: this is checked against `cost_function` at the initial point.
         jit_contraction: Contraction strategy of the jitted cost function, "prefix" or "padded". Only used if use_jit=True.
+        jitted_objective: An already built `JittedObjective` to use instead of building one from `cost_fn_kwargs`.
+            `use_jit` and `jit_contraction` are then ignored, and the caller is responsible for having validated it
+            against `cost_function` (see `JittedObjective.validate`). Useful to reuse one compilation across several calls.
 
     Returns:
         A tuple containing:
@@ -958,16 +962,15 @@ def run_riemannian_optimization(
             )
     
     # Built once per run: compilation happens on the first call of each operator and is reused afterwards.
-    jitted_objective = None
-    if use_jit:
+    if jitted_objective is None and use_jit:
         jitted_objective = JittedObjective.from_cost_fn_kwargs(cost_fn_kwargs, contraction=jit_contraction)
         jitted_objective.validate(cost_function, cost_fn_kwargs, kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init)
 
-    print("🔰 Starting Riemannian Optimization 🔰")
     if verbose:
+        print("🔰 Starting Riemannian Optimization 🔰")
         print(f" * optimization schedule: \n{optimization_schedule_print} \n{convergence_criteria}")
         print(f" * cost floor: {cost_floor:.6e}")
-        print(f" * jitted objective: {f'yes ({jit_contraction} contraction)' if use_jit else 'no'}")
+        print(f" * jitted objective: {f'yes ({jit_contraction} contraction)' if jitted_objective is not None else 'no'}")
         
     # Cost at the start of the current outer iteration.
     cost_fn_previous_iteration = cost_function(kraus_tensor=kraus_tensor_init, povm_psd=povm_psd_init, state_psd=state_psd_init, **cost_fn_kwargs)
@@ -1080,8 +1083,9 @@ def run_riemannian_optimization(
         
     
     final_message = f"‼️ Full optimization finished at iteration {idx + 1}/{num_iterations} ‼️ \n Reason: {convergence_reason}. \n Trust region radii carried over: {carried_radius}."
-    print(final_message) 
-    
+    if verbose:
+        print(final_message)
+
     optimized_operators = {
         "kraus": kraus_tensor_k,
         "povm": povm_psd_k,
