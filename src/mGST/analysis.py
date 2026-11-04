@@ -5,13 +5,15 @@ import numpy as np
 
 from qiskit.quantum_info import SuperOp
 from qiskit.quantum_info.operators.measures import diamond_norm
-from mGST.additional_fns import MVE
+from mGST.additional_fns import MVE, sampled_measurements
 from mGST.reporting.reporting import MVE_data
 from mGST.typing import Tensor, OptimizationResult
+from mGST.utility_functions_comparisons import get_mgst_tensors_from_psd_representation
+from mGST.low_level_jit import contract
+
 from typing import Any
 from typing import Literal, Callable
 
-from mGST.utility_functions_comparisons import get_mgst_tensors_from_psd_representation
 
 import pickle
 import json
@@ -460,3 +462,83 @@ def save_variational_errors(error_results:list[dict[str, dict[str, float]]], fil
     with open(filename, "w") as f:
         json.dump(to_json_serializable(error_results), f, indent=2)
     print(f"Variational errors saved to {filename}")
+    
+def exact_probabilities_for_sequences(superops: dict[str, jnp.ndarray], sequences: np.ndarray) -> np.ndarray:
+    """Infinite-shot outcome probabilities, shape (num_povm, num_sequences)."""
+    kraus = np.array(superops["kraus"])
+    povm = np.array(superops["povm"])
+    state = np.array(superops["state"])
+
+    probabilities = np.empty((len(povm), len(sequences)))
+    for seq_idx, sequence in enumerate(sequences):
+        contracted = contract(kraus, sequence)
+        for povm_idx in range(len(povm)):
+            probabilities[povm_idx, seq_idx] = np.real(povm[povm_idx].conj() @ contracted @ state)
+    return probabilities
+
+
+def shot_noise_variational_error(
+    true_superops: dict[str, jnp.ndarray],
+    num_shots: int,
+    length: int = 14,
+    num_circuits_sampled: int | str = 1000,
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """Variational error induced purely by shot noise, i.e. the total variation distance between the
+    infinite-shot probabilities of ``true_superops`` and finite-shot estimates thereof.
+
+    Args:
+        true_superops: Dictionary with keys "kraus", "povm", "state" (mGST superoperator representation).
+        num_shots: Number of shots per sequence used to build the finite-shot estimates.
+        length: Length of the random test sequences.
+        num_circuits_sampled: Number of random sequences, or "all" to use all d**length sequences.
+        seed: Seed for both the sequence draw and the multinomial sampling.
+
+    Returns:
+        A tuple with the mean (MVE) and worst-case (WVE) total variation distance over the sequences.
+    """
+    num_gates = len(true_superops["kraus"])
+    if num_circuits_sampled == "all" or np.log(num_circuits_sampled) / np.log(num_gates) > length:
+        num_sequences = num_gates**length
+    else:
+        num_sequences = int(num_circuits_sampled)
+
+    rng = np.random.default_rng(seed)
+    sequences = rng.integers(0, num_gates, size=(num_sequences, length))
+
+    probabilities_exact = exact_probabilities_for_sequences(true_superops, sequences)
+    # sampled_measurements seeds its own generator, so feed it a seed drawn from rng to keep runs independent.
+    probabilities_sampled = sampled_measurements(
+        probabilities_exact, num_shots, seed=int(rng.integers(0, 2**31 - 1))
+    )
+
+    distances = 0.5 * np.sum(np.abs(probabilities_exact - probabilities_sampled), axis=0)
+    return float(np.mean(distances)), float(np.max(distances))
+
+
+def compute_average_and_std_shot_noise_variational_error(
+    true_superops: dict[str, jnp.ndarray],
+    num_shots: int,
+    length: int = 14,
+    num_circuits_sampled: int | str = 1000,
+    num_repetitions: int = 10,
+    error_type: str = "MVE",
+    seed: int | None = None,
+) -> tuple[float, float]:
+    """Average and standard deviation of the shot-noise-only variational error over several runs."""
+    if error_type not in ["MVE", "WVE"]:
+        raise ValueError("error_type must be either 'MVE' or 'WVE'.")
+
+    seed_rng = np.random.default_rng(seed)
+    ve_values = []
+    for _ in range(num_repetitions):
+        mve, wve = shot_noise_variational_error(
+            true_superops=true_superops,
+            num_shots=num_shots,
+            length=length,
+            num_circuits_sampled=num_circuits_sampled,
+            seed=int(seed_rng.integers(0, 2**31 - 1)),
+        )
+        ve_values.append(mve if error_type == "MVE" else wve)
+
+    return jnp.mean(jnp.array(ve_values)), jnp.std(jnp.array(ve_values))

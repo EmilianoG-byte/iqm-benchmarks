@@ -28,7 +28,7 @@ from collections.abc import Sequence
 
 import warnings
 
-def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list[int]) -> dict[str, list[list[int]]]:
+def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list[int], seed:int|None=None) -> dict[str, list[list[int]]]:
     """Generate a sequence of gate indices
 
     This code is adpated from `compressive_gst.generate_meas_circuits`
@@ -37,6 +37,7 @@ def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list
         num_gates: Number of gates in the circuit.
         num_circuits: Number of circuits to generate.
         seq_len_list: List of three integers representing the minimum, cut, and maximum sequence lengths.
+        seed: The random seed for sequence generation.
 
     Returns:
         A dictionary containing the gate indices and the gate indices with negative values.
@@ -47,7 +48,7 @@ def generate_sequence_indices(num_gates:int, num_circuits:int, seq_len_list:list
     N_long = int(jnp.floor(num_circuits / 2))
     L_MIN, L_CUT, L_MAX = seq_len_list
 
-    gate_indices_with_negs = additional_fns.random_seq_design(num_gates, L_MIN, L_CUT, L_MAX, N_short, N_long)
+    gate_indices_with_negs = additional_fns.random_seq_design(num_gates, L_MIN, L_CUT, L_MAX, N_short, N_long, seed=seed)
     gate_indices = [list(seq[seq >= 0]) for seq in gate_indices_with_negs]
     return {"gate_indices": gate_indices, "gate_indices_with_negs": gate_indices_with_negs}
 
@@ -485,7 +486,7 @@ def generate_random_gate_set_from_gate_set(gate_set:dict[str, jnp.ndarray], seed
     params = get_parameters_from_gate_set(gate_set)
     return generate_random_initial_operators(**params, seeds=seeds)
 
-def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any], num_sequences:int|None=None, seq_len_list:list[int]|None=None, indices_dict:dict[str, list[list[int]]]|None=None, probability_matrices:dict[str, Matrix]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, threshold_multiplier:float=5.0, num_batches:int|None=None, seed:int|None=None, verbose:bool=True)-> tuple[OptimizationResult, OptimizationResult]:
+def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[str, jnp.ndarray], target_superops:dict[str, jnp.ndarray], optimization_options:dict[str, Any], num_sequences:int|None=None, seq_len_list:list[int]|None=None, indices_dict:dict[str, list[list[int]]]|None=None, probability_matrices:dict[str, Matrix]|None=None, num_max_iterations_random_inits:int=5, num_max_random_inits:int=10, batch_size:int=0.1, threshold_multiplier:float=5.0, num_batches:int|None=None, seed:int|None=None, verbose:bool=True, gauge_optimize:bool=False)-> tuple[OptimizationResult, OptimizationResult]:
     """Search for a good starting point with random initializations, then refine it on the full data.
 
     The random-init phase mirrors the batch phase of `mGST.algorithm.run_mGST`: a different batch of
@@ -494,10 +495,24 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
     which bounds the jit compilation cost to `num_batches` instead of one per outer iteration.
 
     Args:
+        num_shots: Number of measurement shots per circuit.
+        operators_psd_true: The true positive semidefinite operators for the system.
+        target_superops: The target superoperators for the system.
+        optimization_options: Options for the optimization algorithm.
+        num_sequences: Number of random sequences to generate. If None, it will be determined from `seq_len_list`.
+        seq_len_list: List of sequence lengths to generate. If None, it will be determined from `num_sequences`.
+        indices_dict: Pre-generated sequence indices. If None, they will be generated.
+        probability_matrices: Pre-computed probability matrices. If None, they will be computed.
+        num_max_iterations_random_inits: Maximum number of iterations for each random initialization.
+        num_max_random_inits: Maximum number of random initializations to try.
+        batch_size: Fraction of sequences to use in each batch.
+        threshold_multiplier: Multiplier for the noise threshold estimation.
         num_batches: Size of the batch pool. Defaults to `num_max_iterations_random_inits`, so that each
             initialization sees a different batch at every outer iteration. Larger values give more batch
             diversity across initializations at the price of proportionally more jit compilation.
         seed: Seed for the batch draws and the random initial operators. If None, they are not reproducible.
+        verbose: Whether to print progress and debug information.
+        gauge_optimize: Whether to perform gauge optimization after the final log-likelihood evaluation.
     """
     # Generate the random sequences already here to fix it for all random inits.
     num_gates = target_superops["kraus"].shape[0]
@@ -567,7 +582,7 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
             # for the least squares, and particularly in the case of random inits, we care more about
             # fitting to the estimated noise floor threshold.
             absolute_tolerance=None,
-            verbose=verbose,
+            verbose=verbose, # would say setting to True makes sense.
         )
         
         if "below noise threshold" in random_init_result["convergence_reason"]:
@@ -607,13 +622,13 @@ def run_optimization_workflow_multi_init(num_shots:int, operators_psd_true:dict[
                 operators_psd_true=operators_psd_true,
                 target_superops=target_superops,
                 use_exact_probabilities=False, # noise threshold only makes sense with sampled probabilities
-                optimization_options=optimization_options,
+                optimization_options=optimization_options, # includes verbosity of optimization itself
                 warmup_run=False,
                 use_log_likelihood=True, # force this for "refinement" optimization
                 indices_dict=indices_dict,
                 probability_matrices=probability_matrices,
-                verbose=False, # we don't want to print every time
-                gauge_optimize=True, # we want to optimize the gauge for the final result
+                verbose=False, # mostly boilerplat verbosity, not for the optimization
+                gauge_optimize=gauge_optimize,
             )
     
     return final_result, best_random_result
@@ -1154,6 +1169,7 @@ def run_optimization_workflow_multi_init_realizations(
     threshold_multiplier: float = 5.0,
     seed: int | None = None,
     debug: bool = False,
+    gauge_optimize: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]] | None]:
     """Run multiple independent realizations of the multi-init optimization workflow across
     a list of sequence counts, generating fresh indices and probability matrices each time.
@@ -1164,6 +1180,7 @@ def run_optimization_workflow_multi_init_realizations(
         target_superops: Dictionary containing the target superoperators (kraus, povm, state).
         optimization_options: Optimization options dictionary. Must include a 'schedule' whose
             OperatorSchedule covers at least num_max_iterations_random_inits iterations.
+        gauge_optimize: Whether to perform gauge optimization after the final log-likelihood evaluation.
         num_sequences_list: List of sequence counts to run per realization.
         num_realizations: Number of independent realizations to run.
         seq_len_list: Sequence length [L_MIN, L_CUT, L_MAX]. Defaults to [1, 8, 14].
@@ -1229,6 +1246,7 @@ def run_optimization_workflow_multi_init_realizations(
                 batch_size=batch_size_idx,
                 threshold_multiplier=threshold_multiplier,
                 seed=prob_seed,
+                gauge_optimize=gauge_optimize,
             )
 
             final_results_realization[str(num_seq)] = final_result

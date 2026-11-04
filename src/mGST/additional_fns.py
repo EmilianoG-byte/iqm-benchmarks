@@ -222,7 +222,7 @@ def randKrausSet(num_gates:int, dim:int, rank_kraus:int, a: float =1, seed:int =
     """
     kraus_tensor_perturbed = np.zeros((num_gates, rank_kraus, dim, dim)).astype(np.complex128)
     for i in range(num_gates):
-        kraus_tensor_perturbed[i, :, :, :] += randU(dim * rank_kraus, a, seed=seed)[:, :dim].reshape(rank_kraus, dim, dim)
+        kraus_tensor_perturbed[i, :, :, :] += randU(dim * rank_kraus, a, seed=seed+i)[:, :dim].reshape(rank_kraus, dim, dim)
     return kraus_tensor_perturbed
 
 
@@ -802,7 +802,7 @@ def tvd(X, E, rho, J, y_data):
 
 
 def random_seq_design(
-    d, l_min, l_cut, l_max, N_short, N_long
+    d, l_min, l_cut, l_max, N_short, N_long, seed=None
 ):  # Draws without replacement but ineficiently (not working for sequence length > 24)
     """Generate a set of random sequences ith given lengths
     This sequence lengths (circuit depths) are chosen for a mix of very short sequences (better convergence) and some
@@ -838,6 +838,8 @@ def random_seq_design(
         raise ValueError("Currently only sequences lenghts < 24 are supported.")
 
     J = np.array([-np.ones(l_max)])
+    if seed is not None:
+        random.seed(seed)
     # Short sequences:
     seq_counts = []
     N_remaining = N_short

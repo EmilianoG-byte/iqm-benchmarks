@@ -1,0 +1,20 @@
+truth: gauge cost after fixing 2.567e-02; |grad(f o Pi) . gauge| / |grad f . gauge| = 1.3e-15 (0 = f o Pi is gauge invariant)
+40 estimates: gauge cost after fixing 2.418e-02 .. 3.220e-02, max final |gradient| 2.1e-08, ranks 599..620
+
+                                               nominal 68.3%  nominal 95%
+gauge-invariant: 800 test probabilities
+  full F, oracle (at the truth)                  97.9%   100.0%   median 95% half-width 2.22e-02   median rmse/width-std 0.39
+  full F, plug-in (at each estimate)             97.6%   100.0%   median 95% half-width 2.16e-02   median rmse/width-std 0.39
+  first 135 directions, oracle                   63.9%    91.6%   median 95% half-width 9.93e-03   median rmse/width-std 1.03
+gauge-dependent: Pauli transfer matrix elements (1440 non-constant)
+  perpendicular projection, plug-in              99.6%   100.0%   median 95% half-width 4.47e-02   median rmse/width-std 0.03
+  consistent with the gauge fixing, plug-in      98.9%   100.0%   median 95% half-width 1.17e-02   median rmse/width-std 0.24
+  consistent with the gauge fixing, oracle       99.1%   100.0%   median 95% half-width 1.19e-02   median rmse/width-std 0.24
+gauge-dependent: entanglement infidelities (6 gates)
+  perpendicular projection, plug-in             100.0%   100.0%   median 95% half-width 4.89e-03   median rmse/width-std 0.05
+  consistent with the gauge fixing, plug-in     100.0%   100.0%   median 95% half-width 3.00e-03   median rmse/width-std 0.18
+  consistent with the gauge fixing, oracle      100.0%   100.0%   median 95% half-width 2.86e-03   median rmse/width-std 0.20
+
+true infidelities: [0.00087 0.00072 0.00056 0.00071 0.00079 0.00077]
+mean estimated infidelities: [0.00122 0.00085 0.00062 0.00084 0.00087 0.00103]
+95% half-widths (consistent, oracle): [0.00255 0.00252 0.00306 0.00266 0.00341 0.00319]

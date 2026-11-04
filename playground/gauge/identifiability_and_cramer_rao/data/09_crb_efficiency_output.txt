@@ -1,0 +1,54 @@
+40 MLE estimates (default), N=400, m=1000. Var(e_k): 1 = attains the CRB, <1 = moves less than any unbiased estimator must
+   k range    CRB std 1/sqrt(λ_k)  median Var(e_k)
+   1-50      8.2e-04 .. 2.6e-03             0.89
+  51-100     2.7e-03 .. 5.3e-03             0.85
+ 101-135     5.5e-03 .. 1.0e-02             0.43
+ 136-200     1.0e-02 .. 1.7e-02             0.30
+ 201-300     1.7e-02 .. 3.4e-02             0.16
+ 301-400     3.4e-02 .. 7.8e-02             0.06
+ 401-500     7.9e-02 .. 2.2e-01             0.01
+ 501-624     2.2e-01 .. 3.1e+02             0.00
+(sampling uncertainty of a single Var(e_k) with 40 estimates: ±0.22)
+
+test probabilities (200 length-10 circuits): actual MVE 6.26e-03
+  CRB using directions 1..100: median rmse/CRB std 1.06, predicted MVE 6.11e-03
+  CRB using directions 1..135: median rmse/CRB std 1.03, predicted MVE 6.29e-03
+  CRB using directions 1..200: median rmse/CRB std 0.94, predicted MVE 6.55e-03
+  CRB using directions 1..300: median rmse/CRB std 0.85, predicted MVE 7.00e-03
+  CRB using directions 1..400: median rmse/CRB std 0.79, predicted MVE 7.83e-03
+  CRB using directions 1..624: median rmse/CRB std 0.39, predicted MVE 1.74e-02
+  Van Trees, prior std τ=1.0  : median rmse/bound 0.42, predicted MVE 1.62e-02
+  Van Trees, prior std τ=0.1  : median rmse/bound 0.70, predicted MVE 9.23e-03
+  Van Trees, prior std τ=0.05 : median rmse/bound 0.79, predicted MVE 7.91e-03
+  Van Trees, prior std τ=0.01 : median rmse/bound 0.97, predicted MVE 6.29e-03
+
+init point (perturbed target): normalized Choi eigenvalues of gate 0: [9.972e-01 1.500e-03 9.000e-04 4.000e-04]
+smallest Choi eigenvalue per gate over the estimates: median 1.2e-09, fraction below 1e-6: 0.81
+exactly unitary gates + true SPAM: rank 137
+=== converged
+20 MLE estimates (converged), N=400, m=1000. Var(e_k): 1 = attains the CRB, <1 = moves less than any unbiased estimator must
+   k range    CRB std 1/sqrt(λ_k)  median Var(e_k)
+   1-50      8.2e-04 .. 2.6e-03             0.87
+  51-100     2.7e-03 .. 5.3e-03             0.83
+ 101-135     5.5e-03 .. 1.0e-02             0.51
+ 136-200     1.0e-02 .. 1.7e-02             0.26
+ 201-300     1.7e-02 .. 3.4e-02             0.15
+ 301-400     3.4e-02 .. 7.8e-02             0.07
+ 401-500     7.9e-02 .. 2.2e-01             0.01
+ 501-624     2.2e-01 .. 3.1e+02             0.00
+(sampling uncertainty of a single Var(e_k) with 20 estimates: ±0.32)
+
+test probabilities (200 length-10 circuits): actual MVE 6.23e-03
+  CRB using directions 1..100: median rmse/CRB std 1.07, predicted MVE 6.11e-03
+  CRB using directions 1..135: median rmse/CRB std 1.03, predicted MVE 6.29e-03
+  CRB using directions 1..200: median rmse/CRB std 0.92, predicted MVE 6.55e-03
+  CRB using directions 1..300: median rmse/CRB std 0.82, predicted MVE 7.00e-03
+  CRB using directions 1..400: median rmse/CRB std 0.75, predicted MVE 7.83e-03
+  CRB using directions 1..624: median rmse/CRB std 0.38, predicted MVE 1.74e-02
+  Van Trees, prior std τ=1.0  : median rmse/bound 0.40, predicted MVE 1.62e-02
+  Van Trees, prior std τ=0.1  : median rmse/bound 0.66, predicted MVE 9.23e-03
+  Van Trees, prior std τ=0.05 : median rmse/bound 0.74, predicted MVE 7.91e-03
+  Van Trees, prior std τ=0.01 : median rmse/bound 0.95, predicted MVE 6.29e-03
+
+init point (perturbed target): normalized Choi eigenvalues of gate 0: [9.972e-01 1.500e-03 9.000e-04 4.000e-04]
+smallest Choi eigenvalue per gate over the estimates: median 1.3e-14, fraction below 1e-6: 0.81
