@@ -90,7 +90,9 @@ Learnings from a working session (2026-10-29 to 2026-11-03) on the study *mean v
     - pyGSTi's Hessian-based error bars rest on local asymptotic normality (LAN), not on unbiasedness. pyGSTi does not check that LAN holds, and the authors call the method "insufficiently developed" but useful.
     - On our 40 estimates the intervals contained the truth at least as often as nominal (95% nominal → 100%), but they are 2.5–5× wider than the actual errors.
     - For gauge-dependent quantities, use the gradient of the gauge-fixed quantity. pyGSTi's default perpendicular projection made matrix-element intervals about 4× wider still.
-    - [Numerical: 13; Source: Nielsen et al. 2021; Ostrove et al. 2023; pyGSTi source]
+    - A parametric bootstrap (30 refits from one dataset) reproduces the estimator's actual spread to within a few percent. Its 95% intervals cover about 92% for probabilities and matrix elements, and 81–88% for infidelities, because of bias.
+    - Nielsen et al.'s "$O(\log k)$ replicates for $k$ quantities" holds, but with a sizeable constant: about 32 replicates for one standard error to $\pm25\%$, about 138 for all 1440 matrix elements at once.
+    - [Numerical: 13, 14; Source: Nielsen et al. 2021; Ostrove et al. 2023; pyGSTi source]
 
 ---
 
@@ -116,8 +118,8 @@ Learnings from a working session (2026-10-29 to 2026-11-03) on the study *mean v
    - report $\mathbf d_\varphi^\top F^+ \mathbf d_\varphi$ at the estimate (plug-in);
    - report the share of it that comes from directions beyond $n_{\rm eff}(\varepsilon)$. If that share is large, the number is not meaningful.
 9. For a bound valid for **every** estimator, use the van Trees (Bayesian) bound with a physically chosen prior width $\tau$. Note that it bounds the error averaged over the prior, not the error at one fixed truth.
-10. For the actual spread of your estimator, use a parametric bootstrap: resample data from $\hat\theta$ and refit. A refit takes about 22 s at $N=400$.
-11. For confidence intervals in the style of pyGSTi, including gauge-dependent quantities such as matrix elements and fidelities, follow [Section 6.4](#64-what-we-recommend): conservative intervals, the gradient of the gauge-fixed quantity, physical clipping, and a coverage check by simulation.
+10. For the actual spread of your estimator, use a parametric bootstrap: resample data from $\hat\theta$ and refit with the same procedure and the same gauge fixing ([Section 6.4](#64-parametric-bootstrap), script 14). A refit takes about 17 s at $N=400$.
+11. For confidence intervals in the style of pyGSTi, including gauge-dependent quantities such as matrix elements and fidelities, follow [Section 6.5](#65-what-we-recommend): conservative intervals, the gradient of the gauge-fixed quantity, physical clipping, and a coverage check by simulation.
 
 **Experiment design**
 
@@ -146,7 +148,8 @@ Open:
   
   The scripts currently use the private functions `_tangent_space_jacobian` and `_circuit_probabilities`.
 - [ ] Repeat the efficiency test ([Section 5.5](#55-does-the-maximum-likelihood-estimate-attain-the-bound)) and the restricted-bound prediction ([Section 5.6](#56-test-probabilities-full-restricted-and-bayesian-bounds)) at other noise strengths (for example the "noisier" notebook), other shot counts and 3 qubits.
-- [ ] Bootstrap error bars for a real or simulated dataset; compare with the plug-in bound and the van Trees bound. Measure the bootstrap's coverage the way script 13 does ([Section 6.4](#64-what-we-recommend), item 4).
+- [x] Parametric bootstrap for 3 simulated datasets, compared with the actual spread and the Fisher widths ([Section 6.4](#64-parametric-bootstrap), script 14).
+- [ ] Direct bootstrap coverage. Bootstrap all 40 datasets (≈6 hours with 30 replicates each) instead of using the proxy, and compare with the van Trees bound. Try widening the interval by a multiplier calibrated by simulation.
 - [ ] Rerun script 13 (after script 07) at stronger noise (`noise_strength` 0.2–0.3), where gates are away from the positivity boundary and the intervals should be tighter relative to the actual error.
 - [ ] Fisher spectrum versus design, in the style of Ostrove et al. 2023, Fig. 6.
   - Distribution of $\lambda_k/m$ (box or violin plots) and $n_{\rm eff}(\varepsilon)$ versus maximum depth (e.g. 1, 4, 8, 14, 32, 64) and $N$, over several random designs, evaluated at the truth or a prior guess.
@@ -1044,7 +1047,12 @@ That assumption *contains* asymptotic unbiasedness and efficiency. It is exactly
 - *Coverage* is the fraction of intervals that contain the true value.
 - *Oracle* means $\sigma$ evaluated at the truth. *Plug-in* means evaluated at each estimate, which is what one does with real data.
 
-**Gauge fixing.** Gauge-dependent quantities are computed after a gauge fixing $\Pi$: the Hilbert-space unitary $U$ that brings the gates' Pauli transfer matrices closest to the target's (Frobenius norm, gates only). For superoperators, effects and states, $U$ is the only gauge freedom of our model, because Kraus mixing and the purifications leave them unchanged. Two gradients are compared:
+**Gauge fixing.** Gauge-dependent quantities are computed after a gauge fixing $\Pi$: the Hilbert-space unitary $U$ that brings the gates' Pauli transfer matrices closest to the target's (Frobenius norm, gates only). For superoperators, effects and states, $U$ is the only gauge freedom of our model, because Kraus mixing and the purifications leave them unchanged.
+
+$\Pi$ is equivalent to mGST's `perform_gauge`:
+- `perform_gauge` calls pyGSTi's `gaugeopt_to_target` with the same unitary gauge group and the same Frobenius distance for the gates. It adds a SPAM term with weight 0.1 and uses a different optimizer.
+- On the truth and on estimates, the two gauge-fixed superoperators differ by at most $2.5\times10^{-5}$, about 400× less than the estimation errors ($\sim10^{-2}$). Infidelities agree to $\sim10^{-7}$. [Numerical: 14]
+- If reported numbers come from `perform_gauge`, the only change for exact consistency would be adding the SPAM term (weight 0.1) to the gauge cost in scripts 13 and 14. Two gradients are compared:
 - **perpendicular:** $\mathbf d_f = T^\top\nabla f$, with its gauge part dropped by $F^+$. This is pyGSTi's `'std'` projection in the Euclidean metric.
 - **consistent:** $\mathbf d_f = T^\top\nabla(f\circ\Pi)$, with $\Pi$ differentiated by the implicit function theorem. This is the gradient of the number that is actually reported, $f$ of the gauge-fixed estimate. Check: it has no component along the gauge directions ($10^{-15}$ relative).
 
@@ -1075,7 +1083,62 @@ That assumption *contains* asymptotic unbiasedness and efficiency. It is exactly
   - Intervals for different quantities and estimates are correlated, so they are not independent trials.
   - For a single quantity, 40 out of 40 covered only implies coverage $\gtrsim93\%$ (one-sided 95% lower limit, $0.05^{1/40}$).
 
-### 6.4 What we recommend
+### 6.4 Parametric bootstrap
+
+[Source: Nielsen et al. 2021, Secs. 6.3.2 and 6.3.5 (checked). Numerical: 14; output in `data/14_parametric_bootstrap_output.txt`]
+
+**Procedure** (script 14):
+1. Fit the real data to get $\hat\theta$. Here we use estimates 0, 1 and 2 of script 07.
+2. Draw $B$ new datasets from $\hat\theta$ with the same design and the same number of shots (`compute_probability_matrices` with $\hat\theta$).
+3. Refit each dataset with exactly the procedure used on the real data. That means the same initial point and the same optimizer settings: `run_optimization_workflow(..., use_log_likelihood=True, gauge_optimize=False)`, with $\hat\theta$ passed as `operators_psd_true`. The bootstrap distribution then includes the estimator's own behaviour, bias included.
+4. Gauge-fix every replicate with the same $\Pi$ as the reported estimate. Nielsen et al. (Sec. 6.3.5): "Each gate set that is sampled via the bootstrap is 'gauge optimized' using a fixed procedure".
+5. For each quantity $f$, compute the bootstrap standard error $s_f$ (standard deviation over replicates) and the bias estimate (mean over replicates $-\,f(\hat\theta)$). Then form three intervals [Source: Efron & Tibshirani 1993; Davison & Hinkley 1997]:
+   - *standard*: $f(\hat\theta)\pm1.96\,s_f$;
+   - *percentile*: $[q_{2.5\%}, q_{97.5\%}]$ of the replicates;
+   - *basic*: $[2f(\hat\theta) - q_{97.5\%},\ 2f(\hat\theta) - q_{2.5\%}]$, which corrects for the bias seen in the bootstrap world.
+
+```bash
+python scripts/14_parametric_bootstrap.py fit 0 30        # 30 replicates from estimate 0; about 17 s each; resumable
+python scripts/14_parametric_bootstrap.py analyse 0 1 2
+```
+
+**How many replicates? The $O(\log k)$ claim.** Nielsen et al. (Sec. 6.3.2) state: "Estimating the uncertainty in a single parameter this way requires only O(1) samples, and k distinct parameters (e.g., all the matrix elements of the transfer matrices in the gate set) can be reliably bootstrapped with only O(log k) samples." They give no derivation. Here is one [Derived here]:
+- **One quantity.** For $B$ replicates of an approximately Gaussian quantity with true standard deviation $\sigma$, $(B-1)s^2/\sigma^2\sim\chi^2_{B-1}$ [Source: Casella & Berger 2002, Thm. 5.3.1]. Since $\mathrm{Var}(\chi^2_{B-1}) = 2(B-1)$, the delta method gives $s/\sigma\approx\mathcal N\big(1, 1/(2(B-1))\big)$. The relative precision is $\pm1/\sqrt{2(B-1)}$ whatever the number of other quantities; $B = 30$ gives $\pm13\%$.
+- **All $k$ quantities at once.** For all $k$ standard errors to be within $\pm\varepsilon$ with probability $1-\delta$, a union (Bonferroni) bound gives $B - 1\ge z^2_{1-\delta/(2k)}/(2\varepsilon^2)$. The Gaussian quantile satisfies $z^2_{1-\delta/(2k)}\approx2\ln(2k/\delta)$ for large $k$, so $B$ grows like $\ln k$.
+- **Numbers** ($\varepsilon = 25\%$, $\delta = 5\%$): one quantity needs $B\approx32$; all 1440 matrix elements need $B\approx138$. So "$O(\log k)$" is right, but the constant is not small: about 4× more refits than for one quantity.
+- **This is only the Monte Carlo precision of $s_f$.** Systematic errors of the bootstrap (bias of the estimator, the boundary) do not shrink as $B$ grows.
+
+**Results** (estimates 0, 1, 2 with $B = 30$ each; ranges over the three):
+
+| Quantity | $s_{\rm boot}$ / actual spread | $s_{\rm boot}$ / Fisher width | coverage of $f\pm1.96\,s_{\rm boot}$ (nominal 95%) | truth inside the interval for this dataset: standard / percentile / basic |
+|---|---|---|---|---|
+| test probabilities (800) | 0.96–0.99 | 0.37–0.39 | 92.3–93.0% | 91–96% / 91–94% / 79–85% |
+| Pauli transfer matrix elements (1440) | 1.00–1.02 | 0.22–0.25 | 91.9–92.7% | 93–95% / 92–94% / 76–82% |
+| infidelities (6) | 0.91–1.02 | 0.14–0.15 | 80.8–87.9% | 83–100% / 67–100% / 83–100% |
+
+- "Actual spread" is the standard deviation of the gauge-fixed quantity over the 40 independent datasets of script 07.
+- "Fisher width" is $\sqrt{\mathbf d_f^\top F^+\mathbf d_f}$, with the consistent gauge gradient, at the same estimate.
+- The coverage column is a proxy: the width from one dataset is applied to the errors of all 40 estimates. This assumes $s_{\rm boot}$ varies little between datasets, and the three datasets agree.
+
+**Reading.**
+- **The bootstrap gets the spread right from a single dataset.**
+  - $s_{\rm boot}$ matches the actual spread within a few percent, inside its $\pm13\%$ Monte Carlo precision.
+  - The full Fisher width is 2.5–7× larger. The bootstrap reruns the estimator, so it "knows" that the estimate does not move along weakly determined directions (Section 5.5). The Fisher information cannot know this.
+- **Its intervals under-cover slightly:** about 92–93% at nominal 95% for probabilities and matrix elements, and 81–88% for infidelities.
+  - The reason is bias. The error relative to the truth contains a bias (median $\lvert\text{bias}\rvert/s\approx0.2$–$0.5$), and $f\pm1.96\,s$ ignores it.
+  - For a Gaussian error with bias $b$, an interval of $\pm1.96\sigma$ covers 94% at $b = 0.3\sigma$ and 92% at $b = 0.5\sigma$.
+  - Infidelities are biased upward (Section 6.3), hence their lower coverage.
+- **Correcting for the bias makes it worse.** The basic interval, which uses the bias seen in the bootstrap world, covers only 76–85%. The likely reason is that the bootstrap world's truth is $\hat\theta$, whose small Kraus components have collapsed to the boundary (Section 5.4). Its bias pattern therefore differs from that of the real truth.
+- **Percentile intervals** are no better than standard ones, and they need about 1000 replicates for stable 2.5% tails [Source: Efron & Tibshirani 1993].
+- **Cost:** 16–19 s per refit, so 30 replicates take about 9 minutes per dataset.
+
+**Bootstrap versus Fisher in this regime.**
+- *Fisher intervals* (Section 6.3) are conservative (100% coverage) but 2.5–7× too wide.
+- *Bootstrap intervals* have the right width but are slightly anti-conservative (about 92% for nominal 95%).
+
+If a guaranteed 95% is needed, calibrate the multiplier of $s_{\rm boot}$ by simulation (scripts 13 and 14), or quote the Fisher interval as an outer bound next to the bootstrap one.
+
+### 6.5 What we recommend
 
 1. **Gauge-invariant quantities** (predicted probabilities of circuits of interest, gate eigenvalues): report $f(\hat\theta)\pm1.96\sqrt{\mathbf d_f^\top F^+\mathbf d_f}$ at the estimate, as in pyGSTi.
    - Call it a *conservative confidence interval under the LAN assumption*, not a Cramér–Rao lower bound.
@@ -1087,9 +1150,10 @@ That assumption *contains* asymptotic unbiasedness and efficiency. It is exactly
 
    Prefer a few named quantities (one infidelity per gate, specific circuit probabilities) over all 1440 matrix elements. pyGSTi makes the same point (Sec. 6.3.1, item 3: users care about "some particular scalar function", not the whole parameter vector).
 3. **Check coverage by simulation** for every new design and noise regime before relying on the intervals: simulate from a gate set like the estimate, refit, and run script 13. Here the intervals turned out conservative. In other regimes they could under-cover (Nielsen et al.'s "occasionally").
-4. **For tight intervals**, use a parametric bootstrap with the same gauge fixing for every bootstrap estimate (Nielsen et al., Secs. 6.3.2, 6.3.5).
-   - A refit takes about 22 s at $N = 400$, so 100 refits take about 40 minutes.
-   - Its coverage near the boundary has not been tested here. The bootstrap is "known to break down when the estimator is biased" (Sec. 6.3.2), and resampling from a boundary estimate inherits its collapsed Kraus components.
+4. **For tight intervals**, use a parametric bootstrap with the same gauge fixing for every bootstrap estimate ([Section 6.4](#64-parametric-bootstrap); Nielsen et al., Secs. 6.3.2, 6.3.5).
+   - About 30 replicates (≈9 minutes at $N = 400$) give each standard error to $\pm13\%$. About 140 replicates give all 1440 matrix elements to $\pm25\%$ simultaneously.
+   - It gets the width right here but under-covers slightly (≈92% at nominal 95%), because of bias. Do not use the bias-corrected ("basic") interval here: near the boundary, the bootstrap's own estimate of the bias is wrong.
+   - Reporting both is informative: the bootstrap interval as the realistic width, the Fisher interval as a conservative outer bound.
 5. **Do not quote the Cramér–Rao reading** ("lower bound on the achievable precision") for our estimator; see Sections 4.6 and 5.5.
 6. **For experiment design, use the spectrum, as Ostrove et al. do.** It is estimator-independent. Plot the distribution of $\lambda_k/m$ and $n_{\rm eff}(\varepsilon)$ versus $N$ and maximum depth, evaluated at a generic point (Section 2.2, action points).
 7. **To make LAN more plausible,** move the weak directions away from the boundary or resolve them better: stronger noise, more shots, or circuits that amplify errors (germ-like repetition). Re-check with script 13 afterwards.
@@ -1116,6 +1180,7 @@ Run the scripts from anywhere; paths are resolved relative to the script. They n
 | [`scripts/11_which_truth_check.py`](scripts/11_which_truth_check.py) | checks which version of the noise generator produced the saved estimates | seconds | 7 |
 | [`scripts/12_gauge_generators_check.py`](scripts/12_gauge_generators_check.py) | builds the 192 infinitesimal gauge generators at the truth: rank 191, tangent, and in the kernel of $J$ | ~20 s | 4.3, §A.6 |
 | [`scripts/13_confidence_interval_coverage.py`](scripts/13_confidence_interval_coverage.py) | coverage of Fisher-based (pyGSTi-style) confidence intervals on the 40 estimates: test probabilities, Pauli transfer matrix elements and infidelities after gauge fixing to the target; perpendicular versus consistent gauge gradient | ~4 min | 6.3 |
+| [`scripts/14_parametric_bootstrap.py`](scripts/14_parametric_bootstrap.py) | parametric bootstrap. `fit <j> <B>`: resample from estimate $j$ and refit with the settings of script 07, saving to `data/bootstrap/` (resumable). `analyse <j> ...`: bootstrap standard errors, bias and intervals versus the actual spread and the Fisher widths; comparison of the gauge fixing with `perform_gauge` | ~17 s per replicate; analysis ~1 min | 6.3, 6.4 |
 
 [`DERIVATIONS.md`](DERIVATIONS.md) holds the step-by-step derivations for Sections 4.3–4.6 and 5.5.
 
@@ -1129,6 +1194,8 @@ python scripts/09_crb_efficiency.py default
 python scripts/09_crb_efficiency.py converged
 python scripts/10_plot_crb_spectra.py
 python scripts/13_confidence_interval_coverage.py > data/13_confidence_interval_coverage_output.txt
+for j in 0 1 2; do python scripts/14_parametric_bootstrap.py fit $j 30; done
+python scripts/14_parametric_bootstrap.py analyse 0 1 2 > data/14_parametric_bootstrap_output.txt
 ```
 
 **Data.**
@@ -1141,6 +1208,8 @@ python scripts/13_confidence_interval_coverage.py > data/13_confidence_interval_
 | `data/crb_spectra_converged.npz` | mean $e_k^2$ for the converged estimates |
 | `data/09_crb_efficiency_output.txt` | printed output of script 09 for both sets (the numbers in Sections 5.5 and 5.6) |
 | `data/13_confidence_interval_coverage_output.txt` | printed output of script 13 (the numbers in Section 6.3) |
+| `data/bootstrap/est{j}_b{b}.npz` | bootstrap replicate $b$ of estimate $j$ ($j = 0, 1, 2$; $b = 0..29$). Keys: `kraus`, `povm`, `state`, `final_cost`, `reason` |
+| `data/14_parametric_bootstrap_output.txt` | printed output of `14_parametric_bootstrap.py analyse 0 1 2` (the numbers in Section 6.4) |
 
 **Reproducibility note: noise generator.** During the session, the noise generator `randKrausSet` was changed from one seed for all gates (all six gates had the *same* noise channel) to `seed + i` (a different channel per gate).
 - Sections **5.1–5.3** (scripts 01–06) were computed **before** the change. Rerunning them now gives a slightly different true gate set. Structural results such as $\operatorname{rank}J_T = \min(3N, 624)$ and the dimension counts are unchanged; numbers such as singular values, Choi spectra of gates 1–5 and the Fisher table will shift somewhat.
@@ -1197,6 +1266,11 @@ Entries marked **(checked)** were compared with the text of the source on 2026-1
 - R. D. Gill, B. Y. Levit, "Applications of the van Trees inequality: a Bayesian Cramér–Rao bound", Bernoulli 1, 59 (1995). Van Trees inequality (Sections 4.6, 5.6).
 - Y. C. Eldar, "Rethinking biased estimation: improving maximum likelihood and the Cramér–Rao bound", Found. Trends Signal Process. 1, 305 (2008). Biased estimators can beat the unbiased bound; bias gradient (Section 4.6).
 - B. Efron, D. V. Hinkley, "Assessing the accuracy of the maximum likelihood estimator: observed versus expected Fisher information", Biometrika 65, 457 (1978). Plug-in Fisher information (Section 4.6).
+
+**Bootstrap and sampling distributions**
+- B. Efron, R. J. Tibshirani, *An Introduction to the Bootstrap*, Chapman & Hall (1993). Parametric bootstrap, standard-error and percentile intervals, number of replicates for standard errors versus percentiles (Section 6.4).
+- A. C. Davison, D. V. Hinkley, *Bootstrap Methods and their Application*, Cambridge University Press (1997), Ch. 5. Basic (reverse-percentile) interval (Section 6.4).
+- G. Casella, R. L. Berger, *Statistical Inference*, 2nd ed., Duxbury (2002), Thm. 5.3.1. $(n-1)S^2/\sigma^2\sim\chi^2_{n-1}$ for Gaussian samples (Section 6.4).
 
 **Quantum tomography**
 - E. Nielsen, J. K. Gamble, K. Rudinger, T. Scholten, K. Young, R. Blume-Kohout, "Gate Set Tomography", Quantum 5, 557 (2021), arXiv:2009.07301. Germ selection at a randomized model (Section 4.3).

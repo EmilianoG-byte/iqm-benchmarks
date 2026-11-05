@@ -1,0 +1,46 @@
+max |superoperator(gauge_fix) - superoperator(perform_gauge)|: truth 2.5e-05, 2.0e-05, 2.5e-05, 2.4e-05 (estimates 0, 1, 2)
+
+=== estimate 0: 30 bootstrap replicates (relative precision of each s: ±13%) ===
+test probabilities (800):
+  median s_boot / actual sd (40 datasets) 0.96   median s_boot / Fisher width 0.37   median |bias| / s_boot 0.21
+  truth inside the 95% interval for this dataset: standard 91%, percentile 91%, basic 79%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 92.3%
+Pauli transfer matrix elements (1440):
+  median s_boot / actual sd (40 datasets) 1.00   median s_boot / Fisher width 0.22   median |bias| / s_boot 0.23
+  truth inside the 95% interval for this dataset: standard 93%, percentile 92%, basic 76%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 91.9%
+infidelities (6):
+  median s_boot / actual sd (40 datasets) 0.91   median s_boot / Fisher width 0.14   median |bias| / s_boot 0.48
+  truth inside the 95% interval for this dataset: standard 100%, percentile 100%, basic 83%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 80.8%
+replicates needed for every s to be within ±25% of its limit with probability 95%: one quantity B ≈ 32, all 1440 matrix elements B ≈ 138
+
+=== estimate 1: 30 bootstrap replicates (relative precision of each s: ±13%) ===
+test probabilities (800):
+  median s_boot / actual sd (40 datasets) 0.99   median s_boot / Fisher width 0.39   median |bias| / s_boot 0.22
+  truth inside the 95% interval for this dataset: standard 96%, percentile 94%, basic 85%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 92.9%
+Pauli transfer matrix elements (1440):
+  median s_boot / actual sd (40 datasets) 1.01   median s_boot / Fisher width 0.23   median |bias| / s_boot 0.25
+  truth inside the 95% interval for this dataset: standard 94%, percentile 93%, basic 82%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 92.5%
+infidelities (6):
+  median s_boot / actual sd (40 datasets) 1.02   median s_boot / Fisher width 0.15   median |bias| / s_boot 0.05
+  truth inside the 95% interval for this dataset: standard 83%, percentile 67%, basic 83%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 87.9%
+replicates needed for every s to be within ±25% of its limit with probability 95%: one quantity B ≈ 32, all 1440 matrix elements B ≈ 138
+
+=== estimate 2: 30 bootstrap replicates (relative precision of each s: ±13%) ===
+test probabilities (800):
+  median s_boot / actual sd (40 datasets) 0.99   median s_boot / Fisher width 0.38   median |bias| / s_boot 0.23
+  truth inside the 95% interval for this dataset: standard 94%, percentile 92%, basic 83%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 93.0%
+Pauli transfer matrix elements (1440):
+  median s_boot / actual sd (40 datasets) 1.02   median s_boot / Fisher width 0.25   median |bias| / s_boot 0.26
+  truth inside the 95% interval for this dataset: standard 95%, percentile 94%, basic 81%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 92.7%
+infidelities (6):
+  median s_boot / actual sd (40 datasets) 1.01   median s_boot / Fisher width 0.14   median |bias| / s_boot 0.44
+  truth inside the 95% interval for this dataset: standard 100%, percentile 67%, basic 100%
+  coverage proxy (width 1.96 s_boot of this dataset applied to all 40 estimates): 85.4%
+replicates needed for every s to be within ±25% of its limit with probability 95%: one quantity B ≈ 32, all 1440 matrix elements B ≈ 138
