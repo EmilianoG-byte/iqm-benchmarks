@@ -12,11 +12,11 @@ COLOUR_PALETTE = [
     "#294C60",
     "#2EC4B6",
     "#E71D36",
+    "#F4D35E",
     "#88D498",
     "#FF8C42",
     "#B9C7DF",
     "#4A4E69",
-    "#F4D35E",
     "#8EC0E4",
 ]
 MARKERS = [
@@ -46,6 +46,7 @@ def default_cost_function_formatting(title:str, ylabel:str = "Cost Value", xlabe
 
 def plot_cost_function(
     cost_array: list[float] | list[list[float]],
+    x_array: list[float] | None = None,
     title: str = "Cost Function Convergence",
     use_semilogy: bool = True,
     labels: list[str] = None,
@@ -76,6 +77,7 @@ def plot_cost_function(
         ]  # Cycle through markers if more curves than markers
         color = COLOUR_PALETTE[i % len(COLOUR_PALETTE)]  # Cycle through colors if more curves than colors
         plot_function(
+            x_array if x_array is not None else jnp.arange(len(cost)),
             cost,
             linewidth=2,
             color=color,
