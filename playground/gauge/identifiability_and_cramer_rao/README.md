@@ -1184,6 +1184,8 @@ Run the scripts from anywhere; paths are resolved relative to the script. They n
 
 [`DERIVATIONS.md`](DERIVATIONS.md) holds the step-by-step derivations for Sections 4.3–4.6 and 5.5.
 
+[`PTM_PRECISION.md`](PTM_PRECISION.md) (2026-11-09) applies Sections 4.5–6 to one use case: error bars of gauge-fixed Pauli transfer matrix elements, how the weakly determined directions enter them, and experiment design over $N$, $m$ and maximum depth (scripts 15, 16 and `scripts/ptm_tools.py`).
+
 **Order to regenerate the Cramér–Rao part:**
 
 ```bash

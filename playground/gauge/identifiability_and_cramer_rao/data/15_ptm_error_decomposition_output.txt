@@ -1,0 +1,71 @@
+rank 624, 1440 non-constant elements, n_eff(0.01) = 135, max |kernel component of d| / |d| = 3.9e-14
+40 estimates; actual rmse over elements: median 1.17e-03, max 5.17e-03; max |error| over all elements and estimates 1.45e-02
+
+1) truncated sums and van Trees versus the actual error
+  first 50 directions          median sigma 3.25e-04  max sigma 1.87e-03  median rmse/sigma  7.49  5%-95% rmse/sigma 1.35-64.12  coverage(95%)  39.9%
+  first 100 directions         median sigma 1.05e-03  max sigma 4.29e-03  median rmse/sigma  1.91  5%-95% rmse/sigma 0.83-14.98  coverage(95%)  58.5%
+  first 135 directions         median sigma 1.13e-03  max sigma 4.53e-03  median rmse/sigma  1.24  5%-95% rmse/sigma 0.82-4.36  coverage(95%)  73.6%
+  first 200 directions         median sigma 1.22e-03  max sigma 4.63e-03  median rmse/sigma  1.01  5%-95% rmse/sigma 0.78-1.72  coverage(95%)  91.3%
+  first 300 directions         median sigma 1.38e-03  max sigma 4.77e-03  median rmse/sigma  0.81  5%-95% rmse/sigma 0.45-1.07  coverage(95%)  97.8%
+  first 400 directions         median sigma 1.76e-03  max sigma 5.02e-03  median rmse/sigma  0.66  5%-95% rmse/sigma 0.22-1.00  coverage(95%)  98.6%
+  first 500 directions         median sigma 2.76e-03  max sigma 5.64e-03  median rmse/sigma  0.49  5%-95% rmse/sigma 0.09-0.83  coverage(95%)  99.6%
+  first 624 directions         median sigma 6.08e-03  max sigma 1.04e-02  median rmse/sigma  0.24  5%-95% rmse/sigma 0.03-0.54  coverage(95%) 100.0%
+  van Trees tau = 1.0          median sigma 5.49e-03  max sigma 9.26e-03  median rmse/sigma  0.26  5%-95% rmse/sigma 0.04-0.57  coverage(95%) 100.0%
+  van Trees tau = 0.1          median sigma 2.52e-03  max sigma 5.40e-03  median rmse/sigma  0.52  5%-95% rmse/sigma 0.11-0.88  coverage(95%)  99.4%
+  van Trees tau = 0.05         median sigma 1.85e-03  max sigma 4.97e-03  median rmse/sigma  0.63  5%-95% rmse/sigma 0.18-0.98  coverage(95%)  98.7%
+  van Trees tau = 0.02         median sigma 1.39e-03  max sigma 4.58e-03  median rmse/sigma  0.77  5%-95% rmse/sigma 0.36-1.07  coverage(95%)  97.9%
+  van Trees tau = 0.01         median sigma 1.18e-03  max sigma 4.14e-03  median rmse/sigma  0.96  5%-95% rmse/sigma 0.65-1.24  coverage(95%)  95.2%
+  share of sigma^2 from k > n_eff(0.01): quartiles [0.848 0.94  1.   ]
+
+2) per Fisher direction (bins as in README 5.5). |Dv| = Frobenius norm of the change of all 1440 elements per unit step along v_k
+  random unit tangent direction (orthogonal to ker F), for scale: median |Dv| over 200 draws 9.73e-01
+  k           1/sqrt(lam)     |Dv_k|  |Dv_k|/sqrt(lam)  share of tr Sigma_R  mean e_k^2
+    1-50         2.04e-03   2.57e+00          5.47e-03                0.024        0.90
+   51-100        3.29e-03   2.43e+00          7.86e-03                0.061        0.91
+  101-135        8.07e-03   2.31e-01          1.83e-03                0.003        0.50
+  136-200        1.35e-02   1.20e-01          1.67e-03                0.003        0.32
+  201-300        2.38e-02   8.35e-02          1.99e-03                0.007        0.16
+  301-400        5.00e-02   6.04e-02          3.02e-03                0.018        0.07
+  401-500        1.33e-01   5.04e-02          6.61e-03                0.094        0.02
+  501-624        3.78e-01   4.28e-02          1.62e-02                0.790        0.01
+
+3) covariance of the Pauli transfer matrices, Sigma_R = D F^+ D^T, and the estimates along its principal directions
+  principal standard deviations of Sigma_R above 1e-02:  131   (Fisher directions with 1/sqrt(lam) above 1e-02: 489)
+  principal standard deviations of Sigma_R above 5e-03:  244   (Fisher directions with 1/sqrt(lam) above 5e-03: 526)
+  principal standard deviations of Sigma_R above 3e-03:  307   (Fisher directions with 1/sqrt(lam) above 3e-03: 560)
+  principal standard deviations of Sigma_R above 1e-03:  453   (Fisher directions with 1/sqrt(lam) above 1e-03: 620)
+  mean (q_j . delta R)^2 / s_j^2 over the estimates (1 = efficient along q_j):
+    j =   1-10   s_j 3.7e-02..3.0e-02   median  0.01
+    j =  11-30   s_j 3.0e-02..2.2e-02   median  0.02
+    j =  31-100  s_j 2.2e-02..1.2e-02   median  0.08
+    j = 101-200  s_j 1.2e-02..6.6e-03   median  0.25
+    j = 201-400  s_j 6.6e-03..1.4e-03   median  0.13
+    j = 401-624  s_j 1.4e-03..1.5e-18   median  0.18
+  E|delta R|_F^2: predicted tr Sigma_R = 5.411e-02, actual mean 4.545e-03
+  simultaneous 95% over 1440 elements (Bonferroni): z = 4.14; predicted max half-width 4.32e-02
+
+4) metric dependence: tangent coordinates z = Q z' with Q = O diag(exp(g)) O^T, g ~ N(0, 1), O random orthogonal
+  max relative change of sigma^2 over elements: 8.7e-12
+  n_eff(0.01): 135 -> 181;  n_eff(0.003): 64 -> 98
+
+5) attribution of the actual errors: delta R_lin = D V diag(lambda)^-1/2 e
+  |delta R - delta R_lin| / |delta R| per estimate: median 0.24
+  k =   1-100 : mean |part|^2 / mean |delta R|^2 = 0.913   predicted share of tr Sigma_R 0.085
+  k = 101-135 : mean |part|^2 / mean |delta R|^2 = 0.017   predicted share of tr Sigma_R 0.003
+  k = 136-400 : mean |part|^2 / mean |delta R|^2 = 0.040   predicted share of tr Sigma_R 0.029
+  k = 401-624 : mean |part|^2 / mean |delta R|^2 = 0.044   predicted share of tr Sigma_R 0.883
+
+6) composition of the Fisher directions (median weight |v_k|^2 per bin) and an a priori van Trees width
+  k           dominant Kraus  small Kraus   SPAM
+    1-50               0.844        0.009  0.139
+   51-100              0.763        0.025  0.172
+  101-135              0.007        0.792  0.200
+  136-200              0.002        0.872  0.127
+  201-300              0.001        0.914  0.085
+  301-400              0.000        0.941  0.059
+  401-500              0.000        0.952  0.048
+  501-624              0.000        0.954  0.046
+  |small Kraus part|^2 = 1.45e-02 (= d x sum over gates of the non-dominant Choi weight); tau0 = 5.4e-03
+  largest single-element change from removing all small Kraus operators of one gate, bound max_g sum_r |K_r|^2 / d = 7.1e-04
+  van Trees tau = 5.4e-03      median sigma 1.01e-03  max sigma 3.42e-03  median rmse/sigma  1.21  5%-95% rmse/sigma 0.92-2.05  coverage(95%)  86.1%
+  van Trees tau = 1.1e-02      median sigma 1.21e-03  max sigma 4.21e-03  median rmse/sigma  0.93  5%-95% rmse/sigma 0.61-1.21  coverage(95%)  95.9%

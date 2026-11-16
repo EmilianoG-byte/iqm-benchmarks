@@ -1,0 +1,17 @@
+truth: smallest outcome probability 1.50e-04; outcomes with expected count m p < 5: 470 of 1600; with m p < 1: 90
+
+[default] 40 estimates. Check: |recomputed cost - saved final_cost| <= 1.2e-10. Outcomes never observed, per dataset: 96.6 of 1600
+  deviance at the truth    : mean  1248.0, standard deviation  49.3   (chi2 with 1200 degrees of freedom: 1200, 49.0)
+  deviance at the estimate : mean  1007.1, standard deviation  43.8   (Wilks, chi2 with 576: 576, 33.9)
+  N_sigma = (deviance - 576) / sqrt(2 * 576): mean 12.7, min 9.5, max 14.9
+  likelihood-ratio statistic: mean   240.9, standard deviation  14.9   (Wilks, chi2 with 624: 624, 35.3)
+  effective number of fitted parameters = mean likelihood-ratio statistic = 241 of 624
+  datasets with the truth inside the Wilks 95% likelihood region (statistic <= 683): 100%
+
+[converged] 20 estimates. Check: |recomputed cost - saved final_cost| <= 1.2e-10. Outcomes never observed, per dataset: 96.5 of 1600
+  deviance at the truth    : mean  1245.3, standard deviation  45.7   (chi2 with 1200 degrees of freedom: 1200, 49.0)
+  deviance at the estimate : mean  1003.2, standard deviation  40.6   (Wilks, chi2 with 576: 576, 33.9)
+  N_sigma = (deviance - 576) / sqrt(2 * 576): mean 12.6, min 9.5, max 14.8
+  likelihood-ratio statistic: mean   242.1, standard deviation  16.5   (Wilks, chi2 with 624: 624, 35.3)
+  effective number of fitted parameters = mean likelihood-ratio statistic = 242 of 624
+  datasets with the truth inside the Wilks 95% likelihood region (statistic <= 683): 100%
