@@ -1,0 +1,7 @@
+saved four-qubit run: 10000 circuits, 500 shots, estimate of shapes [(9, 4, 16, 16), (16, 4, 16), (16, 4)]
+  frequencies sum to 1 per circuit: 2.2e-16; outcomes never observed: 21%
+  expected counts at the estimate: smallest probability 1.2e-05; 46% of the outcomes have m p < 5, 21% have m p < 1
+  deviance 182018; Wilks reference k = 15 N - n_id = 132624; N_sigma = 95.9 (reference not calibrated, VALIDITY Section 5)
+  incoherent weight 1 - mu_1 of the estimated gates: 2.3e-02 2.4e-02 2.1e-02 2.4e-02 2.6e-02 2.7e-02 2.1e-02 2.5e-02 1.2e-02
+  smallest Choi eigenvalue of the estimated gates:   8.6e-04 1.5e-03 2.4e-03 1.6e-03 1.3e-03 9.4e-04 1.2e-03 1.2e-03 2.6e-03
+python 20_matrix_free_check.py saved_run  8.07s user 6.74s system 184% cpu 8.035 total

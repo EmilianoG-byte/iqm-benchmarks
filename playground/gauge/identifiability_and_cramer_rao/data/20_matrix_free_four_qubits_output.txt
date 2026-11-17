@@ -1,0 +1,21 @@
+four qubits, 9 gates, ranks (Kraus, state, POVM) = (4, 4, 4), noise strength 0.05
+  tangent dimension 18047, identifiable parameters 17376, minimum number of circuits 1159
+  incoherent weight 1 - mu_1 per gate: 5.0e-04 4.9e-04 5.3e-04 4.9e-04 5.0e-04 5.5e-04 5.2e-04 5.4e-04 4.9e-04
+  smallest Choi eigenvalue per gate:   1.5e-04 1.5e-04 1.5e-04 1.5e-04 1.6e-04 1.7e-04 1.5e-04 1.7e-04 1.4e-04
+  gauge fixing: cost 6.8987e-01, gradient 2.2e-15 (8 s)
+design: 2000 circuits = 1.73 x minimum, seq_len_list [1, 10, 19], m = 500
+  expected counts (assumption R1): smallest probability 4.0e-05; 53.4% of the outcomes have m p < 5 and 53.4% have m p < 1; the former carry 0.4% of the probability
+  one Fisher product: 1.18 s (compilation 22 s, contraction 'grouped')
+  smallest eigenvalue of the gauge Hessian H_hh (assumption G1): 810.453
+widths at m = 500 (50 Lanczos steps per quantity, about 59 s each). For a rate, 'value / LAN bound' is an upper limit on the rate resolution u = mu / sigma(mu).
+  smallest Choi eigenvalue, CZ-CZ        van Trees(tau=0.01) in [5.260e-05, 5.260e-05], van Trees(tau=0.03) in [1.218e-04, 1.224e-04]; LAN >= 2.573e-04 (kernel share 0.0e+00, 50 steps)  value 1.397e-04, value / LAN bound 0.54
+    (59 s)
+  smallest Choi eigenvalue, Rx on qubit 0 van Trees(tau=0.01) in [5.363e-05, 5.363e-05], van Trees(tau=0.03) in [1.243e-04, 1.251e-04]; LAN >= 2.645e-04 (kernel share 0.0e+00, 50 steps)  value 1.502e-04, value / LAN bound 0.57
+    (59 s)
+  entanglement infidelity, CZ-CZ         van Trees(tau=0.01) in [8.584e-05, 8.584e-05], van Trees(tau=0.03) in [1.636e-04, 1.652e-04]; LAN >= 2.684e-04 (kernel share 0.0e+00, 50 steps)  value 6.223e-04, value / LAN bound 2.32
+    (61 s)
+  random combination of the 65280 elements of CZ-CZ van Trees(tau=0.01) in [3.098e-01, 3.098e-01], van Trees(tau=0.03) in [3.584e-01, 3.595e-01]; LAN >= 3.995e-01 (kernel share 0.0e+00, 50 steps)
+    -> root-mean-square van Trees width of an element of CZ-CZ (one random combination; average several for accuracy): [1.21e-03, 1.21e-03]
+    (59 s)
+total 277 s
+python 20_matrix_free_check.py four_qubits --N 2000 --steps 50  1132.86s user 63.08s system 424% cpu 4:41.81 total

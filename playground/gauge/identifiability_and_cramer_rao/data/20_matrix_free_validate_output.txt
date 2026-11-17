@@ -1,0 +1,43 @@
+two qubits: tangent dimension 815 (dense 815), identifiable 624 (dense rank 624)
+1. building blocks (relative differences)
+  projector P v versus T T^T v: 1.3e-15
+  Fisher product T^T F_1 T z: 4.4e-15
+  grouped contraction in 3 batches: probabilities 1.1e-16, Fisher product 2.0e-16
+  gauge cost (traces) versus Pauli-transfer-matrix cost at a random gauge: 2.5e-14
+  gauge fixing: Pauli transfer matrices versus `ptm_design`: 2.2e-16
+  smallest eigenvalue of the gauge Hessian H_hh (assumption G1): 50.570
+2. widths at m = 1000: Lanczos (matrix-free) versus dense
+  element R[0][1,1]: gradient versus dense 1.2e-14; dense van Trees 3.2566e-04 (tau 0.01), 1.6250e-03 (tau 0.1), LAN 3.9092e-03
+      30 Lanczos steps                   van Trees(tau=0.01) in [3.257e-04, 3.257e-04], van Trees(tau=0.1) in [1.328e-03, 1.991e-03]; LAN >= 1.565e-03 (kernel share 0.0e+00, 30 steps)
+      100 Lanczos steps                  van Trees(tau=0.01) in [3.257e-04, 3.257e-04], van Trees(tau=0.1) in [1.624e-03, 1.626e-03]; LAN >= 3.097e-03 (kernel share 0.0e+00, 100 steps)
+      300 Lanczos steps                  van Trees(tau=0.01) in [3.257e-04, 3.257e-04], van Trees(tau=0.1) in [1.625e-03, 1.625e-03]; LAN >= 3.901e-03 (kernel share 0.0e+00, 300 steps)
+⚠️ Beta <= 1e-6. Possible numerical instability of Lanczos encountered in: 38-iterations ⚠️
+      700 Lanczos steps                  van Trees(tau=0.01) in [3.257e-04, 3.257e-04], van Trees(tau=0.1) in [1.625e-03, 1.625e-03]; LAN >= 3.901e-03 (kernel share 3.2e-10, 627 steps, exact)
+  element R[5][7,9]: gradient versus dense 8.8e-16; dense van Trees 2.0621e-03 (tau 0.01), 2.8156e-03 (tau 0.1), LAN 6.4671e-03
+      30 Lanczos steps                   van Trees(tau=0.01) in [2.062e-03, 2.062e-03], van Trees(tau=0.1) in [2.484e-03, 3.111e-03]; LAN >= 2.557e-03 (kernel share 0.0e+00, 30 steps)
+      100 Lanczos steps                  van Trees(tau=0.01) in [2.062e-03, 2.062e-03], van Trees(tau=0.1) in [2.815e-03, 2.816e-03]; LAN >= 4.975e-03 (kernel share 0.0e+00, 100 steps)
+      300 Lanczos steps                  van Trees(tau=0.01) in [2.062e-03, 2.062e-03], van Trees(tau=0.1) in [2.816e-03, 2.816e-03]; LAN >= 6.467e-03 (kernel share 0.0e+00, 300 steps)
+⚠️ Beta <= 1e-6. Possible numerical instability of Lanczos encountered in: 38-iterations ⚠️
+      700 Lanczos steps                  van Trees(tau=0.01) in [2.062e-03, 2.062e-03], van Trees(tau=0.1) in [2.816e-03, 2.816e-03]; LAN >= 6.467e-03 (kernel share 7.5e-15, 627 steps, exact)
+  element R[5][5,6]: gradient versus dense 1.5e-16; dense van Trees 4.1424e-03 (tau 0.01), 5.3995e-03 (tau 0.1), LAN 1.0438e-02
+      30 Lanczos steps                   van Trees(tau=0.01) in [4.142e-03, 4.142e-03], van Trees(tau=0.1) in [5.028e-03, 5.988e-03]; LAN >= 5.088e-03 (kernel share 0.0e+00, 30 steps)
+      100 Lanczos steps                  van Trees(tau=0.01) in [4.142e-03, 4.142e-03], van Trees(tau=0.1) in [5.399e-03, 5.401e-03]; LAN >= 7.526e-03 (kernel share 0.0e+00, 100 steps)
+      300 Lanczos steps                  van Trees(tau=0.01) in [4.142e-03, 4.142e-03], van Trees(tau=0.1) in [5.400e-03, 5.400e-03]; LAN >= 1.036e-02 (kernel share 0.0e+00, 300 steps)
+⚠️ Beta <= 1e-6. Possible numerical instability of Lanczos encountered in: 38-iterations ⚠️
+      700 Lanczos steps                  van Trees(tau=0.01) in [4.142e-03, 4.142e-03], van Trees(tau=0.1) in [5.400e-03, 5.400e-03]; LAN >= 1.036e-02 (kernel share 1.7e-11, 627 steps, exact)
+3. rate resolution: smallest Choi eigenvalue of each gate
+  gate 0: mu = 1.09e-04; gradient versus dense 3.6e-16; sigma(mu) dense LAN 1.60e-03, Lanczos LAN >= 1.57e-03, van Trees(0.1) in [5.72e-04, 5.72e-04]; u = mu / sigma = 0.07
+  gate 1: mu = 1.03e-04; gradient versus dense 2.3e-16; sigma(mu) dense LAN 1.79e-03, Lanczos LAN >= 1.79e-03, van Trees(0.1) in [5.55e-04, 5.55e-04]; u = mu / sigma = 0.06
+  gate 2: mu = 9.72e-05; gradient versus dense 4.6e-16; sigma(mu) dense LAN 2.13e-03, Lanczos LAN >= 2.13e-03, van Trees(0.1) in [5.66e-04, 5.66e-04]; u = mu / sigma = 0.05
+  gate 3: mu = 9.90e-05; gradient versus dense 4.9e-16; sigma(mu) dense LAN 1.91e-03, Lanczos LAN >= 1.90e-03, van Trees(0.1) in [5.82e-04, 5.82e-04]; u = mu / sigma = 0.05
+  gate 4: mu = 1.25e-04; gradient versus dense 3.3e-16; sigma(mu) dense LAN 1.97e-03, Lanczos LAN >= 1.96e-03, van Trees(0.1) in [5.90e-04, 5.90e-04]; u = mu / sigma = 0.06
+  gate 5: mu = 1.08e-04; gradient versus dense 3.4e-16; sigma(mu) dense LAN 1.67e-03, Lanczos LAN >= 1.67e-03, van Trees(0.1) in [5.31e-04, 5.31e-04]; u = mu / sigma = 0.06
+4. merged-outcome width (outcomes with m p < 5 merged per circuit), element (5, 5, 6)
+  29.4% of the outcomes are rare. van Trees(tau 0.01): all outcomes 4.1424e-03, merged dense 4.2530e-03, merged Lanczos in [4.2530e-03, 4.2530e-03]
+5. direction of a quantity, nonlinearity ratio kappa (m = 1000, tau = 0.01)
+  smallest Choi eigenvalue, gate 0  : conjugate-gradient residual 8.4e-09, sqrt(d . v) = 9.5049e-05, kappa = 1.264 (second derivatives), 1.262 (finite step; displacement of the gate set 2.7e-02)
+  element R[5][5,6]                 : conjugate-gradient residual 6.2e-09, sqrt(d . v) = 4.1424e-03, kappa = 0.055 (second derivatives), 0.055 (finite step; displacement of the gate set 5.2e-03)
+  element R[0][1,1]                 : conjugate-gradient residual 8.3e-09, sqrt(d . v) = 3.2566e-04, kappa = 0.494 (second derivatives), 0.494 (finite step; displacement of the gate set 1.8e-02)
+6. at saved estimates: deviance, and optimizer certificate for a gauge-invariant quantity (probability of outcome 0 of a test circuit)
+  default_0: deviance 939.5 (script 19: 2 (final cost - floor)), N_sigma 10.7; |Riemannian gradient of the log-likelihood| 2.01e+02; shift of a test-circuit probability to the exact maximum -1.14e-04, its van Trees width 3.51e-03
+  converged_0: deviance 938.3 (script 19: 2 (final cost - floor)), N_sigma 10.7; |Riemannian gradient of the log-likelihood| 6.98e-01; shift of a test-circuit probability to the exact maximum -5.35e-07, its van Trees width 3.52e-03

@@ -1,0 +1,34 @@
+INFO:2026-11-17 19:17:55,672:jax._src.xla_bridge:927: Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+2026-11-17 19:17:55,672 - jax._src.xla_bridge - INFO - Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+INFO:2026-11-17 19:17:55,673:jax._src.xla_bridge:927: Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: dlopen(libtpu.so, 0x0001): tried: 'libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OSlibtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache), 'libtpu.so' (no such file), '/usr/local/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache)
+2026-11-17 19:17:55,673 - jax._src.xla_bridge - INFO - Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: dlopen(libtpu.so, 0x0001): tried: 'libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OSlibtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache), 'libtpu.so' (no such file), '/usr/local/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache)
+/Users/emiliano.godinez/.pyenv/versions/qcvv-env/lib/python3.11/site-packages/jax/_src/lax/lax.py:3480: ComplexWarning: Casting complex values to real discards the imaginary part
+  x_bar = _convert_element_type(x_bar, x.aval.dtype, x.aval.weak_type)
+=== noise 0.05 prior: N = 600, tau0 = 5.104e-03, max(1 - mu_1) = 6.28e-04, gauge fixing {'cost': 0.033210037873347184, 'grad': 1.0067850195888406e-08}
+L_max 14 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 5.24e-03 (without near-gauge 5.23e-03), Fisher 43s, total 162s
+L_max 18 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 4.12e-03 (without near-gauge 4.10e-03), Fisher 61s, total 240s
+L_max 23 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 3.43e-03 (without near-gauge 3.43e-03), Fisher 58s, total 176s
+L_max 28 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 3.06e-03 (without near-gauge 3.06e-03), Fisher 50s, total 158s
+L_max 32 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 2.78e-03 (without near-gauge 2.78e-03), Fisher 57s, total 163s
+L_max 40 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 2.42e-03 (without near-gauge 2.42e-03), Fisher 58s, total 175s
+L_max 48 N 600: rank 624, near-gauge directions 1, max sigma_LAN(m=1000) 2.19e-03 (without near-gauge 2.19e-03), Fisher 59s, total 184s
+    1308s
+=== noise 0.3 truth: N = 1000, tau0 = 3.265e-02, max(1 - mu_1) = 2.49e-02, gauge fixing {'cost': 0.9752963729504923, 'grad': 1.5612511283791264e-14}
+L_max 14 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 6.76e-03 (without near-gauge 6.76e-03), Fisher 49s, total 140s
+L_max 18 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.93e-03 (without near-gauge 5.93e-03), Fisher 50s, total 132s
+L_max 23 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.34e-03 (without near-gauge 5.34e-03), Fisher 50s, total 131s
+L_max 28 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.27e-03 (without near-gauge 5.27e-03), Fisher 50s, total 131s
+L_max 32 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.18e-03 (without near-gauge 5.18e-03), Fisher 51s, total 130s
+L_max 40 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.07e-03 (without near-gauge 5.07e-03), Fisher 52s, total 132s
+L_max 48 N 1000: rank 624, near-gauge directions 0, max sigma_LAN(m=1000) 5.16e-03 (without near-gauge 5.16e-03), Fisher 57s, total 142s
+    988s
+=== IQMFakeApollo: N = 1000, tau0 = 1.777e-02, max(1 - mu_1) = 1.56e-02, gauge fixing {'cost': 0.007907317557548315, 'grad': 6.821853776522492e-15}
+L_max 14 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 2.88e+00 (without near-gauge 1.39e-02), Fisher 47s, total 151s
+L_max 18 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 2.15e+00 (without near-gauge 1.04e-02), Fisher 60s, total 158s
+L_max 23 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 1.80e+00 (without near-gauge 8.92e-03), Fisher 51s, total 134s
+L_max 28 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 1.59e+00 (without near-gauge 7.71e-03), Fisher 54s, total 137s
+L_max 32 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 1.45e+00 (without near-gauge 6.93e-03), Fisher 54s, total 136s
+L_max 40 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 1.27e+00 (without near-gauge 6.35e-03), Fisher 56s, total 144s
+L_max 48 N 1000: rank 624, near-gauge directions 9, max sigma_LAN(m=1000) 1.23e+00 (without near-gauge 6.05e-03), Fisher 61s, total 150s
+    1050s
+saved /Users/emiliano.godinez/Documents/phd/iqm-benchmarks/playground/gauge/identifiability_and_cramer_rao/data/depth_check_2q.npz

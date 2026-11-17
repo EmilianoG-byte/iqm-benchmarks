@@ -1184,7 +1184,7 @@ Run the scripts from anywhere; paths are resolved relative to the script. They n
 
 [`DERIVATIONS.md`](DERIVATIONS.md) holds the step-by-step derivations for Sections 4.3–4.6 and 5.5.
 
-[`VALIDITY.md`](VALIDITY.md) (2026-11-16) lists the assumptions behind the Fisher-information analysis (local asymptotic normality, the cancellation of second-order terms, a correct model), proves which hold, and gives the plan for using it for design, for error bars and for four qubits. Its new numerical check is `scripts/19_goodness_of_fit_check.py` (deviance and likelihood-ratio statistic of the saved estimates, about 30 s, output in `data/19_goodness_of_fit_check_output.txt`).
+[`VALIDITY.md`](VALIDITY.md) (2026-11-16) lists the assumptions behind the Fisher-information analysis (local asymptotic normality, the cancellation of second-order terms, a correct model), proves which hold, and gives the plan for using it for design, for error bars and for four qubits. Its new numerical check is `scripts/19_goodness_of_fit_check.py` (deviance and likelihood-ratio statistic of the saved estimates, about 30 s, output in `data/19_goodness_of_fit_check_output.txt`). Its Section 8.1 describes the four-qubit implementation: `scripts/fisher_matrix_free.py` (Fisher widths without building the Jacobian) and `scripts/20_matrix_free_check.py` (validation against `ptm_design.py` at two qubits, and first four-qubit numbers).
 
 [`PTM_PRECISION.md`](PTM_PRECISION.md) (2026-11-09) applies Sections 4.5–6 to one use case: error bars of gauge-fixed Pauli transfer matrix elements, how the weakly determined directions enter them, and experiment design over $N$, $m$ and maximum depth (scripts 15, 16 and `scripts/ptm_tools.py`).
 

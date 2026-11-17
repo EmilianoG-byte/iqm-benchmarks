@@ -484,7 +484,7 @@ The entries are consequences of Sections 4.4 and 4.7. Device numbers are not ass
 **Procedure.**
 
 1. Choose a prior guess that resembles the device: coherent errors, incoherent infidelity per gate, SPAM errors. Repeat the scan for two or three guesses that bracket the incoherent infidelity, because the weak directions depend on it.
-2. For each candidate $(N, m, L_{\max}$, gate set$)$ compute per element $\sigma_f$, $\sigma_f^{\rm vT}(\tau)$ and the estimability check (PTM_PRECISION 2.8).
+2. For each candidate $(N, m, L_{\max}$, gate set $)$ compute per element $\sigma_f$, $\sigma_f^{\rm vT}(\tau)$ and the estimability check (PTM_PRECISION 2.8).
 3. Compute the validity numbers of Section 4.5: $\min_ju_j$, $\kappa(v_f)$ and the rare-outcome share.
 4. Decide:
    - if $u\ge2$, $\kappa\le0.1$ and the rare-outcome share is small: the design is in the asymptotic regime; require $1.96\max_f\sigma_f\le\delta$;
@@ -565,6 +565,79 @@ These counts assume that the generic rank of $J_T$ reaches $n_{\rm id}$ for the 
 3. Expected-count check and validity numbers at a four-qubit prior guess.
 4. One refit test at four qubits, with a truth of the model's own rank and one of higher rank.
 
+### 8.1 Implementation and first four-qubit numbers
+
+[Numerical: 20. Code in [`scripts/fisher_matrix_free.py`](scripts/fisher_matrix_free.py), checks in [`scripts/20_matrix_free_check.py`](scripts/20_matrix_free_check.py), outputs in `data/20_matrix_free_*_output.txt`. No fits were run.]
+
+**The actual four-qubit gate set has 9 gates** (`create_4q_gst_config`: four $R_x(\pi/2)$, four $R_y(\pi/2)$, one CZ–CZ), not the 6 of the table above. With all ranks equal to 4: tangent dimension $18\,047$, $n_{\rm id} = 17\,376$, minimum $N = 1159$. The saved run has $N = 10\,000$, so the whitened Jacobian would have $160\,000\times18\,047$ entries (23 GB). The implementation never builds it.
+
+**How it works** [Derived here].
+
+- *Fisher product.* $F_1v = P\,J^\top\operatorname{diag}(1/p)\,J\,Pv$ on ambient vectors, with $J$ applied by `jax.jvp`, $J^\top$ by `jax.vjp`, and the tangent projector $P$ applied per Stiefel factor (`mGST.riemannian.project_onto_tangent_space`). In a tangent basis $T$ this is $J_T^\top\operatorname{diag}(1/p)J_T$, because $P = TT^\top$.
+- *Widths from one Lanczos run per quantity.* Lanczos on $F_1$ started at $\mathbf d_f$ (`mGST.stochastic_lanczos_quadrature.lanczos_from_vector`) gives nodes $\theta_i$ and weights $w_i$ with $\mathbf d_f^\top g(F_1)\,\mathbf d_f\approx\lVert\mathbf d_f\rVert^2\sum_iw_ig(\theta_i)$ for any function $g$. With $g(x) = 1/(mx + \tau^{-2})$ this is the squared van Trees width for every $m$ and $\tau$ at once; with $g(x) = 1/(mx)$ the squared LAN width.
+- *Error control.* For $g(x) = 1/(mx + \tau^{-2})$ the Gauss rule is a lower bound and the Gauss–Radau rule with a node at 0 an upper bound [Source: Golub & Meurant 2010, Ch. 6; from memory]. The van Trees width is returned as an interval. For the LAN width only the lower bound exists.
+- *Gauge fixing without Pauli transfer matrices.* $\sum_g\lVert R_g - R_g^{\rm target}\rVert_F^2$ equals the same distance between superoperators, and $\langle S, S'\rangle = \sum_{r,s}\lvert\operatorname{tr}(K_r^\dagger K_s')\rvert^2$ for $S = \sum_rK_r\otimes\bar K_r$. The gradient of a gauge-fixed quantity (PTM_PRECISION eq. 2) applies $H_{h\theta}$ as one reverse-mode gradient.
+- *Nonlinearity ratio.* $c''(0)$ along the polar retraction is $v^\top(\nabla^2p)\,v + J\,a$ with $a = -XV^\dagger V$ per factor, the second-order term of $(X + tV)(I + t^2V^\dagger V)^{-1/2}$. Both terms are exact (nested `jax.jvp`). The direction is $v = (mF_1 + \tau^{-2}P)^{-1}\mathbf d_f$ from conjugate gradients, i.e. $F^+\mathbf d_f$ of Section 4.5 regularized by the prior width.
+
+**Validation at two qubits against the dense `ptm_design.py`** (reference design; `validate` mode, about 4 minutes).
+
+| Check | Result |
+|---|---|
+| projector, Fisher product, grouped contraction, gauge cost, gauge-fixed gradients, rate gradients | agree to $10^{-14}$ or better |
+| van Trees width, $\tau = 0.01$ | exact to 4 digits after 30 Lanczos steps |
+| van Trees width, $\tau = 0.1$ | interval contains the dense value; its relative width is 19–50% at 30 steps and about 0.1% at 100 steps |
+| LAN width (lower bound) | 40–49% of the dense value at 30 steps, 72–79% at 100, 99.3–100% at 300 (three elements); 98–100% at 300 for the six rates |
+| merged-outcome width (29% of outcomes rare) | $4.2530\times10^{-3}$ dense and matrix-free, against $4.1424\times10^{-3}$ unmerged |
+| nonlinearity ratio, second derivatives versus finite step | 1.264 / 1.262, 0.055 / 0.055, 0.494 / 0.494 |
+| deviance of estimate 0 | 939.5, inside the range of script 19 |
+| optimizer certificate (Section 4.6) for a test-circuit probability | default tolerance: shift $1.1\times10^{-4}$, i.e. 0.03 widths; converged: $5\times10^{-7}$ |
+
+**Four qubits, simulated truth, $N = 2000$ ($1.7\times$ the minimum), $m = 500$, $L_{\max} = 19$, 50 Lanczos steps** (about 5 minutes per noise level on a laptop; one Fisher product takes 1.2 s).
+
+| | noise strength 0.05 | noise strength 0.3 |
+|---|---|---|
+| incoherent weight $1-\mu_1$ per gate | $5\times10^{-4}$ | $1.8\times10^{-2}$ |
+| outcomes with expected count below 5 / below 1 | 53% / 53% | 14% / 0% |
+| smallest Choi eigenvalue of CZ–CZ: value | $1.4\times10^{-4}$ | $5.0\times10^{-3}$ |
+| its van Trees width, $\tau = 0.01$ / $0.03$ | $5.3\times10^{-5}$ / $1.2\times10^{-4}$ | $3.1\times10^{-4}$ / $7.1\times10^{-4}$ |
+| its LAN width (lower bound) | $\ge2.6\times10^{-4}$ | $\ge1.4\times10^{-3}$ |
+| rate resolution $u$ (upper limit) | $\le0.54$ | $\le3.5$ |
+| entanglement infidelity of CZ–CZ: value | $6.2\times10^{-4}$ | $2.2\times10^{-2}$ |
+| its van Trees width, $\tau = 0.01$ / $0.03$ | $8.6\times10^{-5}$ / $1.6\times10^{-4}$ | $5.2\times10^{-4}$ / $9.6\times10^{-4}$ |
+| root-mean-square van Trees width of a CZ–CZ element, $\tau = 0.01$ (one random combination) | $1.2\times10^{-3}$ | $1.6\times10^{-3}$ |
+
+All van Trees intervals had a relative width of 1% or less.
+
+**The saved four-qubit fit** ($N = 10\,000$, $m = 500$; `saved_run` mode, 8 s; only probabilities are evaluated).
+
+- Estimated incoherent weight per gate: $1.2$–$2.7\times10^{-2}$; smallest Choi eigenvalues $0.9$–$2.6\times10^{-3}$. So noise strength 0.3 is the relevant simulation regime, not 0.05.
+- 46% of the outcomes have an expected count below 5 and 21% were never observed.
+- Deviance $182\,018$ against the Wilks value $k = 15N - n_{\rm id} = 132\,624$, i.e. $N_\sigma = 96$. By Section 5 this number alone does not show a model violation: the reference is uncalibrated, and I did not check whether that fit maximized the likelihood or minimized least squares.
+
+**Reading.**
+
+1. **The matrix-free route reproduces the dense one**, and the van Trees width is cheap: a few tens of Fisher products per quantity.
+2. **The LAN width is not available at this cost.** After 50 steps the lower bound is far from converged (at two qubits it reached 99% only after 300 steps). The rate resolution is therefore only bounded from above. At noise strength 0.05 that is enough to conclude that the rates are unresolved ($u\le0.54$). At noise strength 0.3 the bound $u\le3.5$ decides nothing.
+3. **Rare outcomes are worse than at two qubits**, as predicted: about half of all outcomes at weak noise.
+4. **Not accessible this way:** the largest width over all $391\,680$ elements (only the root mean square, from random combinations), the rank of $F$, and $n_{\rm eff}$.
+
+**Use.**
+
+```python
+import fisher_matrix_free as fmf                      # in scripts/
+fixed, info = fmf.gauge_fix_to_target(kraus, povm, state, target_kraus)
+problem = fmf.fisher_problem(*fixed, indices_list, batch_size=2500, contraction="grouped")
+gauge = fmf.gauge_context(problem, target_kraus)                      # only for gauge-dependent quantities
+d = fmf.quantity_gradient(problem, fmf.entanglement_infidelity(8, target_kraus), gauge)
+quadrature = fmf.lanczos_quadrature(problem, d, num_steps=50)
+lower, upper = fmf.van_trees_sigma(quadrature, m=500, tau=0.01)       # any m and tau, no new products
+sigma_lan_bound, kernel_share = fmf.lan_sigma(quadrature, m=500)
+v, residual = fmf.solve_direction(problem, d, m=500, tau=0.01)
+kappa = fmf.nonlinearity_ratio(problem, v, m=500)["kappa"]
+```
+
+**Cost at the real design.** One Fisher product at $N = 10\,000$ takes about 6 s with the grouped contraction (extrapolated from 1.2 s at $N = 2000$), so 50 Lanczos steps take about 5 minutes per quantity, and 300 steps for a converged LAN bound about half an hour. These runs were not done.
+
 ---
 
 ## 9. Sources
@@ -593,5 +666,9 @@ Sources already listed in README Section 8 are not repeated. Status of the new o
 **Gate set tomography**
 - E. Nielsen et al., "Gate Set Tomography", Quantum 5, 557 (2021), arXiv:2009.07301, Sec. 6.1 "Goodness-of-fit and Markovianity": Wilks' theorem with $k = N_o - N_p^{\rm nongauge}$ and the measure $N_\sigma$. **(checked against the arXiv text as returned by a web search; the section was not read in full)**. Used in Sections 4.7, 5.
 
+**Numerical linear algebra**
+- G. H. Golub, G. Meurant, *Matrices, Moments and Quadrature with Applications*, Princeton University Press (2010), Ch. 6: Gauss and Gauss–Radau quadrature rules from the Lanczos recurrence as lower and upper bounds on $u^\top g(A)u$. From memory; the bracketing was confirmed numerically against the dense two-qubit values (script 20). Used in Section 8.1.
+
 **New files**
+- [`scripts/fisher_matrix_free.py`](scripts/fisher_matrix_free.py) and [`scripts/20_matrix_free_check.py`](scripts/20_matrix_free_check.py): matrix-free Fisher analysis for four qubits and its checks (Section 8.1). Modes `validate` (about 4 minutes), `four_qubits` (about 5 minutes at $N = 2000$ and 50 steps), `saved_run` (seconds).
 - [`scripts/19_goodness_of_fit_check.py`](scripts/19_goodness_of_fit_check.py): deviance and likelihood-ratio statistic of the saved estimates of script 07, and expected counts at the truth. About 30 s, no fitting. Output: [`data/19_goodness_of_fit_check_output.txt`](data/19_goodness_of_fit_check_output.txt).

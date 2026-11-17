@@ -218,6 +218,192 @@ def prior_width(kraus, fd_ref, num_shots_ref=1000, eps=0.01):
     return float(np.sqrt(small2 / (fd_ref["rank"] - n_eff)))
 
 
+# ---------------------------------------------------------------- realistic noise: gate set of a fake backend
+
+def _kraus_list(channel):
+    """Kraus operators (list of matrices) of a qiskit channel or qiskit-aer QuantumError."""
+    from qiskit.quantum_info import Kraus, SuperOp
+    if hasattr(channel, "to_quantumchannel"):
+        channel = channel.to_quantumchannel()
+    return [np.asarray(k) for k in Kraus(SuperOp(channel)).data]
+
+
+def _then(first, second):
+    """Kraus operators of the channel `second` applied after `first`."""
+    return [b @ a for a in first for b in second]
+
+
+def _kron(left, right):
+    return [np.kron(a, b) for a in left for b in right]
+
+
+def fake_backend_gate_set(backend, pair, target_kraus, idle_ns=32.0, spectator_idle=True, excited_population=0.01,
+                          return_full=False):
+    """Gate set of the 2QXYICZ gates on the physical qubits `pair` of a qiskit-iqm fake backend, in the format of the
+    other evaluation points: (kraus (6, 4, 4, 4), povm, state), compressed to Kraus rank 4 (and SPAM rank 4).
+
+    Noise, as `IQMFakeBackend._create_noise_model` builds it from `backend.error_profile`, applied after each gate:
+    - prx (the one-qubit gates Rx, Ry): thermal relaxation over the prx duration, then one-qubit depolarizing;
+    - cz: thermal relaxation of both qubits over the cz duration, then two-qubit depolarizing;
+    - readout: the per-qubit confusion matrix, as a POVM.
+    Two additions that the Aer noise model of the fake backend does not have (switch off for a comparison with Aer):
+    - spectator_idle: thermal relaxation of the idle qubit during a one-qubit gate, and of both qubits during the Idle
+      gate (a delay of idle_ns). Without it the Idle gate is exactly unitary, a singular point of the model;
+    - excited_population: thermal population of |1> in the prepared state of each qubit. Without it the state has
+      rank 1, also a singular point for a model of state rank 4.
+    The ideal gates are the mGST targets (`target_kraus`, shape (6, 1, 4, 4), qubit pair[0] = left tensor factor), so
+    the qubit ordering is the one of mGST. With return_full=True also returns the uncompressed gate set (Kraus rank
+    up to 16) and a table of per-gate numbers.
+    """
+    from qiskit_aer.noise import depolarizing_error, thermal_relaxation_error
+    from mGST.utility_functions_comparisons import get_compressed_rep_from_mgst_output, kraus_tensor_to_mgst
+
+    ep = backend.error_profile
+    names = [backend.index_to_qubit_name(q) for q in pair]
+    t_prx, t_cz = ep.single_qubit_gate_durations["prx"], ep.two_qubit_gate_durations["cz"]
+    relax = lambda q, t: _kraus_list(thermal_relaxation_error(ep.t1s[q], ep.t2s[q], t))
+    ident = [np.eye(2)]
+    rates_cz = ep.two_qubit_gate_depolarizing_error_parameters["cz"]
+    p_cz = rates_cz.get(tuple(names), rates_cz.get(tuple(names[::-1])))
+    if p_cz is None:
+        raise ValueError(f"{names} is not a cz pair of the backend")
+
+    def one_qubit(position):
+        q, other = names[position], names[1 - position]
+        noisy = _then(relax(q, t_prx), _kraus_list(depolarizing_error(ep.single_qubit_gate_depolarizing_error_parameters["prx"][q], 1)))
+        spectator = relax(other, t_prx) if spectator_idle else ident
+        return _kron(noisy, spectator) if position == 0 else _kron(spectator, noisy)
+
+    idle = _kron(relax(names[0], idle_ns), relax(names[1], idle_ns)) if spectator_idle else [np.eye(4)]
+    cz = _then(_kron(relax(names[0], t_cz), relax(names[1], t_cz)), _kraus_list(depolarizing_error(p_cz, 2)))
+    # 2QXYICZ order: Idle, Rx(q0), Rx(q1), Ry(q0), Ry(q1), CZ; noise channel after the ideal gate
+    noise = [idle, one_qubit(0), one_qubit(1), one_qubit(0), one_qubit(1), cz]
+    target = np.asarray(target_kraus)[:, 0]
+    full = [[k @ target[g] for k in noise[g]] for g in range(6)]
+    rank = max(len(f) for f in full)
+    kraus_full = np.zeros((6, rank, 4, 4), dtype=complex)
+    for g, f in enumerate(full):
+        kraus_full[g, :len(f)] = f
+
+    effects = []                                     # outcome index 2 r0 + r1, qubit pair[0] = left factor
+    for q in names:
+        e0, e1 = ep.readout_errors[q]["0"], ep.readout_errors[q]["1"]        # P(read 1 | 0), P(read 0 | 1)
+        effects.append([np.diag([1 - e0, e1]), np.diag([e0, 1 - e1])])
+    povm = np.array([np.kron(effects[0][r0], effects[1][r1]) for r0 in range(2) for r1 in range(2)])
+    rho1 = np.diag([1 - excited_population, excited_population])
+    state = np.kron(rho1, rho1)
+
+    X = kraus_tensor_to_mgst(jnp.asarray(kraus_full))
+    E, rho = jnp.asarray(povm.reshape(4, 16)), jnp.asarray(state.reshape(16))
+    kraus4, povm4, state4 = get_compressed_rep_from_mgst_output(X, E, rho, kraus_rank=4, state_rank=4, povm_rank=4)
+    # Truncating the Kraus rank breaks trace preservation (sum_r K_r^dagger K_r != I by the discarded Choi weight).
+    # Project back onto the model (a Stiefel manifold per gate): the closest isometry to the stacked Kraus operators,
+    # i.e. the polar factor U V^dagger of their singular value decomposition.
+    stacked = np.asarray(kraus4).reshape(6, -1, 4)
+    u, _, vh = np.linalg.svd(stacked, full_matrices=False)
+    kraus4 = (u @ vh).reshape(np.asarray(kraus4).shape)
+    compressed = (jnp.asarray(kraus4), jnp.asarray(povm4), jnp.asarray(state4))
+    if not return_full:
+        return compressed
+    full_set = tuple(jnp.asarray(x) for x in get_compressed_rep_from_mgst_output(X, E, rho, kraus_rank=16, state_rank=4, povm_rank=4))   # Choi rank <= d^2 = 16
+    mu = np.asarray(choi_eigenvalues(full_set[0]))
+    table = pd.DataFrame({"1 - mu_1": 1 - mu[:, 0], "Choi weight beyond rank 4": mu[:, 4:].sum(axis=1),
+                          "mu_2..mu_6": [np.round(m[1:6], 6) for m in mu]})
+    return compressed, full_set, table
+
+
+# ---------------------------------------------------------------- near-gauge directions and depth check
+
+def pauli_representation(theta, shapes):
+    """Gate set as real vectors in the Pauli basis: PTMs R_g (flattened), state r_p = tr(P_p rho) / 2 and effects
+    e_ip = tr(P_p E_i) / 2, so that p_i = e_i . R r for one gate (E_i = A_i^dagger A_i, the mGST psd convention)."""
+    kraus, povm, state = to_ops(theta, shapes)
+    P = jnp.asarray(pauli_basis(_num_qubits(kraus.shape[-1])))
+    norm = np.sqrt(kraus.shape[-1])
+    E = jnp.einsum("irb,irc->ibc", povm.conj(), povm)
+    r = jnp.real(jnp.einsum("pab,ba->p", P, state @ state.conj().T)) / norm
+    e = jnp.real(jnp.einsum("pab,iba->ip", P, E)) / norm
+    return pauli_transfer_matrices(kraus), r, e
+
+
+def gl_gauge_residuals(point, fd, ks):
+    """Relative residual of Fisher eigendirections ks after removing the best-fitting GL gauge direction.
+
+    The probabilities are invariant under the full gauge group of invertible, trace-preserving frame changes M:
+    R_g -> M R_g M^-1, r -> M r, e_i -> M^-T e_i. The Kraus model only has its unitary subgroup as an exact symmetry,
+    but a tangent direction whose effect on (R, r, e) is, to first order, G R_g - R_g G, G r, -G^T e_i for some
+    generator G (first row zero) changes no probability to first order: a near-gauge direction. Residual ~ 0 means
+    the direction is (nearly) such a GL gauge direction; strong directions give residuals ~ 1."""
+    kraus, povm, state = point["operators"]
+    shapes = _shapes(kraus, povm, state)
+    theta = to_vec(kraus, povm, state)
+    R, r, e = (np.asarray(x) for x in pauli_representation(theta, shapes))
+    n = R.shape[-1]
+    cols = []
+    for i in range(1, n):
+        for j in range(n):
+            G = np.zeros((n, n)); G[i, j] = 1
+            cols.append(np.concatenate([(G @ R - R @ G).reshape(-1), G @ r, (-e @ G).reshape(-1)]))
+    L = np.array(cols).T
+    flat = lambda th: jnp.concatenate([x.reshape(-1) for x in pauli_representation(th, shapes)])
+    out = []
+    for k in ks:
+        d = np.asarray(jax.jvp(flat, (theta,), (jnp.asarray(point["T"] @ fd["V"][:, k]),))[1])
+        coef, *_ = np.linalg.lstsq(L, d, rcond=None)
+        out.append(np.linalg.norm(d - L @ coef) / np.linalg.norm(d))
+    return np.array(out)
+
+
+def output_spread(p, lengths):
+    """Per sequence length l: mean total variation distance between the output distributions of the circuits of
+    length l and their mean, s_l. p has shape (num_circuits, num_outcomes). When s_l is comparable to the shot-noise
+    total variation distance (`tvd_noise`), the circuits of that length can no longer be told apart."""
+    ls = np.unique(lengths)
+    return ls, np.array([0.5 * np.abs(p[lengths == l] - p[lengths == l].mean(axis=0)).sum(axis=1).mean() for l in ls])
+
+
+def tvd_noise(p, m):
+    """Expected total variation distance between the frequencies of m shots and p, for large m:
+    0.5 sum_i E|f_i - p_i| = 0.5 sum_i sqrt(2 p_i (1 - p_i) / (pi m)) (mean absolute deviation of a Gaussian)."""
+    return 0.5 * np.sqrt(2 * p * (1 - p) / (np.pi * m)).sum(axis=-1)
+
+
+def depth_check(point, N, L_list, seed, m_grid, tau, n_weak=40, gl_tol=1e-2, verbose=True):
+    """Per L_max (one design seed, one N): the widths of the PTM elements and rates, both with all Fisher directions
+    and without the near-GL-gauge ones (residual < gl_tol among the n_weak weakest), plus the outcome probabilities.
+
+    Dropping the near-gauge directions approximates the widths of GL-gauge-fixed quantities: their components along
+    those directions would be removed by a gauge fixing over the full gauge group (the implicit-function correction of
+    PTM_PRECISION eq. 2 is not applied)."""
+    kraus, povm, state = point["operators"]
+    rows = []
+    for L in L_list:
+        t0 = time.time()
+        indices = generate_sequence_indices(num_gates=kraus.shape[0], num_circuits=N, seq_len_list=seq_len_list(L), seed=seed)["gate_indices"]
+        fd = fisher_decomposition(kraus, povm, state, indices, num_shots=1, basis=point["T"])
+        t_fisher = time.time() - t0
+        ks = np.arange(fd["rank"] - n_weak, fd["rank"])
+        resid = gl_gauge_residuals(point, fd, ks)
+        near = ks[resid < gl_tol]
+        keep = np.setdiff1d(np.arange(fd["rank"]), near)
+        fd_ng = dict(fd, V=fd["V"][:, keep], lam=fd["lam"][keep])
+        row = dict(L=L, N=N, seed=seed, rank=fd["rank"], t_fisher=t_fisher, n_near_gauge=len(near), gl_resid=resid, lam1=fd["lam"],
+                   lengths=np.array([len(s) for s in indices]), p=fd["p"].reshape(len(indices), -1))
+        for tag, f in [("", fd), ("_ng", fd_ng)]:
+            w = element_widths(point["D"], f, m_grid, [tau])
+            row["estimable" + tag] = w["estimable"].mean()
+            row["sigma_lan1" + tag] = w["sigma_lan1"]
+            row["max_vt" + tag] = w["sigma_vt"][0].max(axis=0)
+            row["q95_vt" + tag] = np.quantile(w["sigma_vt"][0], 0.95, axis=0)
+            row["rate_sigma1" + tag] = lan_sigma1(point["D_rate"], f)
+        rows.append(row)
+        if verbose:
+            print(f"L_max {L:2d} N {N}: rank {fd['rank']}, near-gauge directions {len(near)}, max sigma_LAN(m=1000) "
+                  f"{row['sigma_lan1'].max() / np.sqrt(1000):.2e} (without near-gauge {row['sigma_lan1_ng'].max() / np.sqrt(1000):.2e}), "
+                  f"Fisher {t_fisher:.0f}s, total {time.time() - t0:.0f}s", flush=True)
+    return rows
+
+
 # ---------------------------------------------------------------- design scan
 
 def seq_len_list(L_max):

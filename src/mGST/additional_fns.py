@@ -801,9 +801,29 @@ def tvd(X, E, rho, J, y_data):
     return dist
 
 
-def random_seq_design(
-    d, l_min, l_cut, l_max, N_short, N_long, seed=None
-):  # Draws without replacement but ineficiently (not working for sequence length > 24)
+_MAX_INDEXED_SEQUENCES = 2**62  # local_basis is numba-compiled: sequence indices must fit into int64
+
+
+def _sample_sequences(d, l, count):
+    """Draw `count` distinct gate sequences of length `l` uniformly at random, using the global `random` state.
+
+    While d**l < 2**62 the sequences are drawn as distinct integers in range(d**l) and converted to base d, exactly as
+    `random_seq_design` always did, so existing designs are reproduced. Above that, the integer index would overflow
+    int64 in `local_basis`; each sequence is then drawn gate by gate, and duplicates are rejected.
+    """
+    if d**l < _MAX_INDEXED_SEQUENCES:
+        ind_curr = np.array(random.sample(range(d**l), count))
+        return [local_basis(ind, d, l) for ind in ind_curr]
+    seen, sequences = set(), []
+    while len(sequences) < count:
+        sequence = tuple(random.randrange(d) for _ in range(l))
+        if sequence not in seen:
+            seen.add(sequence)
+            sequences.append(np.array(sequence, dtype=np.int32))
+    return sequences
+
+
+def random_seq_design(d, l_min, l_cut, l_max, N_short, N_long, seed=None):
     """Generate a set of random sequences ith given lengths
     This sequence lengths (circuit depths) are chosen for a mix of very short sequences (better convergence) and some
     slightly longer sequences to reduce the generalization error.
@@ -819,7 +839,8 @@ def random_seq_design(
     l_cut : int
         Cutoff sequence lenght: N_short sequences are equally distributed among lengths l_min < l < l_cut
     l_max : int
-        N_long sequences are equally distributed among lengths l_cut + 1 < l < l_max. Currently l_max < 24 only.
+        N_long sequences are equally distributed among lengths l_cut + 1 < l < l_max. Any length is supported: for
+        d**l >= 2**62 the sequences are drawn gate by gate instead of by index (see `_sample_sequences`).
     N_short : int
         Number of short sequences
     N_long : int
@@ -831,11 +852,7 @@ def random_seq_design(
         2D array where each row contains the gate indices of a gate sequence
 
     """
-    # Open problems:
-    # - Change randomness to work with longer sequences;
-    # - Handle case where Number of sequences is smaller than the available lengths
-    if l_max >= 24:
-        raise ValueError("Currently only sequences lenghts < 24 are supported.")
+    # Open problem: handle the case where the number of sequences is smaller than the available lengths
 
     J = np.array([-np.ones(l_max)])
     if seed is not None:
@@ -846,9 +863,8 @@ def random_seq_design(
     for l in range(l_min, l_cut + 1):
         seq_counts.append(int(np.min([np.floor(N_remaining / (l_cut + 1 - l)), d**l])))
         if seq_counts[-1] > 0:
-            ind_curr = np.array(random.sample(range(d**l), seq_counts[-1]))
             J_curr = np.array(
-                [np.pad(local_basis(ind, d, l), (0, l_max - l), "constant", constant_values=-1) for ind in ind_curr]
+                [np.pad(seq, (0, l_max - l), "constant", constant_values=-1) for seq in _sample_sequences(d, l, seq_counts[-1])]
             )
             J = np.concatenate((J, J_curr), axis=0)
             N_remaining = N_short - 1 - np.sum(seq_counts)
@@ -864,9 +880,8 @@ def random_seq_design(
     for l in range(l_cut + 1, l_max + 1):
         seq_counts.append(int(np.min([np.floor(N_remaining / (l_max + 1 - l)), d**l])))
         if seq_counts[-1] > 0:
-            ind_curr = np.array(random.sample(range(d**l), seq_counts[-1]))
             J_curr = np.array(
-                [np.pad(local_basis(ind, d, l), (0, l_max - l), "constant", constant_values=-1) for ind in ind_curr]
+                [np.pad(seq, (0, l_max - l), "constant", constant_values=-1) for seq in _sample_sequences(d, l, seq_counts[-1])]
             )
             J = np.concatenate((J, J_curr), axis=0)
             N_remaining = N_long - np.sum(seq_counts)
