@@ -517,7 +517,13 @@ The notebook therefore adds a fourth number: the rate resolution $\sigma(\mu)/\m
   - $L_{\max} = 23$, $N = 600$, $m\approx2600$ (1.6M);
   - for comparison, $L_{\max} = 14$, $N = 400$ needs $m\approx10700$ (4.3M).
   - All 1440 elements at once: about 4.5× more.
-- **Not yet done:** refits (T3, scripts 17–18, written but not run) and a scan at a prior guess (T4).
+- **Done since (2026-11-17), in [`../ptm_design_pipeline_2q.ipynb`](../ptm_design_pipeline_2q.ipynb):**
+  - **T4:** the prior guess gives $m_{\rm design}$ 0.74–1.01 times the truth's, and the same best design.
+  - **Depth:** the gain stops at $L_{\max}\approx23$–28 at noise 0.3 and continues to 32 at noise 0.05 ([`../depth_check_2q.ipynb`](../depth_check_2q.ipynb)).
+  - **T3** (10 refits per design; scripts 17, 18, 25, 26):
+    - At noise 0.3 ($L_{\max}=28$, $N=600$, $m=2200$, rates resolved), LAN is nearly calibrated: median rmse/σ = 0.81, coverage 97%, $\Lambda\approx0.88\,n_{\rm id}$, $N_\sigma\approx1.2$.
+    - At noise 0.05 ($L_{\max}=32$, $N=400$, $m=150$), van Trees ($2\tau_0$) is calibrated (0.95, 94%).
+    - At the noise-0.3 design the optimizer met no convergence criterion even after 60 outer iterations; see the notebook's conclusions.
 
 ---
 

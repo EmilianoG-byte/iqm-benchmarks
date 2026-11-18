@@ -11,6 +11,7 @@ LAN = local asymptotic normality. All Fisher quantities are computed at m = 1 sh
 proportional to m).
 """
 from functools import lru_cache
+from pathlib import Path
 from itertools import product
 import time
 
@@ -564,6 +565,91 @@ def candidate_designs(rows, meta, delta, z=1.96, rate_threshold=0.5):
     per_design = pd.DataFrame(out)
     cheapest = per_design.loc[per_design.groupby("L_max")["N m design (1e6)"].idxmin()].reset_index(drop=True)
     return per_design, cheapest
+
+
+# ---------------------------------------------------------------- regime-aware decision, cost, incremental scans
+
+def regime(mu_small, num_gates, delta):
+    """"A" if the bias cap 3 max_g (1 - mu_1,g) is below delta / 2, else "B" (VALIDITY 7.1 step 4; the margin 2 is a
+    judgment call). mu_small: the small Choi eigenvalues as stored by `save_scan`, (num_gates * (rank - 1),); for a
+    trace-preserving gate 1 - mu_1 is their sum. Regime A: the unresolved incoherent part cannot spoil delta, design
+    to the van Trees width. Regime B: the rates must be resolved, design to max(LAN, rate)."""
+    cap = 3 * np.asarray(mu_small).reshape(num_gates, -1).sum(axis=1).max()
+    return ("A" if cap < delta / 2 else "B"), float(cap)
+
+
+def design_requirements(rows, meta, delta, z=1.96, regime_label=None, num_gates=6, rate_threshold=0.5, tau_index=0, m_max=None):
+    """Per (L_max, N), medians over design seeds: required shots per circuit for a 95% half-width delta of the worst
+    element under LAN, van Trees (taus[tau_index]) and rate resolution, and m_design by the regime:
+    A: m_vT (LAN is the conservative end); B: max(m_LAN, m_rate). Also the binding constraint, the total shots, the
+    seed spread of m_design and whether m_design <= m_max."""
+    m_grid, mu = np.asarray(meta["m_grid"], dtype=float), np.asarray(meta["mu_small"])
+    label = regime_label or regime(mu, num_gates, delta)[0]
+    out = []
+    for L in sorted({r["L"] for r in rows}):
+        for N in sorted({r["N"] for r in rows}):
+            rs = [r for r in rows if r["L"] == L and r["N"] == N]
+            if not rs:
+                continue
+            m_lan = np.array([(z * r["sigma_lan1"].max() / delta) ** 2 for r in rs])
+            m_vt = np.array([required_shots(z * r["max_vt"][tau_index], m_grid, delta) for r in rs])
+            m_rate = np.array([((r["rate_sigma1"] / mu).max() / rate_threshold) ** 2 for r in rs])
+            m_design = m_vt if label == "A" else np.maximum(m_lan, m_rate)
+            rec = {"L_max": L, "N": N, "seeds": len(rs), "regime": label, "m LAN": np.median(m_lan), "m vT": np.median(m_vt),
+                   "m rate": np.median(m_rate), "m design": np.median(m_design),
+                   "binding": "vT" if label == "A" else ("LAN" if np.median(m_lan) >= np.median(m_rate) else "rates"),
+                   "seed spread": float(m_design.max() / m_design.min()) if len(rs) > 1 else np.nan,
+                   "N m (1e6)": N * np.median(m_design) / 1e6, "estimable %": 100 * float(np.median([r["estimable"] for r in rs]))}
+            rec["feasible"] = True if m_max is None else bool(rec["m design"] <= m_max)
+            out.append(rec)
+    return pd.DataFrame(out)
+
+
+def cost_table(req, r_list=(0.0, 1e2, 1e3, 1e4)):
+    """Cheapest feasible (L_max, N) for the cost N (r + m_design) per circuit-cost ratio r (the cost of one circuit in
+    units of one shot; r = 0 is total shots). req from `design_requirements`."""
+    feasible = req[req["feasible"]]
+    out = []
+    for r in r_list:
+        cost = feasible["N"] * (r + feasible["m design"])
+        i = cost.idxmin()
+        out.append({"circuit cost r (shots)": r, "L_max": feasible.at[i, "L_max"], "N": feasible.at[i, "N"],
+                    "m design": feasible.at[i, "m design"], "cost (1e6 shot-equivalents)": cost[i] / 1e6})
+    return pd.DataFrame(out)
+
+
+def depth_returns(req):
+    """Local exponents d log m_design / d log L_max between neighbouring L_max, per N. -1: doubling L_max halves the
+    shots; -0.3: it saves about 20%; > 0: more depth hurts."""
+    out = {}
+    for N, t in req.groupby("N"):
+        t = t.sort_values("L_max")
+        L, m = t["L_max"].to_numpy(float), t["m design"].to_numpy(float)
+        out[N] = pd.Series(np.diff(np.log(m)) / np.diff(np.log(L)), index=[f"{int(a)}->{int(b)}" for a, b in zip(L[:-1], L[1:])])
+    return pd.DataFrame(out).T.rename_axis("N")
+
+
+def extend_scan(cache_out, point, N_list, L_list, seeds, m_grid, taus, eps, tau0, label, cache_in=None, batch_size=None):
+    """Design scan over N_list x L_list x seeds that reuses the rows of cache_out (if it exists) or cache_in, computes
+    only the missing designs with `design_scan`, and saves everything to cache_out. The reused cache must have the
+    same m_grid and taus."""
+    rows = []
+    for path in [cache_out, cache_in]:
+        if path is not None and Path(path).exists():
+            old, meta = load_scan(path)
+            if not (np.allclose(meta["m_grid"], m_grid) and np.allclose(meta["taus"], taus)):
+                raise ValueError(f"{path}: different m_grid or taus, cannot reuse")
+            rows = [r for r in old if r["N"] in N_list and r["L"] in L_list and r["seed"] in seeds]
+            break
+    done = {(r["L"], r["N"], r["seed"]) for r in rows}
+    for L in L_list:
+        for N in N_list:
+            for seed in seeds:
+                if (L, N, seed) not in done:
+                    rows += design_scan(point, [N], [L], [seed], m_grid, taus, eps, batch_size=batch_size)
+                    save_scan(cache_out, rows, point, m_grid, taus, eps, tau0, label)    # save after every design
+    save_scan(cache_out, rows, point, m_grid, taus, eps, tau0, label)
+    return rows
 
 
 # ---------------------------------------------------------------- plots

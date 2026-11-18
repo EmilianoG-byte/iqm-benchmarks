@@ -1,0 +1,24 @@
+default_s0.05_N400_m150_L32_d12345: 10 estimates, 100% converged; rank 624; tau0 = 5.452e-03; an rmse is known to about +-24%
+actual error: median rmse over elements 1.33e-03, max 6.66e-03; max |error| 1.42e-02
+
+1) Fisher predictions versus the actual errors of the Pauli transfer matrix elements
+  LAN                        max sigma 1.27e-02  predicted 1.96 max sigma 2.48e-02  median rmse/sigma  0.21  5%-95% 0.02-0.59  coverage(95%) 100.0%
+  van Trees tau = 1.090e-02  max sigma 4.90e-03  predicted 1.96 max sigma 9.60e-03  median rmse/sigma  0.95  5%-95% 0.45-1.45  coverage(95%)  94.0%
+  van Trees tau = 5.452e-03  max sigma 3.77e-03  predicted 1.96 max sigma 7.40e-03  median rmse/sigma  1.37  5%-95% 0.79-2.47  coverage(95%)  82.0%
+
+2) the goal, delta = 1e-02
+  (element, dataset) pairs with |error| <= delta: 99.1%   (target: >= 95%)
+  datasets with all 1440 elements within delta: 20.0%
+  worst element: rmse 6.66e-03, 1.96 rmse 1.31e-02
+
+3) small Choi eigenvalues (incoherent rates)
+  predicted sigma(mu)/mu: median 12.96, max 28.55
+  rmse(mu)/sigma_LAN(mu): median 0.07, range 0.04-0.29
+  estimates at the positivity boundary (mu < 1e-6): 45.6% of all (rate, dataset) pairs
+
+4) likelihood (VALIDITY 4.5, 4.7, 5; computed as in script 19)
+  check: |our cost - optimizer final cost| / |final cost|: max 1.2e-16 (the optimizer's cost must be this negative log-likelihood)
+  outcomes with expected count m p < 5: 27%
+  likelihood-ratio statistic Lambda = D(truth) - D(estimate): mean 175 +- 6 (Wilks: 624 +- 11); effective number of fitted parameters 28% of 624
+  deviance at the estimate: mean 1010 (Wilks: 576); N_sigma = (D - k) / sqrt(2 k): mean 12.8
+  deviance at the truth: mean 1185 (Wilks: 1200)

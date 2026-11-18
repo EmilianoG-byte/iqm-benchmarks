@@ -1,0 +1,59 @@
+INFO:2026-11-17 21:05:35,893:jax._src.xla_bridge:927: Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+2026-11-17 21:05:35,893 - jax._src.xla_bridge - INFO - Unable to initialize backend 'rocm': module 'jaxlib.xla_extension' has no attribute 'GpuAllocatorConfig'
+INFO:2026-11-17 21:05:35,895:jax._src.xla_bridge:927: Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: dlopen(libtpu.so, 0x0001): tried: 'libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OSlibtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache), 'libtpu.so' (no such file), '/usr/local/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache)
+2026-11-17 21:05:35,895 - jax._src.xla_bridge - INFO - Unable to initialize backend 'tpu': INTERNAL: Failed to open libtpu.so: dlopen(libtpu.so, 0x0001): tried: 'libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OSlibtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/Users/emiliano.godinez/.pyenv/versions/3.11.10/lib/libtpu.so' (no such file), '/opt/homebrew/lib/libtpu.so' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/opt/homebrew/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache), 'libtpu.so' (no such file), '/usr/local/lib/libtpu.so' (no such file), '/usr/lib/libtpu.so' (no such file, not in dyld cache)
+/Users/emiliano.godinez/.pyenv/versions/qcvv-env/lib/python3.11/site-packages/jax/_src/lax/lax.py:3480: ComplexWarning: Casting complex values to real discards the imaginary part
+  x_bar = _convert_element_type(x_bar, x.aval.dtype, x.aval.weak_type)
+=== noise 0.3 truth: tau0 = 3.2646e-02, N [400, 600, 1000], L_max [14, 18, 23, 28], seeds [0]; reuse ptm_design_scan_noise0.3_truth.npz
+L_max 28 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.16e-02, max sigma(mu)/mu (m=1000) 0.80, 44s
+L_max 28 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 7.56e-03, max sigma(mu)/mu (m=1000) 0.54, 291s
+L_max 28 N 1000 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.27e-03, max sigma(mu)/mu (m=1000) 0.37, 385s
+    saved ptm_design_scan_v2_noise0.3_truth.npz, 769s
+=== noise 0.3 prior: tau0 = 3.0599e-02, N [400, 600, 1000], L_max [14, 18, 23, 28], seeds [0]; reuse nothing
+L_max 14 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.68e-02, max sigma(mu)/mu (m=1000) 1.33, 36s
+L_max 14 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 9.78e-03, max sigma(mu)/mu (m=1000) 0.90, 40s
+L_max 14 N 1000 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 6.49e-03, max sigma(mu)/mu (m=1000) 0.56, 47s
+L_max 18 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.34e-02, max sigma(mu)/mu (m=1000) 1.25, 36s
+L_max 18 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 8.44e-03, max sigma(mu)/mu (m=1000) 0.74, 45s
+L_max 18 N 1000 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.66e-03, max sigma(mu)/mu (m=1000) 0.53, 49s
+L_max 23 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.22e-02, max sigma(mu)/mu (m=1000) 1.07, 38s
+L_max 23 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 7.37e-03, max sigma(mu)/mu (m=1000) 0.72, 41s
+L_max 23 N 1000 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.04e-03, max sigma(mu)/mu (m=1000) 0.49, 50s
+L_max 28 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.15e-02, max sigma(mu)/mu (m=1000) 1.03, 38s
+L_max 28 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 7.26e-03, max sigma(mu)/mu (m=1000) 0.69, 42s
+L_max 28 N 1000 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 4.76e-03, max sigma(mu)/mu (m=1000) 0.45, 63s
+    saved ptm_design_scan_v2_noise0.3_prior.npz, 594s
+=== noise 0.05 prior: tau0 = 5.1039e-03, N [300, 400, 600], L_max [14, 18, 23, 28, 32], seeds [0]; reuse nothing
+L_max 14 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 2.36e-02, max sigma(mu)/mu (m=1000) 58.04, 46s
+L_max 14 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 9.74e-03, max sigma(mu)/mu (m=1000) 23.86, 45s
+L_max 14 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.24e-03, max sigma(mu)/mu (m=1000) 11.81, 48s
+L_max 18 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.44e-02, max sigma(mu)/mu (m=1000) 33.25, 46s
+L_max 18 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 7.78e-03, max sigma(mu)/mu (m=1000) 22.53, 45s
+L_max 18 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 4.12e-03, max sigma(mu)/mu (m=1000) 8.36, 49s
+L_max 23 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.27e-02, max sigma(mu)/mu (m=1000) 31.84, 48s
+L_max 23 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 6.08e-03, max sigma(mu)/mu (m=1000) 15.47, 47s
+L_max 23 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 3.43e-03, max sigma(mu)/mu (m=1000) 7.80, 52s
+L_max 28 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 9.73e-03, max sigma(mu)/mu (m=1000) 24.63, 48s
+L_max 28 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.85e-03, max sigma(mu)/mu (m=1000) 15.06, 46s
+L_max 28 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 3.06e-03, max sigma(mu)/mu (m=1000) 7.35, 51s
+L_max 32 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 8.93e-03, max sigma(mu)/mu (m=1000) 24.47, 48s
+L_max 32 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 4.90e-03, max sigma(mu)/mu (m=1000) 13.21, 45s
+L_max 32 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 2.78e-03, max sigma(mu)/mu (m=1000) 7.18, 44s
+    saved ptm_design_scan_v2_noise0.05_prior.npz, 755s
+=== noise 0.05 truth: tau0 = 5.4517e-03, N [300, 400, 600], L_max [14, 18, 23, 28, 32], seeds [0]; reuse nothing
+L_max 14 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 2.22e-02, max sigma(mu)/mu (m=1000) 45.49, 44s
+L_max 14 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 9.51e-03, max sigma(mu)/mu (m=1000) 19.26, 43s
+L_max 14 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.29e-03, max sigma(mu)/mu (m=1000) 9.93, 46s
+L_max 18 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.60e-02, max sigma(mu)/mu (m=1000) 30.06, 45s
+L_max 18 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 7.62e-03, max sigma(mu)/mu (m=1000) 17.32, 43s
+L_max 18 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 4.10e-03, max sigma(mu)/mu (m=1000) 7.09, 48s
+L_max 23 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.22e-02, max sigma(mu)/mu (m=1000) 24.61, 47s
+L_max 23 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 6.24e-03, max sigma(mu)/mu (m=1000) 13.49, 53s
+L_max 23 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 3.49e-03, max sigma(mu)/mu (m=1000) 6.34, 60s
+L_max 28 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 1.01e-02, max sigma(mu)/mu (m=1000) 22.57, 52s
+L_max 28 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.69e-03, max sigma(mu)/mu (m=1000) 12.55, 47s
+L_max 28 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 2.99e-03, max sigma(mu)/mu (m=1000) 6.38, 51s
+L_max 32 N  300 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 8.65e-03, max sigma(mu)/mu (m=1000) 19.85, 62s
+L_max 32 N  400 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 5.02e-03, max sigma(mu)/mu (m=1000) 11.23, 47s
+L_max 32 N  600 seed 0: rank 624, estimable 100.0%, max sigma_LAN(m=1000) 2.85e-03, max sigma(mu)/mu (m=1000) 5.78, 53s
+    saved ptm_design_scan_v2_noise0.05_truth.npz, 784s

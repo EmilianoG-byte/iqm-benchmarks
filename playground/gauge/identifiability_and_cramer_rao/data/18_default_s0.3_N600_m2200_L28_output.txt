@@ -1,0 +1,36 @@
+default_s0.3_N600_m2200_L28_d12345: 10 estimates, 0% converged; rank 624; tau0 = 3.265e-02; an rmse is known to about +-24%
+actual error: median rmse over elements 2.76e-03, max 9.55e-03; max |error| 1.65e-02
+
+1) Fisher predictions versus the actual errors of the Pauli transfer matrix elements
+  LAN                        max sigma 5.30e-03  predicted 1.96 max sigma 1.04e-02  median rmse/sigma  0.81  5%-95% 0.49-1.30  coverage(95%)  97.2%
+  van Trees tau = 6.529e-02  max sigma 4.51e-03  predicted 1.96 max sigma 8.84e-03  median rmse/sigma  0.89  5%-95% 0.54-1.44  coverage(95%)  95.3%
+  van Trees tau = 3.265e-02  max sigma 3.59e-03  predicted 1.96 max sigma 7.04e-03  median rmse/sigma  1.04  5%-95% 0.63-1.71  coverage(95%)  91.3%
+
+2) the goal, delta = 1e-02
+  (element, dataset) pairs with |error| <= delta: 99.7%   (target: >= 95%)
+  datasets with all 1440 elements within delta: 10.0%
+  worst element: rmse 9.55e-03, 1.96 rmse 1.87e-02
+
+3) small Choi eigenvalues (incoherent rates)
+  predicted sigma(mu)/mu: median 0.16, max 0.37
+  rmse(mu)/sigma_LAN(mu): median 0.80, range 0.42-1.09
+  estimates at the positivity boundary (mu < 1e-6): 0.0% of all (rate, dataset) pairs
+
+4) likelihood (VALIDITY 4.5, 4.7, 5; computed as in script 19)
+  check: |our cost - optimizer final cost| / |final cost|: max 2.9e-16 (the optimizer's cost must be this negative log-likelihood)
+  outcomes with expected count m p < 5: 0%
+  likelihood-ratio statistic Lambda = D(truth) - D(estimate): mean 547 +- 10 (Wilks: 624 +- 11); effective number of fitted parameters 88% of 624
+  deviance at the estimate: mean 1232 (Wilks: 1176); N_sigma = (D - k) / sqrt(2 k): mean 1.2
+  deviance at the truth: mean 1779 (Wilks: 1800)
+
+5) optimizer: default against conv estimates of the same datasets (in LAN widths of each element)
+  dataset 0: max shift 1.890 sigma_LAN, median 0.1565 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 1: max shift 1.976 sigma_LAN, median 0.2217 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 2: max shift 1.423 sigma_LAN, median 0.1638 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 3: max shift 1.815 sigma_LAN, median 0.1747 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 4: max shift 2.584 sigma_LAN, median 0.4731 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 5: max shift 1.573 sigma_LAN, median 0.2686 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 6: max shift 1.269 sigma_LAN, median 0.1783 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 7: max shift 1.648 sigma_LAN, median 0.2076 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 8: max shift 2.370 sigma_LAN, median 0.2503 (VALIDITY 4.6: worst case 1.41 at 1 nat)
+  dataset 9: max shift 1.911 sigma_LAN, median 0.1749 (VALIDITY 4.6: worst case 1.41 at 1 nat)
