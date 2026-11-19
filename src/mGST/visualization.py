@@ -68,6 +68,10 @@ def plot_cost_function(
         labels = [labels] if labels else ["Cost"]
         cost_array = [cost_array]
         
+    if labels is None:
+        print("No labels provided, using default labels.")
+        labels = [f"Run {i+1}" for i in range(len(cost_array))]
+        
     if not len(labels) == len(cost_array):
         raise ValueError("Length of labels must match number of cost arrays.")
 
@@ -81,7 +85,7 @@ def plot_cost_function(
             cost,
             linewidth=2,
             color=color,
-            label=labels[i] if labels else f"Run {i+1}",
+            label=labels[i],
             marker=marker,
         )
 

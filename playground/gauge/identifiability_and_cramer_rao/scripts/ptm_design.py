@@ -618,7 +618,7 @@ def cost_table(req, r_list=(0.0, 1e2, 1e3, 1e4)):
     return pd.DataFrame(out)
 
 
-def depth_returns(req):
+def depth_returns(req: pd.DataFrame) -> pd.DataFrame:
     """Local exponents d log m_design / d log L_max between neighbouring L_max, per N. -1: doubling L_max halves the
     shots; -0.3: it saves about 20%; > 0: more depth hurts."""
     out = {}
